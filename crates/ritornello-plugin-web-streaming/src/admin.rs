@@ -355,11 +355,12 @@ impl AdminPlugin for WebStreamingAdmin {
         let explore = self.shared.explore.lock().unwrap_or_else(|p| p.into_inner()).view();
         let jobs = jobs_for_page(&self.jobs.view().lock().unwrap_or_else(|p| p.into_inner()).jobs);
         let caps = self.tool.capabilities();
-        let hopeless = caps.js_runtime.is_none() && self.env.arch == "arm";
+        let hopeless = caps.js_runtime.is_none() && ritornello_plugin_web_streaming::tool::runtime::own_runtime(&self.env.arch).is_none();
         let mut capabilities = serde_json::to_value(&caps).unwrap_or_default();
         capabilities["checking"] = self.shared.reprobing.load(Ordering::SeqCst).into();
-        // No JavaScript runtime exists for this device today (measured), so
-        // the page must not suggest installing one.
+        // None found, and the plugin installs none of its own on this
+        // machine (deno on x86_64 and aarch64, node 22 on armv7): the page
+        // must not suggest that one is on its way.
         capabilities["js_hopeless"] = hopeless.into();
         let mut data = serde_json::json!({
             "entries": entries,

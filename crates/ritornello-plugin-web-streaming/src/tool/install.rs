@@ -91,6 +91,54 @@ pub fn extract_one(bytes: &[u8], name: &str, max: u64) -> Result<Vec<u8>, String
     Ok(out)
 }
 
+/// Streams the one entry named exactly `entry` of the gzip tar `bytes` into
+/// `dest` (replaced, mode 0755), at most `max` bytes, then syncs it. No other
+/// entry is ever written: they are read past. Refused: no entry of that
+/// exact name (a `./` prefix, a `..` or another directory is another name);
+/// that entry a link, or anything but a regular file. `dest` is removed on
+/// error. The first entry of that name is the one taken.
+pub fn extract_tar_gz_entry(bytes: &[u8], entry: &str, dest: &Path, max: u64) -> Result<(), String> {
+    let unreadable = |e: std::io::Error| format!("not a gzip tar archive: {e}");
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
+    for item in archive.entries().map_err(unreadable)? {
+        let mut item = item.map_err(unreadable)?;
+        if item.path_bytes().as_ref() != entry.as_bytes() {
+            continue;
+        }
+        let kind = item.header().entry_type();
+        if kind.is_symlink() || kind.is_hard_link() {
+            return Err(format!("{entry:?} is a link"));
+        }
+        if kind != tar::EntryType::Regular {
+            return Err(format!("{entry:?} is not a regular file ({kind:?})"));
+        }
+        let written = (|| {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            if dest.symlink_metadata().is_ok() {
+                std::fs::remove_file(dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+            }
+            let mut out = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o755)
+                .open(dest)
+                .map_err(|e| format!("{}: {e}", dest.display()))?;
+            let copied = std::io::copy(&mut (&mut item).take(max + 1), &mut out).map_err(|e| format!("{entry}: {e}"))?;
+            if copied > max {
+                return Err(format!("{entry}: more than {max} bytes"));
+            }
+            out.sync_all().map_err(|e| format!("{}: {e}", dest.display()))?;
+            // The umask may have narrowed the creation mode.
+            std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755)).map_err(|e| format!("{}: {e}", dest.display()))
+        })();
+        if written.is_err() {
+            let _ = std::fs::remove_file(dest);
+        }
+        return written;
+    }
+    Err(format!("{entry:?} is not in the archive"))
+}
+
 fn exists(p: &Path) -> bool {
     p.symlink_metadata().is_ok()
 }
@@ -183,6 +231,23 @@ mod tests {
         walk(dir, dir, &mut out);
         out.sort();
         out
+    }
+
+    #[test]
+    fn a_tar_entry_larger_than_allowed_is_refused_and_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("node.new");
+        let tarball = tar_gz(&[("d/bin/node", TarItem::File("0123456789"))]);
+        let err = extract_tar_gz_entry(&tarball, "d/bin/node", &dest, 9).unwrap_err();
+        assert!(err.ends_with("more than 9 bytes"), "{err}");
+        assert!(!dest.exists());
+        // Exactly at the cap, it is taken, executable.
+        extract_tar_gz_entry(&tarball, "d/bin/node", &dest, 10).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777, 0o755);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"0123456789");
+        // Not a gzip tar at all.
+        assert!(extract_tar_gz_entry(b"garbage", "d/bin/node", &dest, 10).unwrap_err().starts_with("not a gzip tar"));
     }
 
     #[test]

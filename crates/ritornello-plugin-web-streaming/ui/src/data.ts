@@ -107,6 +107,15 @@ export interface Capabilities {
   checking: boolean
   /** No runtime exists for this device today: none could help. */
   js_hopeless: boolean
+  /** The runtime is the plugin's own node 22, past its end of life: kept as it is. */
+  js_runtime_unmaintained: boolean
+}
+
+/** How each runtime is usually written; the wire carries yt-dlp's names. */
+export const RUNTIME_NAMES: Record<string, string> = { deno: 'Deno', node: 'Node.js', quickjs: 'QuickJS' }
+
+export function runtimeName(name: string): string {
+  return RUNTIME_NAMES[name] ?? name
 }
 
 /** The last playback that failed, as the wrapper recorded it for mpv's runs. */
@@ -148,6 +157,7 @@ export function emptyData(): Data {
     },
     capabilities: {
       python3: null, js_runtime: null, js_runtime_slow: false, apt_hint: null, checking: false, js_hopeless: false,
+      js_runtime_unmaintained: false,
     },
     last_failure: null,
   }
@@ -293,23 +303,34 @@ export function updateErrorText(t: T, fault: UpdateFault): string {
   }
 }
 
-/** Why the plugin's own JavaScript runtime (deno) could not be installed. */
+/**
+ * Why the plugin's own JavaScript runtime (deno, or node on armv7) could not
+ * be installed or updated. `runtime` is its wire name, shown as usually
+ * written.
+ */
 export function runtimeErrorText(t: T, fault: UpdateFault): string {
   const p = fault.params ?? {}
   const detail = p.detail ?? ''
+  const runtime = runtimeName(p.runtime ?? '')
   switch (fault.code) {
     case 'no_build':
-      return t('runtime_no_build', { arch: p.arch ?? '' })
+      return t('runtime_no_build', { runtime, arch: p.arch ?? '' })
     case 'fetch':
       return t('runtime_fetch', { detail })
+    case 'bad_signature':
+      return t('runtime_bad_signature', { runtime, detail })
     case 'not_listed':
       return t('runtime_not_listed')
+    case 'unexpected':
+      return t('runtime_unexpected', { detail })
     case 'mismatch':
       return t('runtime_mismatch')
     case 'extract':
       return t('runtime_extract', { detail })
+    case 'version':
+      return t('runtime_version', { runtime, detail })
     case 'write':
-      return t('runtime_write', { detail })
+      return t('runtime_write', { runtime, detail })
     default:
       return fault.code
   }

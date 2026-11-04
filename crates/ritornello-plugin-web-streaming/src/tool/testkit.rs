@@ -48,6 +48,45 @@ pub fn other_key() -> &'static SignedSecretKey {
     KEY.get_or_init(|| generate(2, "Someone else <else@invalid>"))
 }
 
+/// A key whose documents are signed by a subkey, as some Node.js releasers
+/// sign: the first subkey may sign, the second may not (it only
+/// authenticates).
+pub fn subkey_signer() -> &'static SignedSecretKey {
+    static KEY: OnceLock<SignedSecretKey> = OnceLock::new();
+    KEY.get_or_init(|| {
+        let sub = |can_sign: bool| {
+            pgp::composed::SubkeyParamsBuilder::default()
+                .key_type(KeyType::Ed25519Legacy)
+                .can_sign(can_sign)
+                .can_authenticate(!can_sign)
+                .build()
+                .unwrap()
+        };
+        let params = SecretKeyParamsBuilder::default()
+            .key_type(KeyType::Ed25519Legacy)
+            .can_certify(true)
+            .can_sign(true)
+            .primary_user_id("Subkey signer <sub@invalid>".into())
+            .subkeys(vec![sub(true), sub(false)])
+            .build()
+            .unwrap();
+        params.generate(rand::rngs::StdRng::seed_from_u64(5)).unwrap()
+    })
+}
+
+/// A detached signature of `data` by the `n`th subkey of `key`.
+pub fn sign_by_subkey(key: &SignedSecretKey, n: usize, data: &[u8]) -> Vec<u8> {
+    let sig = DetachedSignature::sign_binary_data(
+        rand::rngs::StdRng::seed_from_u64(3),
+        &key.secret_subkeys[n].key,
+        &Password::empty(),
+        HashAlgorithm::Sha512,
+        data,
+    )
+    .unwrap();
+    sig.to_bytes().unwrap()
+}
+
 pub fn public(key: &SignedSecretKey) -> SignedPublicKey {
     key.to_public_key()
 }
@@ -125,6 +164,46 @@ pub fn fake_zipapp(version: &str) -> Vec<u8> {
     let files = fake_package(version);
     let refs: Vec<(&str, &str)> = files.iter().map(|(n, t)| (*n, t.as_str())).collect();
     zipapp(&refs)
+}
+
+/// An entry of a test tarball.
+pub enum TarItem<'a> {
+    File(&'a str),
+    Symlink(&'a str),
+    HardLink(&'a str),
+    Dir,
+}
+
+/// A gzip tar of `items`, each under its name written as is in the header
+/// (the `tar` crate's own path setters refuse `..`, which a test needs).
+pub fn tar_gz(items: &[(&str, TarItem)]) -> Vec<u8> {
+    let mut b = tar::Builder::new(flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast()));
+    for (name, item) in items {
+        let mut h = tar::Header::new_gnu();
+        let raw = name.as_bytes();
+        h.as_old_mut().name[..raw.len()].copy_from_slice(raw);
+        h.set_mode(0o755);
+        let body: &[u8] = match item {
+            TarItem::File(text) => {
+                h.set_entry_type(tar::EntryType::Regular);
+                text.as_bytes()
+            }
+            TarItem::Symlink(target) | TarItem::HardLink(target) => {
+                let kind = if matches!(item, TarItem::Symlink(_)) { tar::EntryType::Symlink } else { tar::EntryType::Link };
+                h.set_entry_type(kind);
+                h.set_link_name(target).unwrap();
+                b""
+            }
+            TarItem::Dir => {
+                h.set_entry_type(tar::EntryType::Directory);
+                b""
+            }
+        };
+        h.set_size(body.len() as u64);
+        h.set_cksum();
+        b.append(&h, body).unwrap();
+    }
+    b.into_inner().unwrap().finish().unwrap()
 }
 
 /// Serves fixed answers per URL and remembers what was asked.

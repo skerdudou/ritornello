@@ -80,13 +80,17 @@ update_install_extract_limit = "l’archive dépasse les limites permises"
 update_install_extract_unsafe = "l’archive contient une entrée dangereuse"
 update_install_write = "le script d’appel n’a pas pu être écrit : {detail}"
 
-# why deno, the JavaScript runtime the plugin installs itself, could not be
-runtime_no_build = "deno ne publie pas de version pour cet appareil ({arch})"
+# why the JavaScript runtime the plugin installs itself (deno, or node
+# on armv7) could not be installed or updated; {runtime} is its name
+runtime_no_build = "{runtime} ne publie pas de version pour cet appareil ({arch})"
 runtime_fetch = "le téléchargement a échoué : {detail}"
+runtime_bad_signature = "les sommes publiées ne sont signées par aucune clé de publication connue de {runtime} : {detail}"
 runtime_not_listed = "le téléchargement ne figure pas dans les sommes publiées"
+runtime_unexpected = "les sommes publiées ne sont pas celles attendues : {detail}"
 runtime_mismatch = "le téléchargement ne correspond pas à sa somme publiée"
 runtime_extract = "le téléchargement n’a pas pu être décompressé : {detail}"
-runtime_write = "deno n’a pas pu être écrit : {detail}"
+runtime_version = "le {runtime} téléchargé ne donne pas la version attendue : {detail}"
+runtime_write = "{runtime} n’a pas pu être écrit : {detail}"
 
 # admin page
 title = "Streaming web"
@@ -174,5 +178,6 @@ js_found = "Environnement JavaScript, utilisé seulement si une vidéo échoue s
 js_slow = "Il est lent : environ deux minutes pour une telle vidéo."
 js_none = "Aucun environnement JavaScript trouvé : certaines vidéos pourraient ne pas se lire."
 js_hopeless = "Aucun environnement JavaScript n’existe aujourd’hui pour cet appareil : il n’y a rien à installer qui aiderait."
+js_unmaintained = "Node.js 22 n’est plus maintenu par ses auteurs : le greffon garde sa dernière version telle quelle."
 btn_recheck = "Revérifier"
 checking = "Vérification…"

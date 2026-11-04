@@ -60,12 +60,23 @@ describe('updateErrorText', () => {
 
 describe('runtimeErrorText', () => {
   it('has a sentence for every code the plugin sends', () => {
-    // The codes of `DenoError::fault` in tool/runtime.rs.
-    for (const code of ['no_build', 'fetch', 'not_listed', 'mismatch', 'extract', 'write']) {
-      const text = runtimeErrorText(t, { code, params: { detail: 'D', arch: 'arm' } })
+    // The codes of `RuntimeError::fault` in tool/runtime.rs.
+    for (const code of [
+      'no_build', 'fetch', 'bad_signature', 'not_listed', 'unexpected', 'mismatch', 'extract', 'version', 'write',
+    ]) {
+      const text = runtimeErrorText(t, { code, params: { runtime: 'node', detail: 'D', arch: 'arm' } })
       expect(text, code).not.toBe(code)
       expect(text, code).not.toMatch(/\{\w+\}/)
     }
+  })
+
+  it('names the runtime as it is usually written', () => {
+    expect(runtimeErrorText(t, { code: 'write', params: { runtime: 'node', detail: 'disk full' } }))
+      .toBe('Node.js could not be written: disk full')
+    expect(runtimeErrorText(t, { code: 'no_build', params: { runtime: 'deno', arch: 'riscv64' } }))
+      .toBe('Deno publishes no build for this device (riscv64)')
+    expect(runtimeErrorText(t, { code: 'version', params: { runtime: 'node', detail: 'v23.0.0 instead of v22.6.0' } }))
+      .toBe('the downloaded Node.js does not answer the expected version: v23.0.0 instead of v22.6.0')
   })
 })
 

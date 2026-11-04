@@ -43,6 +43,11 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 pgp = { version = "0.21", default-features = false }
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 sha2 = "0.10"
+# On armv7 the plugin installs its own node 22, published only as a tar.gz
+# (or .tar.xz): one entry is read out of the gzip tar, in Rust. The same
+# crates and features as the core's and the installer's.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+tar = "0.4"
 
 [dev-dependencies]
 tempfile = "3"

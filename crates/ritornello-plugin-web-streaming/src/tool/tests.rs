@@ -37,6 +37,12 @@ fn world() -> World {
 }
 
 fn world_with(search: Vec<PathBuf>, search_guard: tempfile::TempDir) -> World {
+    // A machine the plugin installs no runtime of its own for: no deno or
+    // node download in these tests unless one asks for it.
+    world_on("riscv64", search, search_guard)
+}
+
+fn world_on(arch: &str, search: Vec<PathBuf>, search_guard: tempfile::TempDir) -> World {
     let data = tempfile::tempdir().unwrap();
     let fetch = Arc::new(FakeFetch::default());
     let clock = Arc::new(AtomicU64::new(T0));
@@ -46,11 +52,10 @@ fn world_with(search: Vec<PathBuf>, search_guard: tempfile::TempDir) -> World {
         fetch: fetch.clone(),
         now: Arc::new(move || c.load(Ordering::SeqCst)),
         search,
-        // A machine deno publishes nothing for: no deno download in these
-        // tests unless one asks for it.
-        arch: "arm".into(),
+        arch: arch.into(),
         gate: gate.clone(),
         key: public(test_key()),
+        node_keys: vec![public(test_key())],
     };
     let tool = Tool::with_deps(data.path(), deps);
     World { data, _search: search_guard, fetch, clock, gate, tool }
@@ -499,10 +504,10 @@ fn the_install_failures_the_plugin_writes_each_have_their_own_code() {
 
 /// Every code the page can receive is a key of the English catalogue (and so,
 /// by the parity test, of the four languages): `update_<code>` for an update,
-/// `runtime_<code>` for deno.
+/// `runtime_<code>` for the plugin's own runtime (deno or node).
 #[test]
 fn every_code_of_an_update_or_a_runtime_failure_has_a_key() {
-    use super::runtime::DenoError;
+    use super::runtime::{JsRuntime, RuntimeCause, RuntimeError};
     use super::verify::VerifyError;
     let en = ritornello_i18n::try_parse(crate::WEB_STREAMING_EN).unwrap();
     let update_errors = vec![
@@ -531,17 +536,24 @@ fn every_code_of_an_update_or_a_runtime_failure_has_a_key() {
         let code = e.fault().code;
         assert!(en.contains_key(&format!("update_{code}")), "update_{code} for {e:?}");
     }
-    let runtime_errors = [
-        DenoError::NoBuild("arm".into()),
-        DenoError::Fetch("x".into()),
-        DenoError::NotListed,
-        DenoError::Mismatch,
-        DenoError::Extract("x".into()),
-        DenoError::Write("x".into()),
+    let causes = [
+        RuntimeCause::NoBuild("arm".into()),
+        RuntimeCause::Fetch("x".into()),
+        RuntimeCause::BadSignature("x".into()),
+        RuntimeCause::NotListed,
+        RuntimeCause::Unexpected("x".into()),
+        RuntimeCause::Mismatch,
+        RuntimeCause::Extract("x".into()),
+        RuntimeCause::Version("x".into()),
+        RuntimeCause::Write("x".into()),
     ];
-    for e in runtime_errors {
-        let code = e.fault().code;
-        assert!(en.contains_key(&format!("runtime_{code}")), "runtime_{code} for {e:?}");
+    for runtime in [JsRuntime::Deno, JsRuntime::Node] {
+        for cause in causes.clone() {
+            let e = RuntimeError { runtime, cause };
+            let f = e.fault();
+            assert!(en.contains_key(&format!("runtime_{}", f.code)), "runtime_{} for {e:?}", f.code);
+            assert_eq!(f.params["runtime"], runtime.name(), "{e:?}");
+        }
     }
     assert_eq!(UpdateError::Rollback("something else".into()).fault().code, "rollback_other");
 }
@@ -831,6 +843,7 @@ async fn an_interrupted_swap_is_rolled_back_when_the_tool_starts() {
             arch: "arm".into(),
             gate: ToolGate::default(),
             key: public(test_key()),
+            node_keys: vec![public(test_key())],
         },
     );
     assert!(again.status().installed);
@@ -855,13 +868,128 @@ async fn the_wrapper_follows_the_runtime_the_machine_offers() {
 
 #[tokio::test]
 async fn deno_is_fetched_only_on_machines_it_publishes_builds_for() {
-    // arm (the device): yt-dlp installs, deno is never asked for.
+    // A machine with no runtime of the plugin's: yt-dlp installs, neither
+    // runtime is asked for, and none missing is a failure.
     let w = world();
     installed_v1(&w).await;
     publish(&w.fetch, Channel::Stable, &fake_zipapp("2026.02.02"));
     w.tool.update(true).await.unwrap();
+    assert!(w.fetch.asked().iter().all(|u| !u.contains("deno") && !u.contains("nodejs")), "{:?}", w.fetch.asked());
+    assert_eq!(w.tool.status().runtime_error, None, "no runtime is no failure where none exists");
+    // armv7 (the device): node is, deno never.
+    let (guard, search) = python_only_path();
+    let w = world_on("arm", vec![search], guard);
+    installed_v1(&w).await;
     assert!(w.fetch.asked().iter().all(|u| !u.contains("deno")), "{:?}", w.fetch.asked());
-    assert_eq!(w.tool.status().runtime_error, None, "no deno is no failure where none exists");
+}
+
+// ---- the plugin's own node, on armv7 ----------------------------------------
+
+fn node_url(name: &str) -> String {
+    format!("{}{name}", runtime::NODE_BASE)
+}
+
+/// Serves `latest-v22.x` as `version`, signed by the test key, its armv7l
+/// tarball's binary answering `version`.
+fn publish_node(fetch: &FakeFetch, version: &str) {
+    let dir = format!("node-v{version}-linux-armv7l/");
+    let entry = format!("{dir}bin/node");
+    let script = format!("#!/bin/sh\necho v{version}\n");
+    let tarball = tar_gz(&[(&dir, TarItem::Dir), (&entry, TarItem::File(&script))]);
+    let asset = format!("node-v{version}-linux-armv7l.tar.gz");
+    let sums = sums_for(&[(&asset, &tarball)]);
+    fetch.serve(&node_url(runtime::NODE_SIG), Ok(sign(&sums)));
+    fetch.serve(&node_url(runtime::NODE_SUMS), Ok(sums));
+    fetch.serve(&node_url(&asset), Ok(tarball));
+}
+
+fn node_world() -> World {
+    let (guard, search) = python_only_path();
+    world_on("arm", vec![search], guard)
+}
+
+fn tarball_asked(w: &World) -> bool {
+    w.fetch.asked().iter().any(|u| u.ends_with("-linux-armv7l.tar.gz"))
+}
+
+#[tokio::test]
+async fn on_armv7_node_is_installed_after_yt_dlp_and_is_the_wrappers_runtime() {
+    let w = node_world();
+    publish_node(&w.fetch, "22.5.1");
+    installed_v1(&w).await;
+    let caps = w.tool.capabilities();
+    assert_eq!((caps.js_runtime, caps.own_node), (Some(runtime::JsRuntime::Node), true));
+    let text = std::fs::read_to_string(w.data.path().join("bin/yt-dlp")).unwrap();
+    let own = runtime::own_node(w.data.path());
+    assert!(text.contains(&format!("RUNTIME = \"node:{}\"", own.display())), "{text}");
+    assert_eq!(w.tool.status().runtime_error, None);
+}
+
+#[tokio::test]
+async fn the_own_node_is_updated_only_when_the_signed_list_names_another_version() {
+    let w = node_world();
+    publish_node(&w.fetch, "22.5.1");
+    installed_v1(&w).await;
+    // The same version listed: the list is read, the tarball is not.
+    w.tool.update(true).await.unwrap();
+    assert!(w.fetch.asked().contains(&node_url(runtime::NODE_SUMS)), "{:?}", w.fetch.asked());
+    assert!(!tarball_asked(&w), "{:?}", w.fetch.asked());
+    // A newer one: fetched, and in place.
+    w.fetch.forget();
+    publish_node(&w.fetch, "22.6.0");
+    w.tool.update(true).await.unwrap();
+    assert!(tarball_asked(&w), "{:?}", w.fetch.asked());
+    assert_eq!(runtime::own_node_version(w.data.path()).await.as_deref(), Some("22.6.0"));
+}
+
+#[tokio::test]
+async fn a_node_failure_keeps_the_node_in_place_and_is_no_yt_dlp_failure() {
+    let w = node_world();
+    publish_node(&w.fetch, "22.5.1");
+    installed_v1(&w).await;
+    // nodejs.org unreachable, then a list signed by another key: refused,
+    // reported, retried only a day later, and the node in place serves on.
+    for broken in [Err("connection refused".to_string()), Ok(b"not a signature".to_vec())] {
+        w.fetch.serve(&node_url(runtime::NODE_SIG), broken);
+        w.clock.fetch_add(DAY, Ordering::SeqCst);
+        w.fetch.forget();
+        assert!(matches!(w.tool.update(true).await, Ok(Update::Current(_))));
+        let st = w.tool.status();
+        assert!(st.error.is_none() && st.runtime_error.is_some(), "{st:?}");
+        assert_eq!(st.runtime_error_code.unwrap().params["runtime"], "node");
+        assert_eq!(runtime::own_node_version(w.data.path()).await.as_deref(), Some("22.5.1"));
+        assert_eq!(w.tool.capabilities().runtime_arg, Some(format!("node:{}", runtime::own_node(w.data.path()).display())));
+        // Not again within the day.
+        w.fetch.forget();
+        w.tool.update(true).await.unwrap();
+        assert!(!w.fetch.asked().contains(&node_url(runtime::NODE_SUMS)), "{:?}", w.fetch.asked());
+    }
+    // A day later, a good list again: the failure is cleared.
+    publish_node(&w.fetch, "22.5.1");
+    w.clock.fetch_add(DAY, Ordering::SeqCst);
+    w.tool.update(true).await.unwrap();
+    assert_eq!(w.tool.status().runtime_error, None);
+}
+
+#[tokio::test]
+async fn the_own_node_is_said_unmaintained_past_its_end_of_life_and_kept() {
+    let w = node_world();
+    publish_node(&w.fetch, "22.5.1");
+    installed_v1(&w).await;
+    assert!(!w.tool.capabilities().js_runtime_unmaintained, "before 2027-05-01");
+    w.clock.store(runtime::NODE22_END_OF_LIFE, Ordering::SeqCst);
+    let caps = w.tool.capabilities();
+    assert!(caps.js_runtime_unmaintained);
+    assert_eq!(caps.js_runtime, Some(runtime::JsRuntime::Node), "kept, and still the runtime");
+    let page = serde_json::to_value(&caps).unwrap();
+    assert_eq!(page["js_runtime_unmaintained"], true);
+    // A system node is never said unmaintained by the plugin.
+    let (guard, search) = python_only_path();
+    write_script(&search, "node", "echo v22.3.0");
+    let w = world_on("arm", vec![search], guard);
+    w.clock.store(runtime::NODE22_END_OF_LIFE + DAY, Ordering::SeqCst);
+    let caps = w.tool.reprobe().await;
+    assert_eq!((caps.js_runtime, caps.js_runtime_unmaintained), (Some(runtime::JsRuntime::Node), false));
 }
 
 #[tokio::test]
@@ -878,6 +1006,7 @@ async fn a_deno_failure_is_reported_but_yt_dlp_is_installed() {
         arch: "x86_64".into(),
         gate: ToolGate::default(),
         key: public(test_key()),
+        node_keys: vec![public(test_key())],
     };
     let tool = Tool::with_deps(data.path(), deps);
     publish(&fetch, Channel::Stable, &fake_zipapp("2026.01.01"));
@@ -951,6 +1080,7 @@ async fn manual_install_of_the_real_release() {
         arch: std::env::consts::ARCH.into(),
         gate: ToolGate::default(),
         key: verify::ytdlp_key().unwrap(),
+        node_keys: verify::node_keys().unwrap(),
     };
     let tool = Tool::with_deps(&data, deps);
     let started = std::time::Instant::now();

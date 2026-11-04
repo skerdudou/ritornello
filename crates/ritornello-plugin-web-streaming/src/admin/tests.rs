@@ -96,6 +96,10 @@ async fn world(tool_body: &str) -> World {
 }
 
 async fn world_with(tool_body: &str, targets_max_age: Duration) -> World {
+    world_on(tool_body, targets_max_age, "arm").await
+}
+
+async fn world_on(tool_body: &str, targets_max_age: Duration, arch: &str) -> World {
     let tmp = tempfile::tempdir().unwrap();
     let data = tmp.path().join("web-streaming");
     std::fs::create_dir_all(&data).unwrap();
@@ -122,9 +126,10 @@ async fn world_with(tool_body: &str, targets_max_age: Duration) -> World {
         fetch: Arc::new(SlowFetch),
         now: Arc::new(|| 1_000_000),
         search: vec![],
-        arch: "arm".into(),
+        arch: arch.into(),
         gate: jobs.tool_gate(),
         key: verify::ytdlp_key().unwrap(),
+        node_keys: verify::node_keys().unwrap(),
     };
     let tool = Tool::with_deps(&data, deps);
     let (tx, saved) = tokio::sync::watch::channel(());
@@ -138,7 +143,7 @@ async fn world_with(tool_body: &str, targets_max_age: Duration) -> World {
             std::thread::sleep(Duration::from_millis(delay.load(std::sync::atomic::Ordering::SeqCst)));
             seen.lock().unwrap().clone()
         }),
-        arch: "arm".into(),
+        arch: arch.into(),
         targets_max_age,
     };
     let admin = WebStreamingAdmin::new(data.clone(), entries.clone(), tool, jobs, tx, env);
@@ -622,16 +627,20 @@ async fn the_channel_is_switched_in_the_settings_and_an_update_is_asked() {
 
 #[tokio::test]
 async fn the_capabilities_panel_says_what_is_missing() {
-    let mut w = world("exit 1").await;
-    w.op(json!({ "op": "reprobe" })).await.unwrap();
-    // No python3 and no JavaScript runtime on this (empty) search path; on
-    // an armv7 device nothing could help.
-    let d = w.until("probed", |d| d["capabilities"]["checking"] == false && d["capabilities"]["apt_hint"] != Value::Null).await;
-    let caps = &d["capabilities"];
-    assert_eq!(caps["python3"], Value::Null);
-    assert_eq!(caps["apt_hint"], "sudo apt install python3");
-    assert_eq!(caps["js_runtime"], Value::Null);
-    assert_eq!(caps["js_hopeless"], true);
+    // No python3 and no JavaScript runtime on this (empty) search path. On
+    // armv7 the plugin installs its own node, on x86_64 its own deno: one is
+    // on its way. Elsewhere nothing could help.
+    for (arch, hopeless) in [("arm", false), ("x86_64", false), ("riscv64", true)] {
+        let mut w = world_on("exit 1", Duration::from_secs(30), arch).await;
+        w.op(json!({ "op": "reprobe" })).await.unwrap();
+        let d = w.until("probed", |d| d["capabilities"]["checking"] == false && d["capabilities"]["apt_hint"] != Value::Null).await;
+        let caps = &d["capabilities"];
+        assert_eq!(caps["python3"], Value::Null);
+        assert_eq!(caps["apt_hint"], "sudo apt install python3");
+        assert_eq!(caps["js_runtime"], Value::Null);
+        assert_eq!(caps["js_hopeless"], hopeless, "{arch}");
+        assert_eq!(caps["js_runtime_unmaintained"], false, "{arch}");
+    }
 }
 
 #[tokio::test]

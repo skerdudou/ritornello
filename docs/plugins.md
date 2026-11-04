@@ -2559,14 +2559,44 @@ playlist, a download's own — is therefore bounded by `ytdlp::PROBE_DEADLINE`
 attempt just before it answered. Playing waits for yt-dlp without a deadline
 of its own. The order is the plugin's
 own `deno` (**only on x86_64 and aarch64**: deno publishes nothing for 32-bit
-ARM), then a system `node` of at least 22, then a system QuickJS (flagged
-slow). On the reference device only QuickJS or a node 22 installed by hand
-(the official armv7l build: Debian's is too old) can serve, and the page says
-which, as the fallback's.
+ARM), then the plugin's own `node` 22 (**only on armv7**, `arch == "arm"`),
+then a system `node` of at least 22, then a system QuickJS (flagged slow),
+then none. The page says which, as the fallback's.
 deno is not signed by its authors: its zip is checked against the
 `.sha256sum` published next to it, which catches a damaged download but not
 a compromised release. That is the whole of its trust, and why it is only a
 fallback.
+
+**The plugin's own node, on armv7.** Node 22 is the last line nodejs.org
+builds for `linux-armv7l` (none since node 24), Debian 13's node 20 is below
+yt-dlp's minimum, and QuickJS takes about two minutes where node 22 takes
+about 29 s, so on armv7 the plugin installs node 22 itself, at `bin/node`.
+It comes before a system node because it is the one the plugin keeps up to
+date. The trust chain is node's own release signature:
+`https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt.sig` must be a detached
+OpenPGP signature of `SHASUMS256.txt` by one of the **29 Node.js release
+keys** the plugin embeds (`src/tool/node-release-keys.asc`, the keys of
+`nodejs/release-keys`' `keys.list` on 2026-11-04), by its primary key or by a
+signing subkey bound to it; the same refusals as yt-dlp's apply (not a
+document signature, a broken hash), while yt-dlp's own list is still checked
+against yt-dlp's primary key only. That list must name exactly one
+`node-v22.X.Y-linux-armv7l.tar.gz`, whose name gives the version; the
+tarball (~25 MB) must hash to the listed sum; then **only**
+`node-v22.X.Y-linux-armv7l/bin/node` is read out of it, streamed to
+`bin/node.new` (at most 256 MiB; a link, another path or any other entry is
+never written), and it must answer `v22.X.Y` to `--version` before it is
+renamed over `bin/node`. The binary alone is about 108 MB (107 563 500 bytes
+for v22.23.4; the whole installation would be 187 MB). Unlike deno, which is
+installed once, node is **updated**: at yt-dlp's pace, the signed list's
+version is compared with the one `bin/node` answers, and the tarball is
+fetched only when they differ. A failure (nodejs.org unreachable, a release
+signed by a releaser whose key a later plugin version will have to embed)
+is reported on the page, is no failure of yt-dlp's update, is not retried
+within a day, and leaves the node in place serving. Node 22's maintenance
+ends on **2027-04-30**
+([release schedule](https://github.com/nodejs/release#release-schedule)):
+after that day the page adds that node 22 is no longer maintained and that
+the plugin keeps its last release as it is. Nothing is deleted.
 
 **Trust in yt-dlp's release.** The plugin embeds yt-dlp's release
 **public key** and nothing is put in place unless the chain holds:
@@ -2772,6 +2802,7 @@ the page polls it.
 | `yt-dlp.new/`, `yt-dlp.old/` | transient: the copy being installed, and the one being replaced, during an update (a crash in between is undone at the next start) |
 | `bin/yt-dlp` | the wrapper |
 | `bin/deno` | the plugin's own deno, on x86_64 and aarch64 only |
+| `bin/node` | the plugin's own node 22, on armv7 only (`bin/node.new` while a new one is checked) |
 | `yt-dlp.conf` | what the wrapper hands yt-dlp |
 | `cache/` | yt-dlp's cache |
 

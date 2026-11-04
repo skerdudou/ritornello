@@ -554,7 +554,7 @@ describe('WebStreamingAdmin', () => {
     const { w, s } = await mountAdmin({
       capabilities: {
         python3: null, js_runtime: null, js_runtime_slow: false,
-        apt_hint: 'sudo apt install python3', checking: false, js_hopeless: false,
+        apt_hint: 'sudo apt install python3', checking: false, js_hopeless: false, js_runtime_unmaintained: false,
       },
     })
     expect(w.find('[data-python]').text()).toContain('sudo apt install python3')
@@ -580,6 +580,32 @@ describe('WebStreamingAdmin', () => {
     cleanup()
     const fine = await mountAdmin()
     expect(fine.w.find('[data-js]').text()).toBe('JavaScript runtime, used only when a video fails without one: Node.js')
+  })
+
+  // Past node 22's end of life the runtime line stays, and one sentence says
+  // the plugin keeps the last node 22 as it is.
+  it('says the plugin\'s own node 22 is no longer maintained, only when the plugin says so', async () => {
+    const base = state().capabilities
+    const old = await mountAdmin({ capabilities: { ...base, js_runtime_unmaintained: true } })
+    expect(old.w.find('[data-js]').text()).toBe(
+      'JavaScript runtime, used only when a video fails without one: Node.js '
+        + 'Node.js 22 is no longer maintained by its authors: the plugin keeps its last release as it is.',
+    )
+    cleanup()
+    const fine = await mountAdmin()
+    expect(fine.w.find('[data-js]').text()).not.toContain(CATALOG.js_unmaintained)
+  })
+
+  it('names the runtime a failure is about', async () => {
+    const { w } = await mountAdmin({
+      tool: {
+        ...state().tool,
+        runtime_error_code: { code: 'bad_signature', params: { runtime: 'node', detail: 'made by none of the embedded release keys' } },
+      },
+    })
+    expect(w.find('[data-runtime-error]').text()).toBe(
+      'JavaScript runtime: the published sums are not signed by a known Node.js release key: made by none of the embedded release keys',
+    )
   })
 
   // ---- loading --------------------------------------------------------------

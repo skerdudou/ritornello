@@ -1,7 +1,7 @@
 //! Downloads with a deadline and a size cap, nothing else.
 //!
-//! What is fetched is never trusted for being fetched: yt-dlp is checked
-//! against its signature, deno against its published sum. The fetcher only
+//! What is fetched is never trusted for being fetched: yt-dlp and node are
+//! checked against their signatures, deno against its published sum. The fetcher only
 //! guarantees that a slow or endless answer cannot hold the plugin, and that
 //! nothing leaves https (a redirect included).
 

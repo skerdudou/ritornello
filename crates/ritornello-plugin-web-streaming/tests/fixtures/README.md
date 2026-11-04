@@ -1,5 +1,16 @@
 # yt-dlp captures
 
+`sums/` holds release lists with their detached signatures, byte for byte
+as published (`.gitattributes` keeps them out of any line-ending
+conversion): yt-dlp's `SHA2-256SUMS` and `.sig` of a stable and a nightly
+release, and `sums/node-v22.23.4/`, the `SHASUMS256.txt` and
+`SHASUMS256.txt.sig` of `https://nodejs.org/dist/latest-v22.x/` downloaded on
+2026-11-04 (v22.23.4, signed by the primary key
+`5BE8A3F6C8A5C01D106C0AD820B1A390B168D356`; its armv7l tarball, not
+committed, hashed to the listed
+`4318e0c68f62e18583dae85eb645f55c7f2b8a2e8d1fffe91a2e8abd046880ab`).
+`src/tool/verify.rs` and `src/tool/runtime.rs` read them in their tests.
+
 Real answers of `yt-dlp --no-warnings -J --flat-playlist -- <url>`, captured on
 2026-11-02 with yt-dlp 2026.10.26 (sha256 checked against the release's
 SHA2-256SUMS), run on a workstation. `src/ytdlp.rs` reads them in its tests.

@@ -6,12 +6,21 @@
 //! an older one unasked, and nothing in place is lost when a step fails
 //! ([`install`]).
 //!
+//! The same place keeps the fallback's JavaScript runtime ([`runtime`]):
+//! deno on x86_64 and aarch64, installed once, checked against its
+//! published sum only; node 22 on armv7, checked against Node.js's own
+//! release signature and updated whenever its signed list names another
+//! version, until node 22's end of life (2027-04-30), after which the last
+//! one is kept as it is.
+//!
 //! The layout under the plugin's data directory:
 //!
 //! - `yt-dlp/`       the extracted zipapp (`yt_dlp`, `yt_dlp_ejs`), with
 //!   its bytecode cache;
 //! - `bin/yt-dlp`    the wrapper ([`wrapper`]): what mpv and the plugin run;
 //! - `bin/deno`      the plugin's own deno, on x86_64 and aarch64 only;
+//! - `bin/node`      the plugin's own node 22, on armv7 only (`node.new`
+//!   while a new one is checked);
 //! - `yt-dlp.conf`   handed to yt-dlp by the wrapper;
 //! - `cache/`        yt-dlp's cache;
 //! - `settings.toml` the channel, the last check, what is installed.
@@ -226,8 +235,9 @@ pub struct Status {
     /// anyway" only then. A bad signature is never one.
     pub forceable: bool,
     pub last_check: Option<u64>,
-    /// The last failure to install the plugin's own deno, in English (log
-    /// and tests); the page gets `runtime_error_code`.
+    /// The last failure to install or update the plugin's own runtime (deno,
+    /// or node on armv7), in English (log and tests); the page gets
+    /// `runtime_error_code`.
     #[serde(skip)]
     pub runtime_error: Option<String>,
     pub runtime_error_code: Option<UpdateFault>,
@@ -242,6 +252,9 @@ pub struct Deps {
     pub gate: ToolGate,
     /// The key the signed list must verify with: yt-dlp's, but for tests.
     pub key: SignedPublicKey,
+    /// The keys node's signed list must verify with, on armv7: Node.js's
+    /// release keys, but for tests.
+    pub node_keys: Vec<SignedPublicKey>,
 }
 
 #[derive(Default)]
@@ -253,8 +266,8 @@ struct Flags {
     error: Option<String>,
     error_code: Option<UpdateFault>,
     forceable: bool,
-    runtime_error: Option<runtime::DenoError>,
-    deno_failed_at: Option<u64>,
+    runtime_error: Option<runtime::RuntimeError>,
+    runtime_failed_at: Option<u64>,
 }
 
 struct Inner {
@@ -264,7 +277,7 @@ struct Inner {
     flags: Mutex<Flags>,
     caps: Mutex<Capabilities>,
     one_at_a_time: tokio::sync::Mutex<()>,
-    deno_one_at_a_time: tokio::sync::Mutex<()>,
+    runtime_one_at_a_time: tokio::sync::Mutex<()>,
     requests: tokio::sync::Notify,
     /// Serialises the writes of the wrapper and the conf.
     files: Mutex<()>,
@@ -353,8 +366,8 @@ pub fn judge_rollback(
 }
 
 impl Tool {
-    /// The real thing: GitHub over https, the system clock, `PATH`, this
-    /// machine, yt-dlp's embedded key.
+    /// The real thing: GitHub and nodejs.org over https, the system clock,
+    /// `PATH`, this machine, the embedded keys of yt-dlp and Node.js.
     pub fn new(data_dir: &Path, gate: ToolGate) -> anyhow::Result<Self> {
         let search = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".into()))
             .collect();
@@ -367,6 +380,7 @@ impl Tool {
             arch: std::env::consts::ARCH.to_string(),
             gate,
             key: verify::ytdlp_key().map_err(|e| anyhow::anyhow!("the embedded yt-dlp key: {e}"))?,
+            node_keys: verify::node_keys().map_err(|e| anyhow::anyhow!("the embedded Node.js keys: {e}"))?,
         };
         Ok(Self::with_deps(data_dir, deps))
     }
@@ -383,7 +397,7 @@ impl Tool {
                 flags: Mutex::new(Flags::default()),
                 caps: Mutex::new(Capabilities::default()),
                 one_at_a_time: tokio::sync::Mutex::new(()),
-                deno_one_at_a_time: tokio::sync::Mutex::new(()),
+                runtime_one_at_a_time: tokio::sync::Mutex::new(()),
                 requests: tokio::sync::Notify::new(),
                 files: Mutex::new(()),
             }),
@@ -420,7 +434,7 @@ impl Tool {
             forceable: f.forceable,
             last_check: s.last_check,
             runtime_error: f.runtime_error.as_ref().map(ToString::to_string),
-            runtime_error_code: f.runtime_error.as_ref().map(runtime::DenoError::fault),
+            runtime_error_code: f.runtime_error.as_ref().map(runtime::RuntimeError::fault),
         }
     }
 
@@ -439,9 +453,16 @@ impl Tool {
         Ok(())
     }
 
-    /// The capabilities of the last probe (cheap).
+    /// The capabilities of the last probe (cheap), dated by the clock: past
+    /// node 22's end of life, the plugin's own node is said unmaintained.
     pub fn capabilities(&self) -> Capabilities {
-        lock(&self.inner.caps).clone()
+        let caps = lock(&self.inner.caps).clone();
+        self.dated(caps)
+    }
+
+    fn dated(&self, mut caps: Capabilities) -> Capabilities {
+        caps.js_runtime_unmaintained = runtime::unmaintained(&caps, self.now());
+        caps
     }
 
     fn runtime_env(&self) -> runtime::Env {
@@ -471,7 +492,7 @@ impl Tool {
         {
             tracing::warn!("yt-dlp wrapper not rewritten: {e}");
         }
-        caps
+        self.dated(caps)
     }
 
     /// The page's "Check again": a [`reprobe`](Self::reprobe), then, when
@@ -556,11 +577,13 @@ impl Tool {
     /// when it differs from what is installed. Only when [`due`](Self::due)
     /// unless `check_now`; the rollback guard yields only to
     /// `accept_anyway`. One at a time. Then, outside that section, the
-    /// plugin's own deno where one is needed.
+    /// plugin's own runtime where the machine takes one: deno (x86_64,
+    /// aarch64), or node (armv7), checked at the same pace as yt-dlp.
     pub async fn update_with(&self, check_now: bool, accept_anyway: bool) -> Result<Update, UpdateError> {
         let result = self.update_ytdlp(check_now, accept_anyway).await;
         if matches!(result, Ok(Update::Installed(_) | Update::Current(_))) {
             self.ensure_deno().await;
+            self.ensure_node().await;
         }
         result
     }
@@ -735,25 +758,66 @@ impl Tool {
         {
             return;
         }
-        let Ok(_one) = self.inner.deno_one_at_a_time.try_lock() else { return };
+        let Ok(_one) = self.inner.runtime_one_at_a_time.try_lock() else { return };
         let now = self.now();
-        let failed_at = lock(&self.inner.flags).deno_failed_at;
-        if let Some(t) = failed_at
-            && t <= now
-            && now - t < DAY
-        {
+        if self.failed_within_a_day(now) {
             return;
         }
         let r = runtime::install_deno(self.inner.deps.fetch.as_ref(), &self.inner.data_dir, &self.inner.deps.arch).await;
         if let Err(e) = &r {
             tracing::warn!("deno not installed: {e}");
         }
-        {
-            let mut f = lock(&self.inner.flags);
-            f.deno_failed_at = r.is_err().then_some(now);
-            f.runtime_error = r.err();
-        }
+        self.record_runtime(now, r.err());
         self.reprobe().await;
+    }
+
+    /// The last runtime install failed less than a day ago (a failure dated
+    /// in the future, a clock set back, does not count).
+    fn failed_within_a_day(&self, now: u64) -> bool {
+        lock(&self.inner.flags).runtime_failed_at.is_some_and(|t| t <= now && now - t < DAY)
+    }
+
+    fn record_runtime(&self, now: u64, error: Option<runtime::RuntimeError>) {
+        let mut f = lock(&self.inner.flags);
+        f.runtime_failed_at = error.is_some().then_some(now);
+        f.runtime_error = error;
+    }
+
+    /// The plugin's own node 22, on armv7 only, installed when absent and
+    /// **updated** whenever the signed list of `latest-v22.x` names another
+    /// version than the one in place answers (deno is only installed when
+    /// absent). Its failure is no failure of yt-dlp's update, and whatever
+    /// fails (the list unreachable, a releaser whose key is not embedded),
+    /// the node in place keeps serving. One at a time, not again within a
+    /// day of a failure, outside the update's section (a 25 MB download).
+    async fn ensure_node(&self) {
+        if self.inner.deps.arch != runtime::NODE_ARCH {
+            return;
+        }
+        let Ok(_one) = self.inner.runtime_one_at_a_time.try_lock() else { return };
+        let now = self.now();
+        if self.failed_within_a_day(now) {
+            return;
+        }
+        let installed = runtime::own_node_version(&self.inner.data_dir).await;
+        let r = runtime::install_node(
+            self.inner.deps.fetch.as_ref(),
+            &self.inner.data_dir,
+            &self.inner.deps.arch,
+            &self.inner.deps.node_keys,
+            installed.as_deref(),
+        )
+        .await;
+        match &r {
+            Ok(runtime::NodeInstall::Installed(v)) => tracing::info!("node {v} installed"),
+            Ok(runtime::NodeInstall::Current(_)) => {}
+            Err(e) => tracing::warn!("node not installed: {e}"),
+        }
+        let changed = matches!(r, Ok(runtime::NodeInstall::Installed(_)));
+        self.record_runtime(now, r.err());
+        if changed {
+            self.reprobe().await;
+        }
     }
 
     /// The hourly tick: an update when due, the rollback guard on.
