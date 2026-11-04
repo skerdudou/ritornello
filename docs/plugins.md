@@ -1487,9 +1487,15 @@ positions, sparse indices).
 **refused with a message** naming the ceiling, rather than silently
 truncated: a playlist that quietly shrinks is a defect that takes months
 to attribute. Narrow the folder down, or add its subfolders one by one.
-The recursive walk filters by extension (`mp3`, `flac`, `ogg`, `oga`,
-`opus`, `m4a`, `aac`, `wav`, `wma`, `aiff`, `ape`, `wv`, `mpc`, case
-insensitively) and guards against symlink loops.
+The recursive walk filters by extension, case insensitively, and guards
+against symlink loops. The list is what the Pi's mpv was seen to play:
+`mp3`, `flac`, `ogg`, `oga`, `opus`, `spx`, `m4a`, `m4b`, `aac`, `wav`,
+`wave`, `w64`, `wma`, `aiff`, `aif`, `aifc`, `ape`, `wv`, `mpc`, `tta`,
+`mp2`, `ac3`, `eac3`, `dts`, `caf`, `au`, and the Matroska audio files
+`webm` (what yt-dlp writes for YouTube) and `mka`. Video containers
+(`mp4`, `mkv`, …) are left out on purpose, so that a recursive add does
+not sweep music videos into a playlist. The constant in
+`crates/ritornello-plugin-files/src/scan.rs` says why each entry is there.
 
 Track titles need no plugin here: the core reads the file's own tags from
 mpv's `metadata` property (see the `metadata` section below), and the
