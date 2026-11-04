@@ -11,6 +11,9 @@ use std::collections::BTreeSet;
 use crate::registry::Registry;
 
 /// The identity recorded for a rule path whose grant was declined.
+///
+/// `ritornello-core` reads it back as `update::privileged::DECLINED`; the two
+/// literals must stay equal.
 pub const DECLINED: &str = "declined";
 
 /// The registry key the core's record lives under (`inv.core.name`).

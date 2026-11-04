@@ -34,6 +34,7 @@ tree = [
   { from = "deploy/ritornello-update.service", to = "etc/systemd/system/ritornello-update.service" },
   { from = "deploy/ritornello-rollback.service", to = "etc/systemd/system/ritornello-rollback.service" },
   { from = "deploy/50-ritornello-power.rules", to = "etc/polkit-1/rules.d/50-ritornello-power.rules" },
+  { from = "deploy/53-ritornello-time.rules", to = "etc/polkit-1/rules.d/53-ritornello-time.rules" },
   { from = "deploy/52-ritornello-update.rules", to = "etc/polkit-1/rules.d/52-ritornello-update.rules" },
 ]
 # Units the installer enables after placing them. Declared here, beside the

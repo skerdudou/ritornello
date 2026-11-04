@@ -27,6 +27,12 @@
 
 use std::collections::BTreeMap;
 
+/// The identity `ritornello-install` records for a rule path whose grant the
+/// operator declined (`ritornello-install`'s `grants::DECLINED`; the two
+/// literals must stay equal). Satisfies the comparison whatever the release
+/// offers at that path: the file was deliberately never placed.
+pub const DECLINED: &str = "declined";
+
 /// Privileged destination path -> identity.
 pub type Identities = BTreeMap<String, String>;
 
@@ -74,7 +80,8 @@ pub async fn fetch_core_identities(client: &reqwest::Client, url: &str) -> Optio
 ///
 /// Otherwise the files that need `ritornello-install`, sorted: one offered
 /// with another identity, or with none recorded; one recorded that the
-/// release no longer places (only the installer removes it). Every offered
+/// release no longer places (only the installer removes it). A path recorded
+/// as [`DECLINED`] is satisfied, offered or not. Every offered
 /// file when nothing is recorded. **Empty** when the release's own
 /// identities are unknown: the refusal stands, but no file can be named.
 pub fn files_needing_installer(
@@ -86,9 +93,17 @@ pub fn files_needing_installer(
     let recorded = recorded.unwrap_or(&empty);
     let mut files: Vec<String> = offered
         .iter()
-        .filter(|(path, id)| recorded.get(*path) != Some(*id))
+        .filter(|(path, id)| {
+            let have = recorded.get(*path);
+            have != Some(*id) && have.map(String::as_str) != Some(DECLINED)
+        })
         .map(|(path, _)| path.clone())
-        .chain(recorded.keys().filter(|path| !offered.contains_key(*path)).cloned())
+        .chain(
+            recorded
+                .iter()
+                .filter(|(path, id)| id.as_str() != DECLINED && !offered.contains_key(*path))
+                .map(|(path, _)| path.clone()),
+        )
         .collect();
     files.sort();
     files.dedup();
@@ -121,6 +136,8 @@ mod tests {
     const RULE: &str = "/etc/polkit-1/rules.d/52-ritornello-update.rules";
     const UPDATER: &str = "/usr/local/lib/ritornello/ritornello-update";
 
+    const POWER: &str = "/etc/polkit-1/rules.d/50-ritornello-power.rules";
+
     fn ids(pairs: &[(&str, &str)]) -> Identities {
         pairs.iter().map(|(p, i)| (p.to_string(), i.to_string())).collect()
     }
@@ -146,6 +163,7 @@ mod tests {
             vec![
                 "/etc/polkit-1/rules.d/50-ritornello-power.rules",
                 RULE,
+                "/etc/polkit-1/rules.d/53-ritornello-time.rules",
                 "/etc/systemd/system/ritornello-rollback.service",
                 "/etc/systemd/system/ritornello-update.service",
                 UNIT,
@@ -215,6 +233,42 @@ mod tests {
     fn unknown_offered_identities_refuse_without_naming() {
         assert_eq!(files_needing_installer(None, Some(&ids(&[(UNIT, "sha256:a")]))), Err(vec![]));
         assert_eq!(files_needing_installer(None, None), Err(vec![]));
+    }
+
+    /// The operator declined a grant at install: the installer recorded the
+    /// rule's path as `declined`, and whatever the release offers there is
+    /// not the core's to compare.
+    #[test]
+    fn a_declined_rule_never_needs_the_installer() {
+        let offered = ids(&[(POWER, "sha256:x"), (UNIT, "sha256:a")]);
+        let recorded = ids(&[(POWER, DECLINED), (UNIT, "sha256:a")]);
+        assert_eq!(files_needing_installer(Some(&offered), Some(&recorded)), Ok(()));
+    }
+
+    /// Declining one rule excuses that rule only.
+    #[test]
+    fn a_declined_rule_still_needs_it_for_the_other_files() {
+        let offered = ids(&[(POWER, "sha256:x"), (UNIT, "sha256:new")]);
+        let recorded = ids(&[(POWER, DECLINED), (UNIT, "sha256:old")]);
+        assert_eq!(files_needing_installer(Some(&offered), Some(&recorded)), Err(vec![UNIT.to_string()]));
+    }
+
+    /// A declined rule the release stops offering is nothing to place or to
+    /// remove: the installer never placed it.
+    #[test]
+    fn a_declined_rule_the_release_dropped_is_not_a_file_to_place() {
+        let offered = ids(&[(UNIT, "sha256:a")]);
+        let recorded = ids(&[(POWER, DECLINED), (UNIT, "sha256:a")]);
+        assert_eq!(files_needing_installer(Some(&offered), Some(&recorded)), Ok(()));
+    }
+
+    /// Only the recorded side can decline: an offered identity spelled
+    /// `declined` is not a content identity and excuses nothing.
+    #[test]
+    fn an_offered_declined_does_not_excuse_a_recorded_identity() {
+        let offered = ids(&[(POWER, DECLINED)]);
+        let recorded = ids(&[(POWER, "sha256:x")]);
+        assert_eq!(files_needing_installer(Some(&offered), Some(&recorded)), Err(vec![POWER.to_string()]));
     }
 
     #[test]

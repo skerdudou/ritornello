@@ -2634,6 +2634,36 @@ privileged = [
         );
     }
 
+    /// The time rule ships in the real inventory: declining `Timezone` drops
+    /// its put and records it `declined`, while the power rule is untouched.
+    #[test]
+    fn a_declined_timezone_grant_is_neither_placed_nor_listed_as_privileged() {
+        let time_rule = Grant::Timezone.rule_path();
+        let mut inv = inv_with_power();
+        inv.core.files.push(FileEntry {
+            archive_path: time_rule.trim_start_matches('/').to_string(),
+            dest: time_rule.to_string(),
+            mode: "0644".to_string(),
+            owner: "root:root".to_string(),
+            privileged: true,
+            identity: Some(test_identity(time_rule)),
+        });
+        let intent = Intent::InstallOrUpdate {
+            plugins: set(&[]),
+            packs: set(&[]),
+            erase_data: BTreeSet::new(),
+            reinstall: false,
+            declined: BTreeSet::from([Grant::Timezone]),
+        };
+        let plan = compute(&inv, &dev(&[], None, &[], &[]), &intent).unwrap();
+        assert!(plan.puts.iter().all(|p| p.dest != time_rule), "the rule is not placed: {:?}", plan.puts);
+        assert!(plan.puts.iter().any(|p| p.dest == POWER_RULE), "the power rule is");
+        let core = &plan.registry.as_ref().unwrap().components[CORE];
+        assert!(!core.privileged.iter().any(|p| p == time_rule), "{core:?}");
+        assert_eq!(core.identity[time_rule], "declined");
+        assert_eq!(core.identity[POWER_RULE], test_identity(POWER_RULE));
+    }
+
     #[test]
     fn a_declined_grant_the_release_does_not_carry_records_nothing() {
         let intent = Intent::InstallOrUpdate {

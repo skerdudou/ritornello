@@ -31,6 +31,7 @@ const CORE_FILES: &[(&str, &str)] = &[
     ("/etc/systemd/system/ritornello-update.service", "0644"),
     ("/etc/systemd/system/ritornello-rollback.service", "0644"),
     ("/etc/polkit-1/rules.d/50-ritornello-power.rules", "0644"),
+    ("/etc/polkit-1/rules.d/53-ritornello-time.rules", "0644"),
     ("/etc/polkit-1/rules.d/52-ritornello-update.rules", "0644"),
     ("/usr/local/lib/ritornello/ritornello-update", "0755"),
 ];

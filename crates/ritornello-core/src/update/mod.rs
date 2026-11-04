@@ -4025,6 +4025,7 @@ mod tests {
             "etc/polkit-1/rules.d/",
             "etc/polkit-1/rules.d/52-ritornello-update.rules",
             "etc/polkit-1/rules.d/50-ritornello-power.rules",
+            "etc/polkit-1/rules.d/53-ritornello-time.rules",
             "etc/systemd/",
             "etc/systemd/system/",
             "etc/systemd/system/ritornello.service",
