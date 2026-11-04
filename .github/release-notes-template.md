@@ -62,15 +62,22 @@ This rename is not a wire break: no contract moved, and the bootstrap
 
      **Action required** — wire break: install the core and every plugin
      together. A rollback of the core leaves every plugin refused until the
-     core is reinstalled. -->
+     core is reinstalled.
+
+     For the release that ships this block: move the fr/de/es/it language
+     packs too (deploy/language-packs.toml). Their published archives still
+     carry `lrclib.toml`, not `lrclib-lyrics.toml`, so until they move the
+     renamed plugin's page stays in English on a non-English device, and
+     changed-components.sh only warns about it. -->
 
 ## Behaviour changes
 
 **The lyrics plugin is now `lrclib-lyrics`.** The plugin that finds lyrics
 on LRCLIB, published in beta.9 as `lrclib`, is renamed `lrclib-lyrics`: its
 page is at `/plugins/lrclib-lyrics/`, its cache in
-`/var/lib/ritornello/plugins/lrclib-lyrics`. Nothing else changes. See the action above to switch a device that has
-`lrclib`.
+`/var/lib/ritornello/plugins/lrclib-lyrics`, and it introduces itself to
+LRCLIB under the new name. What it does is unchanged. See the action above
+to switch a device that has `lrclib`.
 
 ## Install
 
