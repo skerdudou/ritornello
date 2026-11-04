@@ -10,6 +10,7 @@
 use std::collections::BTreeSet;
 
 use crate::device::DeviceState;
+use crate::grants::Grant;
 use crate::inventory::Inventory;
 use crate::plan::{self, Intent};
 
@@ -59,6 +60,13 @@ pub struct Args {
     /// Install from a directory of local archives instead of a release.
     #[arg(long)]
     pub from_dir: Option<std::path::PathBuf>,
+    /// The system permissions to grant, comma-separated (`power`,
+    /// `timezone`); `none` for neither. Every other one is declined. Left
+    /// out, the device's recorded choice is kept (both granted when it has
+    /// none). It modifies an install or an update, and answers the
+    /// permissions question of the screens.
+    #[arg(long, value_delimiter = ',')]
+    pub grants: Option<Vec<String>>,
     /// Do not ask for confirmation.
     #[arg(long)]
     pub yes: bool,
@@ -96,6 +104,10 @@ pub enum ArgError {
     NoneWithOthers(&'static str),
     /// An empty item in the list (the flag's name).
     EmptyItem(&'static str),
+    /// A `--grants` value that names no grant.
+    UnknownGrant(String),
+    /// `--remove-all` with `--grants`: a removal grants nothing.
+    GrantsWithRemoveAll,
 }
 
 impl std::fmt::Display for ArgError {
@@ -134,6 +146,12 @@ impl std::fmt::Display for ArgError {
             }
             Self::EmptyItem(flag) => {
                 write!(f, "{flag}: an empty name in the list; write `none` for an empty list")
+            }
+            Self::UnknownGrant(name) => {
+                write!(f, "--grants: {name:?} is not a system permission; the values are power, timezone and none")
+            }
+            Self::GrantsWithRemoveAll => {
+                write!(f, "--remove-all removes everything and grants nothing: it cannot be given with --grants")
             }
         }
     }
@@ -177,6 +195,18 @@ fn list(items: &[String], flag: &'static str) -> Result<BTreeSet<String>, ArgErr
     Ok(items.iter().cloned().collect())
 }
 
+/// The grants `--grants` declines: every one it does not list. `None` when
+/// the flag is absent, which leaves the choice to the device's record.
+pub fn declined_from_args(a: &Args) -> Result<Option<BTreeSet<Grant>>, ArgError> {
+    let Some(items) = &a.grants else { return Ok(None) };
+    let named = list(items, "--grants")?;
+    let mut granted = BTreeSet::new();
+    for name in &named {
+        granted.insert(Grant::parse(name).ok_or_else(|| ArgError::UnknownGrant(name.clone()))?);
+    }
+    Ok(Some(Grant::ALL.into_iter().filter(|g| !granted.contains(g)).collect()))
+}
+
 /// The plugins that would go if `wanted` were chosen — everything the
 /// device declares, and every plugin of ours only its registry records
 /// (the plan removes those too, R30), or whose companion it records —
@@ -198,6 +228,10 @@ pub fn removed_by(inv: &Inventory, dev: &DeviceState, wanted: &BTreeSet<String>)
 /// device: checked before anything connects, and again by
 /// `intent_from_args`.
 pub fn check_combination(a: &Args) -> Result<(), ArgError> {
+    if a.remove_all && a.grants.is_some() {
+        return Err(ArgError::GrantsWithRemoveAll);
+    }
+    declined_from_args(a)?;
     let chooses = a.plugins.is_some() || a.packs.is_some();
     if a.remove_all && (a.keep || chooses) {
         return Err(ArgError::RemoveAllAlone);
@@ -227,6 +261,10 @@ pub fn check_combination(a: &Args) -> Result<(), ArgError> {
 /// nothing about it (a terminal will then ask).
 pub fn intent_from_args(a: &Args, dev: &DeviceState, inv: &Inventory) -> Result<Option<Intent>, ArgError> {
     check_combination(a)?;
+    let declined = match declined_from_args(a)? {
+        Some(declined) => declined,
+        None => crate::grants::recorded_declined(dev.registry.as_ref()),
+    };
     if a.remove_all {
         return Ok(Some(Intent::RemoveAll { erase_data: a.purge_data }));
     }
@@ -235,7 +273,13 @@ pub fn intent_from_args(a: &Args, dev: &DeviceState, inv: &Inventory) -> Result<
             return Err(ArgError::NothingToKeep);
         }
         let (plugins, packs) = plan::preselection(inv, dev);
-        return Ok(Some(Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: a.reinstall, declined: crate::grants::recorded_declined(dev.registry.as_ref()) }));
+        return Ok(Some(Intent::InstallOrUpdate {
+            plugins,
+            packs,
+            erase_data: BTreeSet::new(),
+            reinstall: a.reinstall,
+            declined,
+        }));
     }
     if a.plugins.is_none() && a.packs.is_none() {
         return Ok(None);
@@ -262,7 +306,7 @@ pub fn intent_from_args(a: &Args, dev: &DeviceState, inv: &Inventory) -> Result<
     } else {
         BTreeSet::new()
     };
-    Ok(Some(Intent::InstallOrUpdate { plugins, packs, erase_data, reinstall: a.reinstall, declined: crate::grants::recorded_declined(dev.registry.as_ref()) }))
+    Ok(Some(Intent::InstallOrUpdate { plugins, packs, erase_data, reinstall: a.reinstall, declined }))
 }
 
 #[cfg(test)]
@@ -521,5 +565,88 @@ mod tests {
     fn the_command_line_is_well_formed() {
         use clap::CommandFactory;
         Args::command().debug_assert();
+    }
+
+    // --- System permissions ---------------------------------------------
+
+    use crate::grants::{DECLINED, Grant};
+
+    fn declined_of(argv: &[&str], device: &DeviceState) -> BTreeSet<Grant> {
+        match intent(argv, device) {
+            Ok(Some(Intent::InstallOrUpdate { declined, .. })) => declined,
+            other => panic!("{argv:?}: {other:?}"),
+        }
+    }
+
+    /// `installed()` with the core's record saying `power` was declined.
+    fn installed_declining_power() -> DeviceState {
+        let mut device = installed();
+        let mut reg = registry(&[("core", &[])]);
+        reg.components.get_mut("core").unwrap().identity.insert(Grant::Power.rule_path().into(), DECLINED.into());
+        device.registry = Some(reg);
+        device
+    }
+
+    #[test]
+    fn grants_flag_parses_names_and_none() {
+        let none = BTreeSet::from([Grant::Power, Grant::Timezone]);
+        let device = installed();
+        assert!(declined_of(&["--keep", "--grants", "power,timezone"], &device).is_empty());
+        assert_eq!(declined_of(&["--keep", "--grants", "power"], &device), BTreeSet::from([Grant::Timezone]));
+        assert_eq!(declined_of(&["--keep", "--grants", "timezone"], &device), BTreeSet::from([Grant::Power]));
+        assert_eq!(declined_of(&["--keep", "--grants", "none"], &device), none);
+        // It rides on `--plugins` and `--packs` too.
+        assert_eq!(declined_of(&["--plugins", "radio", "--grants", "none"], &device), none);
+        assert_eq!(declined_of(&["--packs", "fr", "--grants", "power"], &device), BTreeSet::from([Grant::Timezone]));
+        // It overrides what the device recorded.
+        assert!(declined_of(&["--keep", "--grants", "power,timezone"], &installed_declining_power()).is_empty());
+    }
+
+    #[test]
+    fn grants_flag_refuses_unknown_and_none_mixed() {
+        let device = installed();
+        let err = intent(&["--keep", "--grants", "reboot"], &device).unwrap_err();
+        assert_eq!(err, ArgError::UnknownGrant("reboot".into()));
+        let text = err.to_string();
+        assert!(text.contains("power") && text.contains("timezone") && text.contains("none"), "{text}");
+        assert_eq!(intent(&["--keep", "--grants", "none,power"], &device), Err(ArgError::NoneWithOthers("--grants")));
+        assert_eq!(intent(&["--keep", "--grants", "power,"], &device), Err(ArgError::EmptyItem("--grants")));
+        // Refused before connecting, too, and with no intent named.
+        assert!(check_combination(&args(&["--grants", "reboot"])).is_err());
+    }
+
+    #[test]
+    fn remove_all_with_grants_is_refused() {
+        assert_eq!(
+            intent(&["--remove-all", "--grants", "power"], &installed()),
+            Err(ArgError::GrantsWithRemoveAll)
+        );
+        assert!(ArgError::GrantsWithRemoveAll.to_string().contains("--remove-all"));
+    }
+
+    /// `--grants` alone says nothing about what to do: a terminal asks, and
+    /// its answer to the grants question is already given.
+    #[test]
+    fn grants_alone_names_no_intent() {
+        let a = args(&["--grants", "power"]);
+        assert!(!a.names_an_intent());
+        assert_eq!(intent_from_args(&a, &installed(), &inv()), Ok(None));
+        assert_eq!(declined_from_args(&a), Ok(Some(BTreeSet::from([Grant::Timezone]))));
+        assert_eq!(declined_from_args(&args(&["--keep"])), Ok(None));
+    }
+
+    #[test]
+    fn keep_on_a_device_with_an_old_registry_grants_both() {
+        let mut device = installed();
+        device.registry = Some(registry(&[("core", &[])]));
+        assert!(declined_of(&["--keep"], &device).is_empty());
+        assert!(declined_of(&["--keep"], &installed()).is_empty(), "no registry at all");
+    }
+
+    #[test]
+    fn keep_preserves_a_recorded_decline() {
+        let device = installed_declining_power();
+        assert_eq!(declined_of(&["--keep"], &device), BTreeSet::from([Grant::Power]));
+        assert_eq!(declined_of(&["--plugins", "radio"], &device), BTreeSet::from([Grant::Power]));
     }
 }

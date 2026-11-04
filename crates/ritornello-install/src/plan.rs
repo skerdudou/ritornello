@@ -109,6 +109,9 @@ pub struct Summary {
     /// Language packs placed (installed or replaced) and removed, by id.
     pub languages_placed: Vec<String>,
     pub languages_removed: Vec<String>,
+    /// The system permissions that are new on the device or whose state
+    /// changed, each with whether it is now allowed.
+    pub grants: Vec<(Grant, bool)>,
 }
 
 /// Everything the device script does, in the order it does it: stop,
@@ -715,6 +718,22 @@ fn install_or_update(
             plan.summary.updated.push(c.name.clone());
         } else {
             plan.summary.installed.push(c.name.clone());
+        }
+    }
+
+    // The grants the summary names: those the release carries a rule for,
+    // whose state is new on this device or differs from the record's. The
+    // record says "declined" for a declined one and holds the rule's content
+    // identity for a granted one; a rule it does not mention is new.
+    let before = recorded.get(&inv.core.name);
+    for g in Grant::ALL {
+        if !inv.core.files.iter().any(|f| f.dest == g.rule_path()) {
+            continue;
+        }
+        let allowed = !declined.contains(&g);
+        let was = before.and_then(|r| r.identity.get(g.rule_path())).map(|id| id != DECLINED);
+        if was != Some(allowed) {
+            plan.summary.grants.push((g, allowed));
         }
     }
 
@@ -2664,6 +2683,36 @@ privileged = [
         assert!(plan.summary.up_to_date.iter().any(|n| n == CORE), "{:?}", plan.summary);
         assert!(plan.puts.iter().all(|p| p.dest != POWER_RULE));
         assert!(plan.remove_files.is_empty(), "{:?}", plan.remove_files);
+    }
+
+    /// The summary names a grant that is new or whose state changed, and only
+    /// a grant the release carries.
+    #[test]
+    fn the_summary_names_a_grant_only_when_new_or_changed() {
+        let fresh = |declined: &[Grant]| {
+            let intent = Intent::InstallOrUpdate {
+                plugins: set(&[]),
+                packs: set(&[]),
+                erase_data: BTreeSet::new(),
+                reinstall: false,
+                declined: declined.iter().copied().collect(),
+            };
+            compute(&inv_with_power(), &dev(&[], None, &[], &[]), &intent).unwrap().summary.grants
+        };
+        // New: said, and the timezone rule is not in this release.
+        assert_eq!(fresh(&[]), [(Grant::Power, true)]);
+        assert_eq!(fresh(&[Grant::Power, Grant::Timezone]), [(Grant::Power, false)]);
+
+        let placed = device_with_power_placed();
+        assert!(rerun(&placed, &[]).summary.grants.is_empty(), "granted and still granted");
+        assert_eq!(rerun(&placed, &[Grant::Power]).summary.grants, [(Grant::Power, false)]);
+
+        let mut declined = device_with_power_placed();
+        let core = declined.registry.as_mut().unwrap().components.get_mut(CORE).unwrap();
+        core.privileged.retain(|p| p != POWER_RULE);
+        core.identity.insert(POWER_RULE.to_string(), "declined".to_string());
+        assert!(rerun(&declined, &[Grant::Power]).summary.grants.is_empty(), "declined and still declined");
+        assert_eq!(rerun(&declined, &[]).summary.grants, [(Grant::Power, true)]);
     }
 
     /// A registry that records the rule as placed, against a run that now

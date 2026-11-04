@@ -29,7 +29,6 @@ impl Grant {
     pub const ALL: [Grant; 2] = [Grant::Power, Grant::Timezone];
 
     /// The name the command line and the documentation use.
-    #[allow(dead_code)] // asked for by the command line, which follows
     pub fn name(self) -> &'static str {
         match self {
             Grant::Power => "power",
@@ -37,7 +36,6 @@ impl Grant {
         }
     }
 
-    #[allow(dead_code)] // as `name`
     pub fn parse(name: &str) -> Option<Grant> {
         Grant::ALL.into_iter().find(|g| g.name() == name)
     }
@@ -50,8 +48,15 @@ impl Grant {
         }
     }
 
+    /// What the grant lets Ritornello do, as the summary says it.
+    pub fn effect(self) -> &'static str {
+        match self {
+            Grant::Power => "power off / restart",
+            Grant::Timezone => "change the time zone",
+        }
+    }
+
     /// The question the operator is asked.
-    #[allow(dead_code)] // as `name`
     pub fn label(self) -> &'static str {
         match self {
             Grant::Power => "Allow Ritornello to power off or restart the system",

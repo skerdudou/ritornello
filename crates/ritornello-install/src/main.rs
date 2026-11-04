@@ -175,16 +175,28 @@ fn open_source(args: &Args, github: Option<source::GitHub>, ask: bool) -> anyhow
 }
 
 /// Steps 5 to 7, or the total removal's one question.
-fn ask_intent(inv: &Inventory, dev: &DeviceState, action: Action) -> anyhow::Result<Intent> {
+///
+/// `declined_by_args` is `--grants` when it was given: it answers the
+/// permissions question, which is then not asked.
+fn ask_intent(
+    inv: &Inventory,
+    dev: &DeviceState,
+    action: Action,
+    declined_by_args: Option<BTreeSet<grants::Grant>>,
+) -> anyhow::Result<Intent> {
     if action == Action::RemoveAll {
         return Ok(Intent::RemoveAll { erase_data: ui::ask_erase_all()? });
     }
     let (installed_plugins, installed_packs) = plan::preselection(inv, dev);
     let plugins = ui::ask_plugins(&ui::plugin_choices(inv, dev), &installed_plugins)?;
     let packs = ui::ask_packs(&ui::pack_choices(inv, &installed_packs), &installed_packs)?;
+    let declined = match declined_by_args {
+        Some(declined) => declined,
+        None => ui::ask_grants(&grants::recorded_declined(dev.registry.as_ref()))?,
+    };
     let candidates = ui::data_choices(&cli::removed_by(inv, dev, &plugins), dev);
     let erase_data = if candidates.is_empty() { BTreeSet::new() } else { ui::ask_erase(&candidates)? };
-    Ok(Intent::InstallOrUpdate { plugins, packs, erase_data, reinstall: action == Action::Repair, declined: grants::recorded_declined(dev.registry.as_ref()) })
+    Ok(Intent::InstallOrUpdate { plugins, packs, erase_data, reinstall: action == Action::Repair, declined })
 }
 
 /// Asks for the sudo password and proves it, three tries at most. Every
@@ -272,7 +284,7 @@ fn run(args: &Args) -> anyhow::Result<()> {
     // 6. What the operator wants.
     let intent = match cli::intent_from_args(args, &dev, &inv)? {
         Some(intent) => intent,
-        None if terminal => ask_intent(&inv, &dev, action)?,
+        None if terminal => ask_intent(&inv, &dev, action, cli::declined_from_args(args)?)?,
         None => bail!(Missing::Intent),
     };
 
