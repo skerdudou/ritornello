@@ -42,8 +42,30 @@ pub const SEARCH_TIMEOUT: Duration = Duration::from_secs(3);
 /// system call per file, on the hottest path of the walk.
 const DEADLINE_STEP: usize = 64;
 
+/// The audio files a walk keeps, by extension: what mpv plays.
+///
+/// mpv identifies a file by its content, not its name, so this list only
+/// decides what a walk *offers*; it is the list of what we know mpv plays,
+/// and every entry added after the first thirteen was played by the Pi's own
+/// mpv (0.40, FFmpeg 7.1) under the core's `--no-video` before landing here,
+/// from a sample made with ffmpeg — and `webm` from a real yt-dlp download,
+/// the case that made the list grow. A missing extension is silent: the file
+/// simply never shows, which is how a `.webm` went unnoticed — and it was our
+/// own web-streaming plugin that wrote it: it downloads `-f bestaudio` with no
+/// conversion, and YouTube's best audio is usually Opus in WebM.
+///
+/// Deliberately absent: video containers (`mp4`, `mkv`, `avi`), which mpv
+/// would play for their audio but which would sweep music videos and films
+/// into a playlist; and `amr` and `dsf`/`dff`, which the Pi decodes but which
+/// no available encoder could produce a sample of, so they were never played.
+///
+/// Several of these (`webm`, `mka`, `tta`, `ac3`, `eac3`, `dts`, `caf`, `au`,
+/// `w64`) are formats `lofty` cannot read: their duration stays unknown in the
+/// playlist (a dash, see `duration::probe`) until mpv reports it on play.
 const EXTENSIONS: &[&str] = &[
     "mp3", "flac", "ogg", "oga", "opus", "m4a", "aac", "wav", "wma", "aiff", "ape", "wv", "mpc",
+    "webm", "mka", "aif", "aifc", "wave", "w64", "m4b", "mp2", "spx", "tta", "ac3", "eac3", "dts",
+    "caf", "au",
 ];
 
 #[derive(Debug)]
@@ -404,6 +426,20 @@ mod tests {
         assert!(is_playlist(Path::new("x/tout.M3U8")));
         assert!(!is_audio(Path::new("x/tout.m3u")));
         assert!(!is_playlist(Path::new("x/piste.mp3")));
+    }
+
+    #[test]
+    fn a_webm_is_an_audio_file_and_a_video_container_is_not() {
+        // A `.webm` (what yt-dlp writes for YouTube audio) never showed in a
+        // walk: the extension was missing, and nothing said so. Its Matroska
+        // sibling `.mka` came with it.
+        assert!(is_audio(Path::new("youtube/chanson.webm")));
+        assert!(is_audio(Path::new("youtube/CHANSON.WEBM")));
+        assert!(is_audio(Path::new("x/piste.mka")));
+        // Video containers stay out on purpose: mpv would play their audio,
+        // but a recursive add would sweep music videos into the playlist.
+        assert!(!is_audio(Path::new("x/clip.mp4")));
+        assert!(!is_audio(Path::new("x/film.mkv")));
     }
 
     #[test]

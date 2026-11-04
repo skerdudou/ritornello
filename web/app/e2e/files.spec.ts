@@ -454,7 +454,18 @@ test('files plugin journey: local root, scan, saved list, presets', async ({
     )
   await page.locator('[data-preset-button]').nth(0).click()
   await expect(page.locator('[data-player-preset]')).toHaveText('1')
-  await expect.poll(async () => (await readFrame()).preset, { timeout: 10_000 }).toBe(1)
+  // Wait for a POSITION on preset 1, not for the preset alone: the core
+  // publishes the preset as soon as it sends `loadfile`, before mpv has opened
+  // the file, and mpv refuses a seek until then — while `/api/command` has
+  // already answered 204. Measured on CI (main 3ca6bd41): the seek below was
+  // dropped, the 30 s fixture played from 0, and the wait for >= 25 s timed
+  // out. `time-pos` exists only once mpv can seek.
+  await expect
+    .poll(async () => {
+      const f = await readFrame()
+      return f.preset === 1 && f.position != null
+    }, { timeout: 10_000 })
+    .toBe(true)
 
   try {
     await repeat.click() // off -> all
