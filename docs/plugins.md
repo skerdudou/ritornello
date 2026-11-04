@@ -2588,10 +2588,20 @@ never written), and it must answer `v22.X.Y` to `--version` before it is
 renamed over `bin/node`. The binary alone is about 108 MB (107 563 500 bytes
 for v22.23.4; the whole installation would be 187 MB). Unlike deno, which is
 installed once, node is **updated**: at yt-dlp's pace, the signed list's
-version is compared with the one `bin/node` answers, and the tarball is
-fetched only when they differ. A failure (nodejs.org unreachable, a release
-signed by a releaser whose key a later plugin version will have to embed)
-is reported on the page, is no failure of yt-dlp's update, is not retried
+version is compared, by number, with the one `bin/node` answers, and the
+tarball is fetched only when the listed one is **newer**. Never an older
+one: a validly signed but old `SHASUMS256.txt` replayed by a mirror or on
+the path would otherwise bring back a node with known holes. The floor is
+the highest node ever installed, which `settings.toml` records
+(`node_highest`, after each install, and learnt from a node found current on
+a device installed before the record existed), so deleting `bin/node` brings
+no older one back either; the recorded version itself is installed again (a
+repair). An older list is refused before the tarball is fetched, reported on
+the page (`runtime_rollback`) like any other node failure, and nothing
+overrides it: unlike yt-dlp's guard there is no "install anyway", since
+`latest-v22.x` only ever moves forward and there is no channel to switch. A
+failure (nodejs.org unreachable, a release signed by a releaser whose key a
+later plugin version will have to embed, an older list) is reported on the page, is no failure of yt-dlp's update, is not retried
 within a day, and leaves the node in place serving. Node 22's maintenance
 ends on **2027-04-30**
 ([release schedule](https://github.com/nodejs/release#release-schedule)):
@@ -2794,7 +2804,7 @@ the page polls it.
 |---|---|
 | `entries.toml` | the presets |
 | `state.json` | the armed preset |
-| `settings.toml` | the yt-dlp channel, the last check, what is installed; the last download folder |
+| `settings.toml` | the yt-dlp channel, the last check, what is installed; the highest own node ever installed (armv7); the last download folder |
 | `lists/<key>.json` | the cached videos of each playlist |
 | `playlist.m3u` | the list handed to mpv, never shown |
 | `jobs.json` | the last twenty downloads |

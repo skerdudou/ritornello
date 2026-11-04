@@ -331,6 +331,8 @@ export function runtimeErrorText(t: T, fault: UpdateFault): string {
       return t('runtime_version', { runtime, detail })
     case 'write':
       return t('runtime_write', { runtime, detail })
+    case 'rollback':
+      return t('runtime_rollback', { runtime, installed: p.installed ?? '', listed: p.listed ?? '' })
     default:
       return fault.code
   }

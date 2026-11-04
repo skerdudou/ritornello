@@ -91,6 +91,7 @@ runtime_mismatch = "le téléchargement ne correspond pas à sa somme publiée"
 runtime_extract = "le téléchargement n’a pas pu être décompressé : {detail}"
 runtime_version = "le {runtime} téléchargé ne donne pas la version attendue : {detail}"
 runtime_write = "{runtime} n’a pas pu être écrit : {detail}"
+runtime_rollback = "la liste signée propose {runtime} {listed}, plus ancien que le {installed} installé : refusé, celui installé est conservé"
 
 # admin page
 title = "Streaming web"

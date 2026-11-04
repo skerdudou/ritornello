@@ -27,8 +27,11 @@
 //! SHA-256, the tarball must hash to it; then only `bin/node` is taken out of
 //! it (~108 MB; the whole install would be 187 MB), and it must answer the
 //! listed version before it replaces the one in place. Unlike deno, which is
-//! installed once, node is updated: whenever the signed list names another
-//! version than the one installed. Node 22's maintenance ends on 2027-04-30
+//! installed once, node is updated: whenever the signed list names a newer
+//! version than the one installed. Never an older one: an old list, validly
+//! signed, replayed by a mirror or on the path, would otherwise bring back a
+//! node with known holes ([`RuntimeCause::Rollback`]). Node 22's maintenance
+//! ends on 2027-04-30
 //! ([`NODE22_END_OF_LIFE`]): the plugin then keeps the last one as it is, and
 //! the page says so; nothing is deleted.
 
@@ -323,6 +326,10 @@ pub enum RuntimeCause {
     /// The new binary does not answer the version it was listed as.
     Version(String),
     Write(String),
+    /// The signed list names an older version than the highest one ever
+    /// installed (the one in place, or the one `settings.toml` records): an
+    /// old list replayed. Refused before the tarball, the node in place kept.
+    Rollback { installed: String, listed: String },
 }
 
 impl std::fmt::Display for RuntimeError {
@@ -338,6 +345,9 @@ impl std::fmt::Display for RuntimeError {
             RuntimeCause::Extract(e) => write!(f, "{name}: {e}"),
             RuntimeCause::Version(e) => write!(f, "{name}: the new binary answers {e}"),
             RuntimeCause::Write(e) => write!(f, "{name}: {e}"),
+            RuntimeCause::Rollback { installed, listed } => {
+                write!(f, "{name}: the signed list names {listed}, older than the installed {installed}: refused")
+            }
         }
     }
 }
@@ -358,6 +368,9 @@ impl RuntimeError {
             RuntimeCause::Extract(e) => fault_with("extract", &[runtime, ("detail", e)]),
             RuntimeCause::Version(e) => fault_with("version", &[runtime, ("detail", e)]),
             RuntimeCause::Write(e) => fault_with("write", &[runtime, ("detail", e)]),
+            RuntimeCause::Rollback { installed, listed } => {
+                fault_with("rollback", &[runtime, ("installed", installed), ("listed", listed)])
+            }
         }
     }
 }
@@ -422,12 +435,22 @@ pub enum NodeInstall {
 /// signed list names `installed` (the version the node in place answers).
 /// Refused on any other architecture, before anything is fetched. Whatever
 /// fails, the node in place stays.
+///
+/// Never a rollback: a listed version older than `installed` or than
+/// `highest` (the highest one ever installed, as `settings.toml` records it,
+/// so that deleting `bin/node` brings no older one back) is refused before
+/// the tarball is fetched. The very version of `highest`, with no node in
+/// place answering it, is installed again: a repair, not a rollback.
+/// Unlike yt-dlp's guard, nothing overrides this one, on purpose: node 22's
+/// `latest-v22.x` only ever moves forward, so an older signed list there is
+/// never one to take, and there is no channel to switch.
 pub async fn install_node(
     fetch: &dyn Fetch,
     data_dir: &Path,
     arch: &str,
     keys: &[SignedPublicKey],
     installed: Option<&str>,
+    highest: Option<&str>,
 ) -> Result<NodeInstall, RuntimeError> {
     let err = |cause| RuntimeError { runtime: JsRuntime::Node, cause };
     if arch != NODE_ARCH {
@@ -448,6 +471,11 @@ pub async fn install_node(
     let (version, asset) = node_release(&sums).map_err(err)?;
     if installed == Some(version.as_str()) {
         return Ok(NodeInstall::Current(version));
+    }
+    if let Some(floor) = [installed, highest].into_iter().flatten().max_by_key(|v| numbers(v))
+        && numbers(&version) < numbers(floor)
+    {
+        return Err(err(RuntimeCause::Rollback { installed: floor.to_string(), listed: version }));
     }
     let want = listed_sum(&sums, &asset).map_err(|_| err(RuntimeCause::NotListed))?;
     let tarball = get(&asset, NODE_TARBALL).await?;
@@ -668,7 +696,7 @@ mod tests {
     async fn installed_node(data: &Path, version: &str) {
         let fetch = FakeFetch::default();
         publish_node(&fetch, version, &node_tarball(version, version));
-        assert_eq!(install_node(&fetch, data, "arm", &keys(), None).await, Ok(NodeInstall::Installed(version.into())));
+        assert_eq!(install_node(&fetch, data, "arm", &keys(), None, None).await, Ok(NodeInstall::Installed(version.into())));
     }
 
     /// Whatever failed, the node in place answers as before and nothing
@@ -746,7 +774,7 @@ mod tests {
         let fetch = FakeFetch::default();
         publish_node(&fetch, "22.5.1", &node_tarball("22.5.1", "22.5.1"));
         for arch in ["x86_64", "aarch64", "riscv64"] {
-            let r = install_node(&fetch, data.path(), arch, &keys(), None).await;
+            let r = install_node(&fetch, data.path(), arch, &keys(), None, None).await;
             assert_eq!(r, Err(node_err(RuntimeCause::NoBuild(arch.into()))));
         }
         assert!(fetch.asked().is_empty(), "{:?}", fetch.asked());
@@ -757,12 +785,12 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let fetch = FakeFetch::default();
         publish_node(&fetch, "22.5.1", &node_tarball("22.5.1", "22.5.1"));
-        let r = install_node(&fetch, data.path(), "arm", &keys(), Some("22.5.1")).await;
+        let r = install_node(&fetch, data.path(), "arm", &keys(), Some("22.5.1"), None).await;
         assert_eq!(r, Ok(NodeInstall::Current("22.5.1".into())));
         assert_eq!(fetch.asked(), vec![format!("{NODE_BASE}{NODE_SUMS}"), format!("{NODE_BASE}{NODE_SIG}")]);
         // Another installed version: the tarball is fetched.
         fetch.forget();
-        let r = install_node(&fetch, data.path(), "arm", &keys(), Some("22.4.0")).await;
+        let r = install_node(&fetch, data.path(), "arm", &keys(), Some("22.4.0"), None).await;
         assert_eq!(r, Ok(NodeInstall::Installed("22.5.1".into())));
         assert!(fetch.asked().contains(&format!("{NODE_BASE}{}", node_asset("22.5.1"))));
     }
@@ -773,9 +801,64 @@ mod tests {
         installed_node(data.path(), "22.5.1").await;
         let fetch = FakeFetch::default();
         publish_node(&fetch, "22.6.0", &node_tarball("22.6.0", "22.6.0"));
-        let r = install_node(&fetch, data.path(), "arm", &keys(), Some("22.5.1")).await;
+        let r = install_node(&fetch, data.path(), "arm", &keys(), Some("22.5.1"), None).await;
         assert_eq!(r, Ok(NodeInstall::Installed("22.6.0".into())));
         assert_node_still(data.path(), "22.6.0").await;
+    }
+
+    fn rollback(installed: &str, listed: &str) -> Result<NodeInstall, RuntimeError> {
+        Err(node_err(RuntimeCause::Rollback { installed: installed.into(), listed: listed.into() }))
+    }
+
+    /// An old list, validly signed, replayed: refused before the tarball, the
+    /// node in place kept. 22.9.5 is older than 22.10.0 by number, though not
+    /// as text.
+    #[tokio::test]
+    async fn an_older_listed_node_is_refused_and_the_installed_one_kept() {
+        let data = tempfile::tempdir().unwrap();
+        installed_node(data.path(), "22.10.0").await;
+        let fetch = FakeFetch::default();
+        publish_node(&fetch, "22.9.5", &node_tarball("22.9.5", "22.9.5"));
+        let r = install_node(&fetch, data.path(), "arm", &keys(), Some("22.10.0"), None).await;
+        assert_eq!(r, rollback("22.10.0", "22.9.5"));
+        assert_eq!(fetch.asked(), vec![format!("{NODE_BASE}{NODE_SUMS}"), format!("{NODE_BASE}{NODE_SIG}")]);
+        assert_node_still(data.path(), "22.10.0").await;
+        // The same with the record agreeing.
+        let r = install_node(&fetch, data.path(), "arm", &keys(), Some("22.10.0"), Some("22.10.0")).await;
+        assert_eq!(r, rollback("22.10.0", "22.9.5"));
+        assert_node_still(data.path(), "22.10.0").await;
+    }
+
+    /// The node in place older than the highest recorded (put back by hand,
+    /// or an earlier rollback): the record is the floor, compared by number.
+    #[tokio::test]
+    async fn the_recorded_highest_node_is_the_floor_when_it_is_above_the_installed_one() {
+        let data = tempfile::tempdir().unwrap();
+        installed_node(data.path(), "22.5.1").await;
+        let fetch = FakeFetch::default();
+        publish_node(&fetch, "22.6.0", &node_tarball("22.6.0", "22.6.0"));
+        let r = install_node(&fetch, data.path(), "arm", &keys(), Some("22.5.1"), Some("22.10.0")).await;
+        assert_eq!(r, rollback("22.10.0", "22.6.0"));
+        assert_node_still(data.path(), "22.5.1").await;
+    }
+
+    /// `bin/node` deleted: the record alone still refuses an older list, and
+    /// takes the recorded version itself again (a repair).
+    #[tokio::test]
+    async fn with_no_node_in_place_the_record_still_refuses_an_older_list() {
+        let data = tempfile::tempdir().unwrap();
+        let fetch = FakeFetch::default();
+        publish_node(&fetch, "22.9.5", &node_tarball("22.9.5", "22.9.5"));
+        let r = install_node(&fetch, data.path(), "arm", &keys(), None, Some("22.10.0")).await;
+        assert_eq!(r, rollback("22.10.0", "22.9.5"));
+        assert!(!own_node(data.path()).exists());
+        assert_eq!(fetch.asked().len(), 2, "nothing past the list: {:?}", fetch.asked());
+
+        let fetch = FakeFetch::default();
+        publish_node(&fetch, "22.10.0", &node_tarball("22.10.0", "22.10.0"));
+        let r = install_node(&fetch, data.path(), "arm", &keys(), None, Some("22.10.0")).await;
+        assert_eq!(r, Ok(NodeInstall::Installed("22.10.0".into())));
+        assert_node_still(data.path(), "22.10.0").await;
     }
 
     #[tokio::test]
@@ -786,7 +869,7 @@ mod tests {
         publish_node(&fetch, "22.6.0", &node_tarball("22.6.0", "22.6.0"));
         let sums = fetch.answers.lock().unwrap()[&format!("{NODE_BASE}{NODE_SUMS}")].clone().unwrap();
         fetch.serve(&format!("{NODE_BASE}{NODE_SIG}"), Ok(sign_with(rsa_key(), HashAlgorithm::Sha512, &sums)));
-        let r = install_node(&fetch, data.path(), "arm", &keys(), Some("22.5.1")).await;
+        let r = install_node(&fetch, data.path(), "arm", &keys(), Some("22.5.1"), None).await;
         assert!(matches!(r, Err(RuntimeError { cause: RuntimeCause::BadSignature(_), .. })), "{r:?}");
         assert_eq!(fetch.asked().len(), 2, "nothing past the list: {:?}", fetch.asked());
         assert_node_still(data.path(), "22.5.1").await;
@@ -799,7 +882,7 @@ mod tests {
         let fetch = FakeFetch::default();
         publish_node(&fetch, "22.6.0", &node_tarball("22.6.0", "22.6.0"));
         fetch.serve(&format!("{NODE_BASE}{}", node_asset("22.6.0")), Ok(node_tarball("22.6.0", "22.6.0-tampered")));
-        let r = install_node(&fetch, data.path(), "arm", &keys(), Some("22.5.1")).await;
+        let r = install_node(&fetch, data.path(), "arm", &keys(), Some("22.5.1"), None).await;
         assert_eq!(r, Err(node_err(RuntimeCause::Mismatch)));
         assert_node_still(data.path(), "22.5.1").await;
     }
@@ -810,7 +893,7 @@ mod tests {
         installed_node(data.path(), "22.5.1").await;
         let fetch = FakeFetch::default();
         publish_node(&fetch, "22.6.0", &tar_gz(items));
-        let r = install_node(&fetch, data.path(), "arm", &keys(), Some("22.5.1")).await;
+        let r = install_node(&fetch, data.path(), "arm", &keys(), Some("22.5.1"), None).await;
         (data, r)
     }
 
@@ -859,7 +942,7 @@ mod tests {
             installed_node(data.path(), "22.5.1").await;
             let fetch = FakeFetch::default();
             publish_node(&fetch, "22.6.0", &node_tarball("22.6.0", answers));
-            let r = install_node(&fetch, data.path(), "arm", &keys(), Some("22.5.1")).await;
+            let r = install_node(&fetch, data.path(), "arm", &keys(), Some("22.5.1"), None).await;
             assert!(matches!(r, Err(RuntimeError { cause: RuntimeCause::Version(_), .. })), "{answers}: {r:?}");
             assert_node_still(data.path(), "22.5.1").await;
         }
@@ -894,6 +977,11 @@ mod tests {
         assert_eq!((f.code, f.params["runtime"].as_str(), f.params["detail"].as_str()), ("write", "node", "x"));
         let f = RuntimeError { runtime: JsRuntime::Deno, cause: RuntimeCause::NoBuild("arm".into()) }.fault();
         assert_eq!((f.code, f.params["runtime"].as_str(), f.params["arch"].as_str()), ("no_build", "deno", "arm"));
+        let f = node_err(RuntimeCause::Rollback { installed: "22.10.0".into(), listed: "22.9.5".into() }).fault();
+        assert_eq!(
+            (f.code, f.params["runtime"].as_str(), f.params["installed"].as_str(), f.params["listed"].as_str()),
+            ("rollback", "node", "22.10.0", "22.9.5")
+        );
     }
 
     /// Manual: the real armv7l tarball (`NODE_REAL_TARBALL`, downloaded from

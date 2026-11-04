@@ -9,8 +9,8 @@
 //! The same place keeps the fallback's JavaScript runtime ([`runtime`]):
 //! deno on x86_64 and aarch64, installed once, checked against its
 //! published sum only; node 22 on armv7, checked against Node.js's own
-//! release signature and updated whenever its signed list names another
-//! version, until node 22's end of life (2027-04-30), after which the last
+//! release signature and updated whenever its signed list names a newer
+//! version (never an older one), until node 22's end of life (2027-04-30), after which the last
 //! one is kept as it is.
 //!
 //! The layout under the plugin's data directory:
@@ -784,9 +784,12 @@ impl Tool {
     }
 
     /// The plugin's own node 22, on armv7 only, installed when absent and
-    /// **updated** whenever the signed list of `latest-v22.x` names another
+    /// **updated** whenever the signed list of `latest-v22.x` names a newer
     /// version than the one in place answers (deno is only installed when
-    /// absent). Its failure is no failure of yt-dlp's update, and whatever
+    /// absent), never an older one than the highest ever installed, which
+    /// `settings.toml` keeps (`node_highest`, also learnt from a node found
+    /// current, so a device installed before the record existed is covered
+    /// from its next check). Its failure is no failure of yt-dlp's update, and whatever
     /// fails (the list unreachable, a releaser whose key is not embedded),
     /// the node in place keeps serving. One at a time, not again within a
     /// day of a failure, outside the update's section (a 25 MB download).
@@ -800,18 +803,26 @@ impl Tool {
             return;
         }
         let installed = runtime::own_node_version(&self.inner.data_dir).await;
+        let highest = lock(&self.inner.settings).node_highest.clone();
         let r = runtime::install_node(
             self.inner.deps.fetch.as_ref(),
             &self.inner.data_dir,
             &self.inner.deps.arch,
             &self.inner.deps.node_keys,
             installed.as_deref(),
+            highest.as_deref(),
         )
         .await;
         match &r {
             Ok(runtime::NodeInstall::Installed(v)) => tracing::info!("node {v} installed"),
             Ok(runtime::NodeInstall::Current(_)) => {}
             Err(e) => tracing::warn!("node not installed: {e}"),
+        }
+        if let Ok(runtime::NodeInstall::Installed(v) | runtime::NodeInstall::Current(v)) = &r
+            && highest.as_deref().is_none_or(|h| runtime::numbers(v) > runtime::numbers(h))
+            && let Err(e) = self.edit_settings(|s| s.node_highest = Some(v.clone()))
+        {
+            tracing::warn!("settings.toml not written: {e:#}");
         }
         let changed = matches!(r, Ok(runtime::NodeInstall::Installed(_)));
         self.record_runtime(now, r.err());

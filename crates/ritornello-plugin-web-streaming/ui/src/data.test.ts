@@ -63,8 +63,10 @@ describe('runtimeErrorText', () => {
     // The codes of `RuntimeError::fault` in tool/runtime.rs.
     for (const code of [
       'no_build', 'fetch', 'bad_signature', 'not_listed', 'unexpected', 'mismatch', 'extract', 'version', 'write',
+      'rollback',
     ]) {
-      const text = runtimeErrorText(t, { code, params: { runtime: 'node', detail: 'D', arch: 'arm' } })
+      const params = { runtime: 'node', detail: 'D', arch: 'arm', installed: 'I', listed: 'L' }
+      const text = runtimeErrorText(t, { code, params })
       expect(text, code).not.toBe(code)
       expect(text, code).not.toMatch(/\{\w+\}/)
     }
@@ -77,6 +79,8 @@ describe('runtimeErrorText', () => {
       .toBe('Deno publishes no build for this device (riscv64)')
     expect(runtimeErrorText(t, { code: 'version', params: { runtime: 'node', detail: 'v23.0.0 instead of v22.6.0' } }))
       .toBe('the downloaded Node.js does not answer the expected version: v23.0.0 instead of v22.6.0')
+    expect(runtimeErrorText(t, { code: 'rollback', params: { runtime: 'node', installed: '22.10.0', listed: '22.9.5' } }))
+      .toBe('the signed list offers Node.js 22.9.5, older than the installed 22.10.0: refused, the installed one is kept')
   })
 })
 

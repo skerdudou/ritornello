@@ -91,6 +91,7 @@ runtime_mismatch = "the download does not match its published sum"
 runtime_extract = "the download could not be unpacked: {detail}"
 runtime_version = "the downloaded {runtime} does not answer the expected version: {detail}"
 runtime_write = "{runtime} could not be written: {detail}"
+runtime_rollback = "the signed list offers {runtime} {listed}, older than the installed {installed}: refused, the installed one is kept"
 
 # admin page
 title = "Web streaming"

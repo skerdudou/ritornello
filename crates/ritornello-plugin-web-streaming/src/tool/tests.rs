@@ -61,6 +61,21 @@ fn world_on(arch: &str, search: Vec<PathBuf>, search_guard: tempfile::TempDir) -
     World { data, _search: search_guard, fetch, clock, gate, tool }
 }
 
+/// The dependencies of `w`'s tool again, for a plugin restarted on the same
+/// data directory.
+fn deps_of(w: &World, arch: &str) -> Deps {
+    let c = w.clock.clone();
+    Deps {
+        fetch: w.fetch.clone(),
+        now: Arc::new(move || c.load(Ordering::SeqCst)),
+        search: w.tool.inner.deps.search.clone(),
+        arch: arch.into(),
+        gate: w.gate.clone(),
+        key: public(test_key()),
+        node_keys: vec![public(test_key())],
+    }
+}
+
 /// What the installed wrapper answers to `--version`.
 fn wrapper_version(w: &World) -> String {
     let out = retrying(|| Command::new(w.data.path().join("bin/yt-dlp")).arg("--version").output());
@@ -546,6 +561,7 @@ fn every_code_of_an_update_or_a_runtime_failure_has_a_key() {
         RuntimeCause::Extract("x".into()),
         RuntimeCause::Version("x".into()),
         RuntimeCause::Write("x".into()),
+        RuntimeCause::Rollback { installed: "22.2.0".into(), listed: "22.1.0".into() },
     ];
     for runtime in [JsRuntime::Deno, JsRuntime::Node] {
         for cause in causes.clone() {
@@ -926,20 +942,73 @@ async fn on_armv7_node_is_installed_after_yt_dlp_and_is_the_wrappers_runtime() {
 }
 
 #[tokio::test]
-async fn the_own_node_is_updated_only_when_the_signed_list_names_another_version() {
+async fn the_own_node_is_updated_only_when_the_signed_list_names_a_newer_version() {
     let w = node_world();
     publish_node(&w.fetch, "22.5.1");
     installed_v1(&w).await;
+    assert_eq!(node_highest(&w).as_deref(), Some("22.5.1"), "recorded at the first install");
     // The same version listed: the list is read, the tarball is not.
     w.tool.update(true).await.unwrap();
     assert!(w.fetch.asked().contains(&node_url(runtime::NODE_SUMS)), "{:?}", w.fetch.asked());
     assert!(!tarball_asked(&w), "{:?}", w.fetch.asked());
-    // A newer one: fetched, and in place.
+    // A newer one: fetched, in place, and recorded.
     w.fetch.forget();
     publish_node(&w.fetch, "22.6.0");
     w.tool.update(true).await.unwrap();
     assert!(tarball_asked(&w), "{:?}", w.fetch.asked());
     assert_eq!(runtime::own_node_version(w.data.path()).await.as_deref(), Some("22.6.0"));
+    assert_eq!(node_highest(&w).as_deref(), Some("22.6.0"));
+    assert_eq!(w.tool.status().runtime_error, None);
+}
+
+/// The highest node ever installed, as `settings.toml` holds it on disk.
+fn node_highest(w: &World) -> Option<String> {
+    Settings::load(&w.data.path().join("settings.toml")).node_highest
+}
+
+/// An old list replayed, validly signed: refused and reported, the node in
+/// place kept; and with `bin/node` deleted, the record alone still refuses
+/// it, so deleting the binary brings no older node back.
+#[tokio::test]
+async fn an_older_signed_node_list_is_refused_even_with_the_node_deleted() {
+    let w = node_world();
+    publish_node(&w.fetch, "22.10.0");
+    installed_v1(&w).await;
+    w.fetch.forget();
+    publish_node(&w.fetch, "22.9.5");
+    w.tool.update(true).await.unwrap();
+    let st = w.tool.status();
+    let f = st.runtime_error_code.expect("a rollback is reported");
+    assert_eq!(
+        (f.code, f.params["runtime"].as_str(), f.params["installed"].as_str(), f.params["listed"].as_str()),
+        ("rollback", "node", "22.10.0", "22.9.5")
+    );
+    assert!(!tarball_asked(&w), "{:?}", w.fetch.asked());
+    assert_eq!(runtime::own_node_version(w.data.path()).await.as_deref(), Some("22.10.0"));
+    assert_eq!(node_highest(&w).as_deref(), Some("22.10.0"));
+
+    // bin/node deleted, a day later (past the retry delay), the plugin
+    // restarted on the same data: still refused.
+    std::fs::remove_file(runtime::own_node(w.data.path())).unwrap();
+    let w = World { tool: Tool::with_deps(w.data.path(), deps_of(&w, "arm")), ..w };
+    w.clock.fetch_add(DAY, Ordering::SeqCst);
+    w.fetch.forget();
+    w.tool.update(true).await.unwrap();
+    assert_eq!(w.tool.status().runtime_error_code.map(|f| f.code), Some("rollback"));
+    assert!(!tarball_asked(&w), "{:?}", w.fetch.asked());
+    assert!(!runtime::own_node(w.data.path()).exists());
+}
+
+/// A device whose node was installed before the record existed learns it
+/// from the node it finds current.
+#[tokio::test]
+async fn a_current_node_is_recorded_when_nothing_was() {
+    let w = node_world();
+    publish_node(&w.fetch, "22.5.1");
+    installed_v1(&w).await;
+    w.tool.edit_settings(|s| s.node_highest = None).unwrap();
+    w.tool.update(true).await.unwrap();
+    assert_eq!(node_highest(&w).as_deref(), Some("22.5.1"));
 }
 
 #[tokio::test]
