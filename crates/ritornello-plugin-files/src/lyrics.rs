@@ -286,7 +286,7 @@ fn create_exclusively(target: &Path, content: &str) -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ritornello_plugin_files::roots::Root;
+    use ritornello_plugin_files::roots::{MountRoot, Root};
 
     /// The echo the core sends, built exactly as `FilesSource::identity`
     /// builds it.
@@ -299,15 +299,17 @@ mod tests {
     fn local_table(dir: &Path) -> Roots {
         Roots {
             root: vec![Root {
-                name: "usb".into(),
-                kind: RootKind::Local,
-                path: Some(dir.to_string_lossy().into_owned()),
-                host: String::new(),
-                share: String::new(),
-                subpath: None,
-                user: String::new(),
-                domain: String::new(),
-                writable: false,
+                mount: MountRoot {
+                    name: "usb".into(),
+                    kind: RootKind::Local,
+                    path: Some(dir.to_string_lossy().into_owned()),
+                    host: String::new(),
+                    share: String::new(),
+                    subpath: None,
+                    user: String::new(),
+                    domain: String::new(),
+                    writable: false,
+                },
                 archive_covers: false,
                 archive_lyrics: true,
             }],
@@ -580,15 +582,17 @@ mod tests {
         // so nothing was tried and nothing was even listed.
         let table = Roots {
             root: vec![Root {
-                name: "nas".into(),
-                kind: RootKind::Smb,
-                path: None,
-                host: "192.168.1.20".into(),
-                share: "musique".into(),
-                subpath: None,
-                user: "steven".into(),
-                domain: String::new(),
-                writable: false,
+                mount: MountRoot {
+                    name: "nas".into(),
+                    kind: RootKind::Smb,
+                    path: None,
+                    host: "192.168.1.20".into(),
+                    share: "musique".into(),
+                    subpath: None,
+                    user: "steven".into(),
+                    domain: String::new(),
+                    writable: false,
+                },
                 archive_covers: false,
                 archive_lyrics: true,
             }],

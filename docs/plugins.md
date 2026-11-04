@@ -1408,7 +1408,24 @@ The helper is not part of the plugin's crate. It is the binary of
 no `ritornello-plugin-` prefix, and `plugins.example.toml` does not list it).
 That crate also holds what the two sides must read identically: the declared
 roots (`roots`), the mount options (`mount_options`) and the `/proc/mounts`
-table (`mounts`). The plugin depends on it as a library and re-exports `roots`.
+table (`mounts`). The plugin depends on it as a library.
+
+**A preference of the plugin does not go into that library.** Its `Root`
+holds only what describes a share — `name`, `kind`, `path`, `host`, `share`,
+`subpath`, `user`, `domain`, `writable` — because every field of it is
+compiled into the root helper: a field added there changes that binary,
+hence moves `files-mount`, hence sends every device to `ritornello-install`.
+The plugin's own row (`crates/ritornello-plugin-files/src/roots.rs`) embeds
+that `Root` (`#[serde(flatten)]`) beside the plugin's preferences
+(`archive_covers`, `archive_lyrics`, and any later one), in the **same
+`[[root]]` table of the same `media-roots.toml`**: the keys on disk are the
+ones every version wrote, so no migration exists and old and new versions
+read each other's tables. The plugin reads, validates (the library's
+validation, on the share part) and rewrites the whole file; the helper reads
+it through the library and ignores the keys it does not know, which is why
+the library's `Root` must never carry `deny_unknown_fields`. Two tests pin
+this: `a_root_row_carries_only_the_share_fields` in the library, and the
+helper's `the_plugin_preferences_and_unknown_keys_are_ignored_and_change_no_verdict`.
 
 Said plainly: whoever reaches the web UI decides what root mounts. So the
 validation that counts lives on the **privileged side** — the plugin
@@ -1629,8 +1646,11 @@ never an overwrite, only no longer atomic. The write works
 detached, under the archive's own twenty-second bound, and every outcome is
 a journal line ("lyrics archived at …", "lyrics not archived: …"). The
 homogeneity rule of covers has no object here: a `.lrc` names its track.
-`archive_lyrics` is a field of the roots table the mount helper reads too,
-which is why `files-mount` moved to 1.0.2 with it.
+`archive_lyrics` is a key of the roots table, beside the share it applies
+to. It first shipped as a field of the library the mount helper reads too,
+which is why `files-mount` moved to 1.0.2 with it; it has since moved into
+the plugin's own row (see [The privilege boundary](#the-privilege-boundary)),
+so a new preference of this kind no longer changes the helper.
 
 **Updating an existing installation.** As for every other plugin,
 `ritornello-install` installs the binary and, on a device already in service,

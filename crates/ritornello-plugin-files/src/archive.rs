@@ -369,7 +369,7 @@ pub fn album_from_tags(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ritornello_plugin_files::roots::Root;
+    use ritornello_plugin_files::roots::{MountRoot, Root};
 
     /// A temporary directory that answers like a `PathBuf`.
     ///
@@ -412,15 +412,17 @@ mod tests {
     fn local_table(dir: &Path) -> Roots {
         Roots {
             root: vec![Root {
-                name: "usb".into(),
-                kind: RootKind::Local,
-                path: Some(dir.to_string_lossy().into_owned()),
-                host: String::new(),
-                share: String::new(),
-                subpath: None,
-                user: String::new(),
-                domain: String::new(),
-                writable: false,
+                mount: MountRoot {
+                    name: "usb".into(),
+                    kind: RootKind::Local,
+                    path: Some(dir.to_string_lossy().into_owned()),
+                    host: String::new(),
+                    share: String::new(),
+                    subpath: None,
+                    user: String::new(),
+                    domain: String::new(),
+                    writable: false,
+                },
                 archive_covers: true,
                 archive_lyrics: false,
             }],
@@ -797,15 +799,17 @@ mod tests {
         // the refusal but not that it came first.
         let table = Roots {
             root: vec![Root {
-                name: "nas".into(),
-                kind: RootKind::Smb,
-                path: None,
-                host: "192.168.1.20".into(),
-                share: "musique".into(),
-                subpath: None,
-                user: "steven".into(),
-                domain: String::new(),
-                writable: false,
+                mount: MountRoot {
+                    name: "nas".into(),
+                    kind: RootKind::Smb,
+                    path: None,
+                    host: "192.168.1.20".into(),
+                    share: "musique".into(),
+                    subpath: None,
+                    user: "steven".into(),
+                    domain: String::new(),
+                    writable: false,
+                },
                 archive_covers: true,
                 archive_lyrics: false,
             }],

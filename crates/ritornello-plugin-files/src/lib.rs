@@ -21,9 +21,10 @@ pub mod store;
 pub mod volumes;
 
 // The declared roots are read by the root mount helper and by this plugin from
-// one grammar, which lives in `ritornello-files-mount`; re-exported so the
-// plugin's paths (`crate::roots`) do not change.
-pub use ritornello_files_mount::roots;
+// one grammar, which lives in `ritornello-files-mount`. This module adds the
+// plugin's own preferences to each row, so that adding one never changes the
+// root binary.
+pub mod roots;
 
 // Only compiled under `cargo test`: nothing in this module is used at runtime
 // in this crate. It is used by `build.rs` (separate compilation, via

@@ -10,7 +10,9 @@
 //! reading `/proc/mounts`), and asking for reconciliation. What is actually
 //! mounted, and with which options, is decided on the privileged side.
 
-use crate::roots::{Root, RootKind};
+// The share part of a row: mounting is all this module knows, and a row
+// of the table derefs to it.
+use crate::roots::{MountRoot as Root, RootKind};
 use ritornello_files_mount::mounts::{is_mounted_in, read_proc_mounts};
 use std::path::PathBuf;
 
@@ -129,8 +131,6 @@ mod tests {
             user: "steven".into(),
             domain: String::new(),
             writable: false,
-            archive_covers: false,
-            archive_lyrics: false,
         }
     }
 

@@ -14,7 +14,7 @@ use anyhow::Result;
 use ritornello_plugin_files::m3u::Entry;
 use ritornello_plugin_files::playlist::Playlist;
 use ritornello_plugin_files::root_error::RootErrorText;
-use ritornello_plugin_files::roots::{Root, RootKind, Roots};
+use ritornello_plugin_files::roots::{MountRoot, Root, RootKind, Roots};
 use ritornello_plugin_files::health::Health;
 use ritornello_plugin_files::store::{self, Location};
 use ritornello_plugin_files::volumes;
@@ -730,15 +730,17 @@ impl AdminPlugin for FilesAdmin {
                 };
                 let name = ritornello_plugin_files::roots::derive_name(&hint, &taken);
                 let root = Root {
-                    name: name.clone(),
-                    kind,
-                    path,
-                    host: host.clone(),
-                    share,
-                    subpath,
-                    user: user.clone(),
-                    domain: domain.clone(),
-                    writable,
+                    mount: MountRoot {
+                        name: name.clone(),
+                        kind,
+                        path,
+                        host: host.clone(),
+                        share,
+                        subpath,
+                        user: user.clone(),
+                        domain: domain.clone(),
+                        writable,
+                    },
                     archive_covers: false,
                     archive_lyrics: false,
                 };
@@ -2148,15 +2150,17 @@ mod tests {
         let (admin, root_dir) = test_admin();
         *admin.roots.write().await = Roots {
             root: vec![Root {
-                name: "local".into(),
-                kind: RootKind::Local,
-                path: Some(root_dir.join("media").display().to_string()),
-                host: String::new(),
-                share: String::new(),
-                subpath: None,
-                user: String::new(),
-                domain: String::new(),
-                writable: false,
+                mount: MountRoot {
+                    name: "local".into(),
+                    kind: RootKind::Local,
+                    path: Some(root_dir.join("media").display().to_string()),
+                    host: String::new(),
+                    share: String::new(),
+                    subpath: None,
+                    user: String::new(),
+                    domain: String::new(),
+                    writable: false,
+                },
                 archive_covers: false,
                 archive_lyrics: false,
             }],
@@ -2267,15 +2271,17 @@ mod tests {
         let (mut admin, root_dir) = test_admin();
         *admin.roots.write().await = Roots {
             root: vec![Root {
-                name: "local".into(),
-                kind: RootKind::Local,
-                path: Some(root_dir.join("media").display().to_string()),
-                host: String::new(),
-                share: String::new(),
-                subpath: None,
-                user: String::new(),
-                domain: String::new(),
-                writable: false,
+                mount: MountRoot {
+                    name: "local".into(),
+                    kind: RootKind::Local,
+                    path: Some(root_dir.join("media").display().to_string()),
+                    host: String::new(),
+                    share: String::new(),
+                    subpath: None,
+                    user: String::new(),
+                    domain: String::new(),
+                    writable: false,
+                },
                 archive_covers: false,
                 archive_lyrics: false,
             }],
@@ -2301,15 +2307,17 @@ mod tests {
         std::fs::write(root_dir.join("media/notes.txt"), b"").unwrap();
         *admin.roots.write().await = Roots {
             root: vec![Root {
-                name: "local".into(),
-                kind: RootKind::Local,
-                path: Some(root_dir.join("media").display().to_string()),
-                host: String::new(),
-                share: String::new(),
-                subpath: None,
-                user: String::new(),
-                domain: String::new(),
-                writable: false,
+                mount: MountRoot {
+                    name: "local".into(),
+                    kind: RootKind::Local,
+                    path: Some(root_dir.join("media").display().to_string()),
+                    host: String::new(),
+                    share: String::new(),
+                    subpath: None,
+                    user: String::new(),
+                    domain: String::new(),
+                    writable: false,
+                },
                 archive_covers: false,
                 archive_lyrics: false,
             }],

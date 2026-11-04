@@ -236,7 +236,7 @@ impl std::error::Error for StoreError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::roots::{Root, RootKind};
+    use crate::roots::{MountRoot, Root, RootKind};
     use tempfile::TempDir;
 
     /// The test roots are built **inside a `tempdir`**, hence as
@@ -250,15 +250,17 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         let roots = Roots {
             root: vec![Root {
-                name: "nas".into(),
-                kind: RootKind::Local,
-                path: Some(base.to_string_lossy().into_owned()),
-                host: String::new(),
-                share: String::new(),
-                subpath: None,
-                user: String::new(),
-                domain: String::new(),
-                writable,
+                mount: MountRoot {
+                    name: "nas".into(),
+                    kind: RootKind::Local,
+                    path: Some(base.to_string_lossy().into_owned()),
+                    host: String::new(),
+                    share: String::new(),
+                    subpath: None,
+                    user: String::new(),
+                    domain: String::new(),
+                    writable,
+                },
                 archive_covers: false,
                 archive_lyrics: false,
             }],
