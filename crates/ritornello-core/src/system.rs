@@ -78,6 +78,24 @@ pub struct Metrics {
     /// `AckFile`). Only qualifies `under_voltage_since_boot`: an
     /// instantaneous `under_voltage` stays an alert whatever this says.
     pub under_voltage_acknowledged: bool,
+    /// The device's IANA zone name (`Europe/Paris`), `null` when nothing on
+    /// the device names it — `/etc/localtime` copied rather than linked, and
+    /// no `/etc/timezone`. The offset below is still known then, so the page
+    /// can show the device's clock and say the zone is unknown.
+    pub timezone: Option<String>,
+    /// The device's offset from UTC right now, in seconds east. The automatic
+    /// update's hour is counted in this local time.
+    pub utc_offset_seconds: Option<i32>,
+    /// The device's clock, Unix seconds, when this response was built: lets
+    /// the page show the device's local time and notice a clock that is off,
+    /// which its own `Date.now()` cannot.
+    pub device_unix_s: i64,
+    /// Whether the zone can be changed from the page: timedated answered the
+    /// startup probe **and** polkit grants `set-timezone`. The two facts are
+    /// kept apart for the reason `logind_reachable` is: a refusal is fixed by
+    /// granting the rule at install, an absent timedated is not.
+    pub timezone_settable: bool,
+    pub timedated_reachable: bool,
 }
 
 /// Called to restart the service. A field rather than a direct
@@ -132,6 +150,18 @@ pub struct SystemInfo {
     /// (`vcgencmd get_throttled`). A field for the same reason `systemctl`
     /// is: tests point it at a stub script instead of a real `vcgencmd`.
     pub vcgencmd: String,
+    /// Command used to change the time zone through timedated
+    /// (`timezone::timezone_post`). A field for the same reason `systemctl`
+    /// is: a test that really ran `SetTimezone` would change the zone of the
+    /// machine running the suite. The startup probe does not use it — it runs
+    /// before this struct exists, and only reads.
+    pub busctl: String,
+    /// What `timezone::probe` answered at startup: whether polkit lets this
+    /// process change the zone, and whether timedated answered at all. Cached
+    /// like `can_power_off` and `logind_reachable`, for the same reasons; see
+    /// `Metrics::timezone_settable`.
+    pub timezone_settable: bool,
+    pub timedated_reachable: bool,
     /// Latches to `true` the first time the sticky flag is seen set, and
     /// never resets: the firmware itself only clears it at reboot, so once
     /// this process has observed it, spawning `vcgencmd` again can only ever
@@ -177,6 +207,9 @@ impl Default for SystemInfo {
             logind_reachable: false,
             systemctl: "systemctl".to_string(),
             vcgencmd: "vcgencmd".to_string(),
+            busctl: "busctl".to_string(),
+            timezone_settable: false,
+            timedated_reachable: false,
             under_voltage_latched: std::sync::atomic::AtomicBool::new(false),
             under_voltage_ack: None,
             under_voltage_acked: std::sync::atomic::AtomicBool::new(false),
@@ -445,6 +478,11 @@ pub fn collect(info: &SystemInfo) -> Metrics {
     // reads could straddle a tick and skew the delta the page computes
     // between polls.
     let cpu_jiffies = read("/proc/stat").as_deref().and_then(parse_cpu_jiffies);
+    // One instant for both the clock and its offset: read twice, they could
+    // straddle a summer-time change and disagree.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
     Metrics {
         temperature_c: read("/sys/class/thermal/thermal_zone0/temp")
             .as_deref()
@@ -471,6 +509,11 @@ pub fn collect(info: &SystemInfo) -> Metrics {
         cpu_total_jiffies: cpu_jiffies.map(|(total, _)| total),
         cpu_idle_jiffies: cpu_jiffies.map(|(_, idle)| idle),
         under_voltage_acknowledged: info.under_voltage_acked.load(std::sync::atomic::Ordering::Relaxed),
+        timezone: crate::timezone::current_zone(),
+        utc_offset_seconds: crate::timezone::utc_offset_seconds(now),
+        device_unix_s: now,
+        timezone_settable: info.timezone_settable,
+        timedated_reachable: info.timedated_reachable,
     }
 }
 
@@ -935,6 +978,8 @@ mod tests {
         assert!(!m.can_power_off, "capabilities default to false");
         assert!(m.cpu_total_jiffies.is_some(), "/proc/stat readable on Linux");
         assert!(m.cpu_idle_jiffies.is_some());
+        assert!(m.utc_offset_seconds.is_some(), "localtime_r answers on Linux");
+        assert!(!m.timezone_settable && !m.timedated_reachable, "nothing offered by default");
     }
 
     use crate::status::{router, AppState};
@@ -966,7 +1011,8 @@ mod tests {
             "temperature_c", "cpu_mhz", "load", "cpus", "memory", "disk", "under_voltage",
             "under_voltage_since_boot", "uptime_s", "service_uptime_s", "hostname", "ip", "os",
             "kernel", "version", "can_power_off", "can_reboot", "logind_reachable",
-            "cpu_total_jiffies", "cpu_idle_jiffies", "under_voltage_acknowledged",
+            "cpu_total_jiffies", "cpu_idle_jiffies", "under_voltage_acknowledged", "timezone",
+            "utc_offset_seconds", "device_unix_s", "timezone_settable", "timedated_reachable",
         ] {
             assert!(v.get(key).is_some(), "key {key} missing");
         }
