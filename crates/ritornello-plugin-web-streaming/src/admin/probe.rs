@@ -9,15 +9,11 @@
 use super::{keyed, Text, MAX_LINKS};
 use ritornello_plugin_web_streaming::entries::Entries;
 use ritornello_plugin_web_streaming::link::{parse_lines, Link, LinkError};
-use ritornello_plugin_web_streaming::ytdlp::{Kind, ToolError, Video, Ytdlp};
+use ritornello_plugin_web_streaming::ytdlp::{Kind, PROBE_DEADLINE, ToolError, Video, Ytdlp};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
-/// One link's probe: a playlist of a thousand videos is read in a few tens of
-/// seconds; a link that takes longer is not worth waiting for.
-const PROBE_DEADLINE: Duration = Duration::from_secs(120);
 /// Playlists kept for the next save: the oldest go first.
 const KEPT_LISTS: usize = 20;
 

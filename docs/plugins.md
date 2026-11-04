@@ -2548,12 +2548,21 @@ runs the same arguments again in the same process with the best runtime the
 device offers. Measured on the device, a runtime only costs time today: no
 runtime 6.4 to 8.8 s per video; node 22, 26 to 29 s (about 4 times slower);
 QuickJS, about 125 s (about 20 times slower); and Debian 13's node 20.19.2 is
-below yt-dlp's minimum (node 22) so it is ignored. Without a runtime YouTube
-works today (yt-dlp warns that extraction without one is deprecated), but
-that may stop; the runtime is kept for that day. The order is the plugin's
+below yt-dlp's minimum (node 22) so it is ignored. Without a runtime most of
+YouTube still works (yt-dlp warns that extraction without one is
+deprecated), **but not every video any more**: measured on the device on
+2026-11-04, one video answered "This video is not available" until a JS
+challenge was solved, and resolved on the second attempt in 2 min 10 s with
+QuickJS, 28.8 s with node 22. Every probe — adding a link, refreshing a
+playlist, a download's own — is therefore bounded by `ytdlp::PROBE_DEADLINE`
+(300 s), sized for both attempts: the earlier 120 s killed the QuickJS
+attempt just before it answered. Playing waits for yt-dlp without a deadline
+of its own. The order is the plugin's
 own `deno` (**only on x86_64 and aarch64**: deno publishes nothing for 32-bit
 ARM), then a system `node` of at least 22, then a system QuickJS (flagged
-slow). On the reference device none exists that helps, and the page says so.
+slow). On the reference device only QuickJS or a node 22 installed by hand
+(the official armv7l build: Debian's is too old) can serve, and the page says
+which, as the fallback's.
 deno is not signed by its authors: its zip is checked against the
 `.sha256sum` published next to it, which catches a damaged download but not
 a compromised release. That is the whole of its trust, and why it is only a

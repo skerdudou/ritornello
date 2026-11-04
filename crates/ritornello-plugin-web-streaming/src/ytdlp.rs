@@ -239,6 +239,18 @@ pub struct Ytdlp {
 /// than read. The deadline bounds time, this bounds memory.
 pub const PROBE_ANSWER_MAX: usize = 32 * 1024 * 1024;
 
+/// The longest one `-J` probe may take — adding a link, refreshing a
+/// playlist, a download's own probe — before yt-dlp's group is killed.
+///
+/// Sized for the wrapper's two attempts, not for one. Measured on the
+/// reference device (armv7l Raspberry Pi 2, 2026-11-04): a YouTube video
+/// resolves in 6.8 s without a JavaScript runtime, but some videos answer
+/// "This video is not available" until a JS challenge is solved, and the
+/// second attempt then took 2 min 10 s with QuickJS (28.8 s with node 22).
+/// The earlier 120 s killed that QuickJS attempt just before it answered,
+/// and the page said the site had not answered in time.
+pub const PROBE_DEADLINE: Duration = Duration::from_secs(300);
+
 impl Ytdlp {
     pub fn new(data_dir: &Path) -> Self {
         Self { bin: data_dir.join("bin").join("yt-dlp") }
