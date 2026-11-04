@@ -235,7 +235,7 @@ pub fn intent_from_args(a: &Args, dev: &DeviceState, inv: &Inventory) -> Result<
             return Err(ArgError::NothingToKeep);
         }
         let (plugins, packs) = plan::preselection(inv, dev);
-        return Ok(Some(Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: a.reinstall }));
+        return Ok(Some(Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: a.reinstall, declined: crate::grants::recorded_declined(dev.registry.as_ref()) }));
     }
     if a.plugins.is_none() && a.packs.is_none() {
         return Ok(None);
@@ -262,7 +262,7 @@ pub fn intent_from_args(a: &Args, dev: &DeviceState, inv: &Inventory) -> Result<
     } else {
         BTreeSet::new()
     };
-    Ok(Some(Intent::InstallOrUpdate { plugins, packs, erase_data, reinstall: a.reinstall }))
+    Ok(Some(Intent::InstallOrUpdate { plugins, packs, erase_data, reinstall: a.reinstall, declined: crate::grants::recorded_declined(dev.registry.as_ref()) }))
 }
 
 #[cfg(test)]
@@ -296,7 +296,7 @@ mod tests {
     }
 
     fn install(plugins: &[&str], packs: &[&str], erase: &[&str]) -> Option<Intent> {
-        Some(Intent::InstallOrUpdate { plugins: set(plugins), packs: set(packs), erase_data: set(erase), reinstall: false })
+        Some(Intent::InstallOrUpdate { plugins: set(plugins), packs: set(packs), erase_data: set(erase), reinstall: false, declined: BTreeSet::new() })
     }
 
     #[test]
@@ -314,7 +314,7 @@ mod tests {
         let (plugins, packs) = plan::preselection(&inv(), &device);
         assert_eq!(
             intent(&["--keep"], &device),
-            Ok(Some(Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false }))
+            Ok(Some(Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false, declined: BTreeSet::new() }))
         );
         assert_eq!(intent(&["--keep"], &device), Ok(install(&["cd", "radio", "theirs"], &["fr"], &[])));
     }

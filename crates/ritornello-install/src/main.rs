@@ -15,6 +15,7 @@
 
 mod cli;
 mod device;
+mod grants;
 mod inventory;
 mod names;
 mod own_version;
@@ -183,7 +184,7 @@ fn ask_intent(inv: &Inventory, dev: &DeviceState, action: Action) -> anyhow::Res
     let packs = ui::ask_packs(&ui::pack_choices(inv, &installed_packs), &installed_packs)?;
     let candidates = ui::data_choices(&cli::removed_by(inv, dev, &plugins), dev);
     let erase_data = if candidates.is_empty() { BTreeSet::new() } else { ui::ask_erase(&candidates)? };
-    Ok(Intent::InstallOrUpdate { plugins, packs, erase_data, reinstall: action == Action::Repair })
+    Ok(Intent::InstallOrUpdate { plugins, packs, erase_data, reinstall: action == Action::Repair, declined: grants::recorded_declined(dev.registry.as_ref()) })
 }
 
 /// Asks for the sudo password and proves it, three tries at most. Every
@@ -554,7 +555,7 @@ mod tests {
         };
         let device = dev(&[("radio", RADIO_EXEC), ("theirs", THEIRS_EXEC)], Some(registry), &[], &[]);
         let (plugins, packs) = plan::preselection(&inv(), &device);
-        let keep = Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false };
+        let keep = Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false, declined: BTreeSet::new() };
 
         let plan = plan::compute(&inv(), &device, &keep).unwrap();
         let mut steps = Recorder::default();

@@ -934,7 +934,7 @@ fn a_companion_moves_the_files_an_older_registry_recorded_under_its_plugin() {
     ];
     let old = p::registry(&[("core", &["/etc/systemd/system/ritornello.service"]), ("files", &moved)]);
     let device = p::dev(&[("files", files_exec)], Some(old), &[], &[]);
-    let intent = Intent::InstallOrUpdate { plugins: p::set(&["files"]), packs: p::set(&[]), erase_data: p::set(&[]), reinstall: false };
+    let intent = Intent::InstallOrUpdate { plugins: p::set(&["files"]), packs: p::set(&[]), erase_data: p::set(&[]), reinstall: false, declined: Default::default() };
     let plan = compute(&p::inv(), &device, &intent).expect("the plan computes");
     let mount_archive = "ritornello-files-mount-0.2.0-beta.2-arm64.tar.gz";
     assert!(plan.archives.contains(mount_archive), "{:?}", plan.archives);
