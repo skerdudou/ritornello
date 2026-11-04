@@ -875,11 +875,22 @@ async function refreshUpdate() {
   update.value = await api.get<UpdatePayload>('/api/update').catch(() => update.value)
 }
 
+/**
+ * The end of a job is also when the **plugin table** is re-read: an install
+ * or an update changes `/api/status` (a new row, a new binary relaunched),
+ * and the worker has already started the plugin by the time it clears
+ * `busy`. Watching `/api/update` alone left a freshly installed plugin out of
+ * this table until F5 — reported from the device. `refreshPlugins` then
+ * watches the "starting" window that follows, as after a toggle.
+ */
 function pollUpdateWhileBusy() {
   stopUpdatePoll()
   updatePoll = setInterval(async () => {
     await refreshUpdate()
-    if (!update.value.busy) stopUpdatePoll()
+    if (!update.value.busy) {
+      stopUpdatePoll()
+      await refreshPlugins()
+    }
   }, 2000)
 }
 
