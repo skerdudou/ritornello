@@ -132,7 +132,7 @@ privilege boundary](#the-privilege-boundary) below).
 Each plugin's own files, below, in its section.
 
 One rule is worth stating here rather than there, because it is a trap: **a
-cache that cleans its own directory needs a directory of its own.** `lrclib`
+cache that cleans its own directory needs a directory of its own.** `lrclib-lyrics`
 keeps its lyrics cache in `cache/` under its data directory, never in the
 data directory itself: opening the cache and emptying it from the admin page
 both delete every file they do not recognise as one of their entries, and
@@ -2832,7 +2832,7 @@ that default — and a deliberately chosen one, since it is what let the
 four metadata plugins bundled at the time keep exactly the precedence they
 had without a single line of theirs changing (`musicbrainz` declares
 `fill_only` only on the path where it does not already know what is
-playing — see [the cover chain](#the-cover-chain) below — and `lrclib`,
+playing — see [the cover chain](#the-cover-chain) below — and `lrclib-lyrics`,
 added since, declares it on every answer: it only ever completes, see [the
 lyrics chain](#the-lyrics-chain)). The reason a
 plugin outranks tags too is the same one that puts it on top at all — a
@@ -3095,7 +3095,7 @@ without anything being lost: the entries already there are not touched.
   [README](../crates/ritornello-plugin-nrj-metas/README.md) details the
   measured timings, the filler and wallpaper-cover rules, and why
   `musicbrainz`'s own ICY probe needs no special case for these stations.
-- `ritornello-plugin-lrclib` finds the lyrics of what is playing on
+- `ritornello-plugin-lrclib-lyrics` finds the lyrics of what is playing on
   [LRCLIB](https://lrclib.net), a free and open lyrics database, synced
   (timestamped) when it has them. **It only completes**: every answer is
   `fill_only`, and it does not even ask when the core says lyrics are already
@@ -3490,12 +3490,12 @@ tiers (`Metadata::selected_lyrics`):
    itself. So the words are `lyrics`, else the first key starting with
    `lyrics-`, and `unsyncedlyrics` is the plain text. Credited to `tags`.
 3. **The `metadata` plugins** — the overriding ones first, then the
-   `fill_only` ones, each group in declaration order. `lrclib` is the one
+   `fill_only` ones, each group in declaration order. `lrclib-lyrics` is the one
    shipped contributor, and it only completes.
 
 A plugin, even an overriding one, **never replaces words the owner put next
 to the file or inside it**: the first two tiers are judged before any plugin
-is looked at, which is why `lrclib` need not ask when `Known::lyrics` is
+is looked at, which is why `lrclib-lyrics` need not ask when `Known::lyrics` is
 already true.
 
 **A plugin's lyrics count only while they name the song announced now.** The
@@ -3508,7 +3508,7 @@ announced. An `Enrichment` that carries `lyrics` must therefore carry
 lyrics that come without one, or with a blank name in it, at the door
 (`Enrichment::cleaned`), and keeps a plugin's lyrics only while that subject
 matches the artist and title on screen. The match folds both sides the same
-way (`normalize_for_match`, shared with `lrclib`'s own matching): lowercase,
+way (`normalize_for_match`, shared with `lrclib-lyrics`' own matching): lowercase,
 common accents folded, a trailing parenthesised or bracketed suffix
 ("(Live)", "[Radio Edit]") and a featuring dropped, punctuation reduced to
 spaces — and a side with nothing left never matches. The Source's and the
@@ -3684,7 +3684,7 @@ Opt in only when what you answer is true of a silent track too. `musicbrainz`
 does (a disc's title and an album's cover are static facts, and the disc path
 still queries once per disc); the three station plugins (`radiofrance-metas`,
 `nrj-metas`, `ouifm-metas`) do not, since they describe what is on air, and
-there is nothing on air while stopped; nor does `lrclib`, which looks lyrics
+there is nothing on air while stopped; nor does `lrclib-lyrics`, which looks lyrics
 up for a song being heard. A plugin that opts in handles an armed
 identity like a playing one; it can read `armed` to tell them apart.
 
@@ -3872,7 +3872,7 @@ is reported in the interface rather than breaking the page.
 
 Native ESM requires no build step: a simple plugin can ship a
 **hand-written** `ui.js`. The seven bundled plugin pages (radio, cd, files,
-generic-input, mpd, musicbrainz, lrclib) use a Vite build (see
+generic-input, mpd, musicbrainz, lrclib-lyrics) use a Vite build (see
 `crates/ritornello-plugin-radio/ui/`) to benefit from `.vue` files and
 TypeScript — a comfort choice, not a requirement.
 

@@ -2,11 +2,12 @@
 //! parser.
 //!
 //! One parser, here, because several components read LRC (the files plugin
-//! reads `.lrc` next to a track, the LRCLIB plugin receives it over HTTP, the
-//! core turns it into lines for the page) and two parsers would disagree on a
-//! real-world file sooner or later. Everything below is deliberately lenient:
-//! a lyrics file is written by hand and abused by every editor that ever
-//! touched it, and showing the text imperfectly beats showing nothing.
+//! reads `.lrc` next to a track, the `lrclib-lyrics` plugin receives it from
+//! LRCLIB over HTTP, the core turns it into lines for the page) and two
+//! parsers would disagree on a real-world file sooner or later. Everything
+//! below is deliberately lenient: a lyrics file is written by hand and
+//! abused by every editor that ever touched it, and showing the text
+//! imperfectly beats showing nothing.
 
 use serde::{Deserialize, Serialize};
 

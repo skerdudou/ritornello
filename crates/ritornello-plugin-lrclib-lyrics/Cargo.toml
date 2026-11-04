@@ -1,5 +1,5 @@
 [package]
-name = "ritornello-plugin-lrclib"
+name = "ritornello-plugin-lrclib-lyrics"
 # Its own version, not the product's: this component can be fixed and
 # published alone. Only the major follows the product;
 # version_coherence.rs asserts it.
@@ -19,7 +19,7 @@ description = "Finds song lyrics online on LRCLIB, synced when available."
 admin = true
 
 [[bin]]
-name = "ritornello-plugin-lrclib"
+name = "ritornello-plugin-lrclib-lyrics"
 path = "src/main.rs"
 
 [dependencies]

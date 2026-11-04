@@ -27,7 +27,7 @@ const CATALOG = {
   loading: 'Loading…',
 }
 
-const BASE = '/plugins/lrclib/'
+const BASE = '/plugins/lrclib-lyrics/'
 
 /** Mounts the view with a spied `fetch`: each GET answers the next of
  *  `answers` (the last one repeats), PUTs are logged and answer 204 unless
@@ -63,7 +63,7 @@ beforeEach(() => {
 describe('LrclibAdmin', () => {
   it('shows the cache size and counts', async () => {
     const { w, gets } = await mountView([{ bytes: 3 * 1024 * 1024 + 512 * 1024, found: 412, absent: 37 }])
-    expect(gets).toEqual(['/plugins/lrclib/api/data'])
+    expect(gets).toEqual(['/plugins/lrclib-lyrics/api/data'])
     expect(w.get('[data-lyrics-cache-size]').text()).toBe('3.5 MiB')
     expect(w.get('[data-lyrics-cache-found]').text()).toBe('412')
     expect(w.get('[data-lyrics-cache-absent]').text()).toBe('37')
@@ -89,7 +89,7 @@ describe('LrclibAdmin', () => {
     await w.get('[data-lyrics-cache-clear]').trigger('click')
     await flushPromises()
 
-    expect(puts).toEqual([{ url: '/plugins/lrclib/api/data', body: { action: 'clear' } }])
+    expect(puts).toEqual([{ url: '/plugins/lrclib-lyrics/api/data', body: { action: 'clear' } }])
     expect(gets).toHaveLength(2)
     expect(w.get('[data-lyrics-cache-found]').text()).toBe('0')
     expect(w.get('[data-lyrics-cache-size]').text()).toBe('0 B')

@@ -120,7 +120,7 @@ examples = ["deploy/nrj-metas.example.toml"]
 
 [plugins.musicbrainz]
 
-[plugins.lrclib]
+[plugins.lrclib-lyrics]
 
 [plugins.generic-input]
 tree = [

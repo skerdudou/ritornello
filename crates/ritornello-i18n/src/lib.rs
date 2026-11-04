@@ -242,7 +242,7 @@ mod tests {
     /// own doc before adding a `deploy/locales/<x>/` directory: this test
     /// is what refuses to let the two lists drift apart silently.
     const COVERED_COMPONENTS: &[&str] =
-        &["common", "core", "cd", "files", "generic-input", "lrclib", "mpd", "musicbrainz", "radio", "web-streaming"];
+        &["common", "core", "cd", "files", "generic-input", "lrclib-lyrics", "mpd", "musicbrainz", "radio", "web-streaming"];
 
     #[test]
     fn every_deploy_locales_directory_has_a_named_parity_test() {

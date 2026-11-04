@@ -61,7 +61,7 @@ fn note_fields(m: &mut Track, contributor: &str, derived_by: Option<&str>) {
 ///
 /// Distinct from `Enrichment::is_empty`, which only speaks of the text: a
 /// contributor that only found a cover is not a failure, and neither is one
-/// that only found the words — the LRCLIB plugin's whole answer.
+/// that only found the words — the `lrclib-lyrics` plugin's whole answer.
 fn brings_nothing(e: &Enrichment) -> bool {
     e.is_empty()
         && e.cover.is_none()
@@ -370,9 +370,9 @@ impl Metadata {
         // the omission would have been invisible.
         //
         // **`lyrics` is exempted too**, and here the case is not theoretical:
-        // the LRCLIB plugin answers with words and their subject, nothing
-        // else. Without this line its every answer was counted as no response
-        // — or as a withdrawal of what it had said before.
+        // the `lrclib-lyrics` plugin answers with words and their subject,
+        // nothing else. Without this line its every answer was counted as no
+        // response — or as a withdrawal of what it had said before.
         if e.is_empty()
             && e.cover.is_none()
             && e.cover_thumb.is_none()
@@ -2320,7 +2320,7 @@ mod tests {
     }
 
     /// A contributor's lyrics for the song `artist`/`title`, and nothing else:
-    /// the shape the LRCLIB plugin sends.
+    /// the shape the `lrclib-lyrics` plugin sends.
     fn lyrics_only(id: &Value, text: &str, artist: &str, title: &str) -> Enrichment {
         Enrichment {
             identity: id.clone(),
@@ -2386,14 +2386,14 @@ mod tests {
         // the **text**. For the words, as for the image, what the owner put
         // next to the file or inside it was chosen by hand.
         let id = json!({"path": "/music/a.flac"});
-        let mut m = Metadata::new(vec!["lrclib".into()]);
+        let mut m = Metadata::new(vec!["lrclib-lyrics".into()]);
         m.set_identity(Some(id.clone()));
         m.set_tags(tagged("Miles Davis", "So What"));
-        let mut overwriting = lyrics_only(&id, "from lrclib", "Miles Davis", "So What");
+        let mut overwriting = lyrics_only(&id, "from lrclib-lyrics", "Miles Davis", "So What");
         overwriting.fill_only = false;
         overwriting.artist = Some("Miles Davis".into());
         overwriting.title = Some("So What".into());
-        assert!(m.add("lrclib", overwriting));
+        assert!(m.add("lrclib-lyrics", overwriting));
 
         m.set_lyrics_tags(Some(words("embedded")));
         assert_eq!(retained(&m), Some(("embedded".into(), ORIGIN_TAGS.into())));
@@ -2408,7 +2408,7 @@ mod tests {
         // one song to the next, so the identity echo cannot tell the words of
         // song A from those of song B. The subject can.
         let id = json!({"url": "http://radio/stream"});
-        let mut m = Metadata::new(vec!["musicbrainz".into(), "lrclib".into()]);
+        let mut m = Metadata::new(vec!["musicbrainz".into(), "lrclib-lyrics".into()]);
         m.set_identity(Some(id.clone()));
         m.set_icy("Miles Davis - So What".into());
         let split = |artist: &str, title: &str| Enrichment {
@@ -2416,8 +2416,8 @@ mod tests {
             ..enrichment(id.clone(), artist, title)
         };
         assert!(m.add("musicbrainz", split("Miles Davis", "So What")));
-        assert!(m.add("lrclib", lyrics_only(&id, "So what", "Miles Davis", "So What")));
-        assert_eq!(retained(&m), Some(("So what".into(), "lrclib".into())));
+        assert!(m.add("lrclib-lyrics", lyrics_only(&id, "So what", "Miles Davis", "So What")));
+        assert_eq!(retained(&m), Some(("So what".into(), "lrclib-lyrics".into())));
         assert!(m.known().lyrics);
         assert!(m.state().lyrics_href.is_some());
 
@@ -2440,12 +2440,12 @@ mod tests {
         // announces song B, under the same stream identity: the echo matches,
         // only the subject tells them apart.
         let id = json!({"url": "http://radio/stream"});
-        let mut m = Metadata::new(vec!["musicbrainz".into(), "lrclib".into()]);
+        let mut m = Metadata::new(vec!["musicbrainz".into(), "lrclib-lyrics".into()]);
         m.set_identity(Some(id.clone()));
         m.set_icy("John Coltrane - Naima".into());
         assert!(m.add("musicbrainz", enrichment(id.clone(), "John Coltrane", "Naima")));
 
-        m.add("lrclib", lyrics_only(&id, "So what", "Miles Davis", "So What"));
+        m.add("lrclib-lyrics", lyrics_only(&id, "So what", "Miles Davis", "So What"));
         assert_eq!(retained(&m), None);
         assert!(!m.known().lyrics);
         assert_eq!(m.state().lyrics_href, None);
@@ -2458,10 +2458,10 @@ mod tests {
         // same artist. Either name alone is not enough.
         let id = json!({"url": "http://radio/stream"});
         for (artist, title) in [("Nina Simone", "My Way"), ("Frank Sinatra", "New York")] {
-            let mut m = Metadata::new(vec!["musicbrainz".into(), "lrclib".into()]);
+            let mut m = Metadata::new(vec!["musicbrainz".into(), "lrclib-lyrics".into()]);
             m.set_identity(Some(id.clone()));
             assert!(m.add("musicbrainz", enrichment(id.clone(), artist, title)));
-            m.add("lrclib", lyrics_only(&id, "And now", "Frank Sinatra", "My Way"));
+            m.add("lrclib-lyrics", lyrics_only(&id, "And now", "Frank Sinatra", "My Way"));
             assert_eq!(retained(&m), None, "{artist} / {title}");
         }
     }
@@ -2471,10 +2471,10 @@ mod tests {
         // The subject is judged on the **composed** text, whatever layer it
         // comes from; the cached key has to follow each of them.
         let id = json!({"path": "/music/a.flac"});
-        let mut m = Metadata::new(vec!["lrclib".into()]);
+        let mut m = Metadata::new(vec!["lrclib-lyrics".into()]);
         m.set_identity(Some(id.clone()));
         m.set_tags(tagged("Miles Davis", "So What"));
-        m.add("lrclib", lyrics_only(&id, "So what", "Miles Davis", "So What"));
+        m.add("lrclib-lyrics", lyrics_only(&id, "So what", "Miles Davis", "So What"));
         assert!(m.state().lyrics_href.is_some());
         m.set_tags(tagged("Miles Davis", "Freddie Freeloader"));
         assert_eq!(m.state().lyrics_href, None, "a tags change must refresh the key");
@@ -2482,12 +2482,12 @@ mod tests {
         // An ICY title completed by a `fill_only`'s artist: the ICY alone
         // decides whether the subject still holds.
         let radio = json!({"url": "http://radio/stream"});
-        let mut m = Metadata::new(vec!["lrclib".into()]);
+        let mut m = Metadata::new(vec!["lrclib-lyrics".into()]);
         m.set_identity(Some(radio.clone()));
         m.set_icy("So What".into());
         let mut with_artist = lyrics_only(&radio, "So what", "Miles Davis", "So What");
         with_artist.artist = Some("Miles Davis".into());
-        assert!(m.add("lrclib", with_artist));
+        assert!(m.add("lrclib-lyrics", with_artist));
         assert!(m.state().lyrics_href.is_some());
         m.set_icy("Naima".into());
         assert_eq!(m.state().lyrics_href, None, "an ICY change must refresh the key");
@@ -2495,37 +2495,37 @@ mod tests {
 
     #[test]
     fn lyrics_alone_are_an_enrichment_not_a_withdrawal() {
-        // The LRCLIB plugin sends nothing but words: no text, no cover, no
-        // year. Counted as "entirely empty", the frame would be refused at the
+        // The `lrclib-lyrics` plugin sends nothing but words: no text, no
+        // cover, no year. Counted as "entirely empty", the frame would be refused at the
         // door — or worse, taken for a withdrawal of what it said before.
         let id = json!({"path": "/music/a.flac"});
-        let mut m = Metadata::new(vec!["lrclib".into()]);
+        let mut m = Metadata::new(vec!["lrclib-lyrics".into()]);
         m.set_identity(Some(id.clone()));
         m.set_tags(tagged("Miles Davis", "So What"));
         // Words and their subject, nothing else — not even `searched`, which
         // would get the frame through the door on its own.
-        assert!(m.add("lrclib", lyrics_only(&id, "So what", "Miles Davis", "So What")));
-        assert_eq!(retained(&m), Some(("So what".into(), "lrclib".into())));
+        assert!(m.add("lrclib-lyrics", lyrics_only(&id, "So what", "Miles Davis", "So What")));
+        assert_eq!(retained(&m), Some(("So what".into(), "lrclib-lyrics".into())));
         // Corrected words from the same plugin replace the first ones; read as
         // a withdrawal, they would remove them instead.
-        assert!(m.add("lrclib", lyrics_only(&id, "So what!", "Miles Davis", "So What")));
-        assert_eq!(retained(&m), Some(("So what!".into(), "lrclib".into())));
+        assert!(m.add("lrclib-lyrics", lyrics_only(&id, "So what!", "Miles Davis", "So What")));
+        assert_eq!(retained(&m), Some(("So what!".into(), "lrclib-lyrics".into())));
 
         // With `searched`, it found something: it is not listed among those
         // that searched in vain.
         let mut frame = lyrics_only(&id, "So what", "Miles Davis", "So What");
         frame.searched = true;
-        assert!(m.add("lrclib", frame));
+        assert!(m.add("lrclib-lyrics", frame));
         assert!(m.state().provenance.misses.is_empty(), "{:?}", m.state().provenance.misses);
     }
 
     #[test]
     fn an_identity_change_clears_the_lyrics_like_the_rest() {
         let id = json!({"path": "/music/a.flac"});
-        let mut m = Metadata::new(vec!["lrclib".into()]);
+        let mut m = Metadata::new(vec!["lrclib-lyrics".into()]);
         m.set_identity(Some(id.clone()));
         m.set_tags(tagged("Miles Davis", "So What"));
-        m.add("lrclib", lyrics_only(&id, "So what", "Miles Davis", "So What"));
+        m.add("lrclib-lyrics", lyrics_only(&id, "So what", "Miles Davis", "So What"));
         m.set_lyrics_tags(Some(words("embedded")));
         m.set_lyrics_source(Some(words("sidecar")), "files");
         assert!(m.lyrics_key().is_some());

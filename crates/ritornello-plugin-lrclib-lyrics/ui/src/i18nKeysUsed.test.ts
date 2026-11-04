@@ -1,6 +1,6 @@
 // Safety net, modelled on the mpd plugin's: every key called by this plugin's
 // source code must exist in
-// `crates/ritornello-plugin-lrclib/src/locales/en.toml` + the common
+// `crates/ritornello-plugin-lrclib-lyrics/src/locales/en.toml` + the common
 // vocabulary `crates/ritornello-i18n/src/locales/common_en.toml` (the plugin
 // consumes both, the common layer being merged by `Catalog::entries`).
 // Without that guarantee, a missing key is displayed as is on screen instead
@@ -60,7 +60,7 @@ function literalCallKeys(files: string[]): Set<string> {
   return keys
 }
 
-describe('i18n keys used by the lrclib plugin', () => {
+describe('i18n keys used by the lrclib-lyrics plugin', () => {
   it('all exist in the embedded English catalog (plugin + common)', () => {
     const catalog = new Set([
       ...tomlKeys(resolve(PACKAGE_ROOT, '../src/locales/en.toml')),

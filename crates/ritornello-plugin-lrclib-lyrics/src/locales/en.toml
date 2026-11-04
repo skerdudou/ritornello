@@ -1,6 +1,6 @@
-# Admin page of the lrclib plugin: the lyrics cache it keeps on the device.
+# Admin page of the lrclib-lyrics plugin: the lyrics cache it keeps on the device.
 # English is embedded in the binary; the language packs live in
-# deploy/locales/lrclib/<language>.toml and are kept in step by a key-parity
+# deploy/locales/lrclib-lyrics/<language>.toml and are kept in step by a key-parity
 # test.
 title = "Lyrics cache"
 intro = "Lyrics found on LRCLIB, and the songs it has none for, are kept on this device so that a song heard again is not asked about again. A song without lyrics is asked about again after 30 days."

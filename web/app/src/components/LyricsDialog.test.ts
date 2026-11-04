@@ -200,9 +200,9 @@ describe('LyricsDialog', () => {
 
   it('names who provided the lyrics', async () => {
     await useCatalog().reload()
-    const w = mountDialog({ href: '/api/lyrics/aaa', positionS: 5, origin: 'lrclib' })
+    const w = mountDialog({ href: '/api/lyrics/aaa', positionS: 5, origin: 'lrclib-lyrics' })
     await openDialog(w)
-    expect(dialog()?.querySelector('[data-lyrics-origin]')?.textContent?.trim()).toBe('Lyrics: lrclib')
+    expect(dialog()?.querySelector('[data-lyrics-origin]')?.textContent?.trim()).toBe('Lyrics: lrclib-lyrics')
   })
 
   it('says there are no lyrics when the key is gone', async () => {

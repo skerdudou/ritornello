@@ -282,13 +282,13 @@ describe('PlayerCard', () => {
       title: 'So What',
       cover_href: '/api/cover/1a2b',
       lyrics_href: '/api/lyrics/9f9f',
-      provenance: { fields: { title: 'tags', cover: 'files', lyrics: 'lrclib', links: 'musicbrainz' } },
+      provenance: { fields: { title: 'tags', cover: 'files', lyrics: 'lrclib-lyrics', links: 'musicbrainz' } },
     })
     await w.get('[data-provenance-open]').trigger('click')
     const popover = document.body.querySelector('[data-provenance-popover]')
     expect(
       popover?.querySelector('[data-provenance-field="lyrics"]')?.textContent?.trim(),
-    ).toBe('lrclib')
+    ).toBe('lrclib-lyrics')
     // Labelled, and in the card's order: after the cover, before the links.
     const order = [...(popover?.querySelectorAll('[data-provenance-field]') ?? [])].map((e) =>
       e.getAttribute('data-provenance-field'),
