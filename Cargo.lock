@@ -2308,7 +2308,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-core"
-version = "0.2.0-beta.9"
+version = "0.2.0-beta.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2342,7 +2342,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-files-mount"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "anyhow",
  "ritornello-plugin-sdk",
@@ -2355,7 +2355,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-i18n"
-version = "0.2.0-beta.9"
+version = "0.2.0-beta.10"
 dependencies = [
  "serde",
  "serde_json",
@@ -2387,7 +2387,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-manifest"
-version = "0.2.0-beta.9"
+version = "0.2.0-beta.10"
 dependencies = [
  "toml_edit",
 ]
@@ -2429,7 +2429,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-files"
-version = "0.2.0-beta.9"
+version = "0.2.0-beta.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2469,7 +2469,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-lrclib-lyrics"
-version = "0.2.0-beta.9"
+version = "0.2.0-beta.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2598,7 +2598,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-sdk"
-version = "0.2.0-beta.9"
+version = "0.2.0-beta.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2613,7 +2613,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-web-streaming"
-version = "0.2.0-beta.9"
+version = "0.2.0-beta.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2642,7 +2642,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-proto"
-version = "0.2.0-beta.9"
+version = "0.2.0-beta.10"
 dependencies = [
  "base64 0.23.1",
  "serde",
