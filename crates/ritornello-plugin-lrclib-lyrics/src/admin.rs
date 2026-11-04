@@ -1,4 +1,4 @@
-//! Admin backend of the lrclib plugin: serves the Vue page shipped in
+//! Admin backend of the lrclib-lyrics plugin: serves the Vue page shipped in
 //! `ui/dist`, reports what the lyrics cache holds, and empties it on request.
 //!
 //! The cache is the very one the `metadata` half reads and writes, shared
@@ -191,18 +191,18 @@ mod tests {
     /// from the tree, and an empty derivation is a failure, not a pass.
     #[test]
     fn key_and_param_parity_between_the_embedded_en_and_every_shipped_language() {
-        let en = ritornello_i18n::try_parse(crate::LRCLIB_EN).unwrap();
+        let en = ritornello_i18n::try_parse(crate::LRCLIB_LYRICS_EN).unwrap();
         let deploy_locales = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/locales");
-        let shipped = ritornello_i18n::shipped_language_packs(&deploy_locales, "lrclib");
-        assert!(!shipped.is_empty(), "no shipped language found for lrclib under deploy/locales");
+        let shipped = ritornello_i18n::shipped_language_packs(&deploy_locales, "lrclib-lyrics");
+        assert!(!shipped.is_empty(), "no shipped language found for lrclib-lyrics under deploy/locales");
         for (lang, content) in shipped {
             let pack = ritornello_i18n::try_parse(&content)
-                .unwrap_or_else(|e| panic!("{lang} pack for lrclib is invalid TOML: {e}"));
+                .unwrap_or_else(|e| panic!("{lang} pack for lrclib-lyrics is invalid TOML: {e}"));
             let mut en_keys: Vec<&String> = en.keys().collect();
             let mut pack_keys: Vec<&String> = pack.keys().collect();
             en_keys.sort();
             pack_keys.sort();
-            assert_eq!(en_keys, pack_keys, "en/{lang} key sets diverge for lrclib");
+            assert_eq!(en_keys, pack_keys, "en/{lang} key sets diverge for lrclib-lyrics");
             for (key, en_value) in &en {
                 if let Some(translated) = pack.get(key) {
                     assert_eq!(

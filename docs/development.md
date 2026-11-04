@@ -59,8 +59,8 @@ exist beforehand:
     exec = "target/debug/ritornello-plugin-musicbrainz"
 
     [[plugin]]
-    name = "lrclib"
-    exec = "target/debug/ritornello-plugin-lrclib"
+    name = "lrclib-lyrics"
+    exec = "target/debug/ritornello-plugin-lrclib-lyrics"
 
     [[plugin]]
     name = "generic-input"

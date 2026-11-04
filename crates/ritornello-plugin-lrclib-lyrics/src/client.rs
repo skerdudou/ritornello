@@ -132,7 +132,7 @@ impl Client {
     pub fn new(base: &str) -> anyhow::Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent(concat!(
-                "ritornello-plugin-lrclib/",
+                "ritornello-plugin-lrclib-lyrics/",
                 env!("CARGO_PKG_VERSION"),
                 " (https://github.com/skerdudou/ritornello)"
             ))

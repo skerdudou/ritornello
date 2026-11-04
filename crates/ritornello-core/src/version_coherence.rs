@@ -38,7 +38,7 @@ mod tests {
         "radio",
         "cd",
         "musicbrainz",
-        "lrclib",
+        "lrclib-lyrics",
         "nrj-metas",
         "ouifm-metas",
         "radiofrance-metas",

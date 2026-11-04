@@ -926,19 +926,19 @@ if [ -n "$SELF_TEST" ]; then
 
   rel_repo
   contract_set ADMIN "2, 0"
-  admin_plugins="ritornello-core ritornello-plugin-cd ritornello-plugin-files ritornello-plugin-generic-input ritornello-plugin-lrclib ritornello-plugin-mpd ritornello-plugin-musicbrainz ritornello-plugin-radio ritornello-plugin-web-streaming"
+  admin_plugins="ritornello-core ritornello-plugin-cd ritornello-plugin-files ritornello-plugin-generic-input ritornello-plugin-lrclib-lyrics ritornello-plugin-mpd ritornello-plugin-musicbrainz ritornello-plugin-radio ritornello-plugin-web-streaming"
   for c in $admin_plugins; do rel_bump "$c"; done
   expect_rel 0 "$admin_plugins" "admin contract major moved" "an admin major with the core and the eight admin plugins moved: console and the metadata-only plugins are not asked to"
 
   rel_repo
   contract_set ADMIN "2, 0"
-  for c in ritornello-core ritornello-plugin-cd ritornello-plugin-files ritornello-plugin-generic-input ritornello-plugin-lrclib ritornello-plugin-mpd ritornello-plugin-radio ritornello-plugin-web-streaming; do rel_bump "$c"; done
+  for c in ritornello-core ritornello-plugin-cd ritornello-plugin-files ritornello-plugin-generic-input ritornello-plugin-lrclib-lyrics ritornello-plugin-mpd ritornello-plugin-radio ritornello-plugin-web-streaming; do rel_bump "$c"; done
   expect_rel 1 "" "ritornello-plugin-musicbrainz" "an admin major with musicbrainz (metadata + admin) not moved is refused, and names it"
 
   rel_repo
   contract_set ADMIN "2, 0"
   for c in ritornello-core ritornello-plugin-cd ritornello-plugin-files ritornello-plugin-generic-input ritornello-plugin-mpd ritornello-plugin-musicbrainz ritornello-plugin-radio ritornello-plugin-web-streaming; do rel_bump "$c"; done
-  expect_rel 1 "" "ritornello-plugin-lrclib" "an admin major with lrclib (metadata + admin) not moved is refused, and names it"
+  expect_rel 1 "" "ritornello-plugin-lrclib-lyrics" "an admin major with lrclib-lyrics (metadata + admin) not moved is refused, and names it"
 
   rel_repo
   contract_set SOURCE "1, 1"

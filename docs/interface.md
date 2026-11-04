@@ -1574,7 +1574,7 @@ three keeps every case revalidating honestly.
 ### Where the metadata comes from
 
 A small `(?)` on the badge row opens a dialog naming, **field by field**, who
-supplied what: "Title: icy · Year: musicbrainz · Cover: files · Lyrics: lrclib". It replaces the
+supplied what: "Title: icy · Year: musicbrainz · Cover: files · Lyrics: lrclib-lyrics". It replaces the
 two origin badges (`origin`, `cover_origin`), which took space on the busiest
 row of the screen for two words nobody reads while listening — and which did not
 answer the question one actually asks in front of a wrong title. The displayed

@@ -37,7 +37,7 @@ use tokio::time::Instant;
 /// Embedded i18n catalog of the admin page (`admin.rs`): the layer the
 /// core's `Runtime::texts` announces, and the fallback when no external pack
 /// is present.
-pub(crate) const LRCLIB_EN: &str = include_str!("locales/en.toml");
+pub(crate) const LRCLIB_LYRICS_EN: &str = include_str!("locales/en.toml");
 
 const LRCLIB_BASE: &str = "https://lrclib.net";
 
@@ -417,7 +417,7 @@ async fn main() -> Result<()> {
     let lookup: Arc<dyn Lookup> = Arc::new(Client::new(LRCLIB_BASE)?);
 
     ritornello_plugin_sdk::declare_runtime!()?
-        .texts([("en", LRCLIB_EN)])?
+        .texts([("en", LRCLIB_LYRICS_EN)])?
         .metadata(LrclibPlugin::new(lookup, cache.clone()))?
         .admin(admin::LrclibAdmin::new(cache))?
         .run()
@@ -532,13 +532,13 @@ mod tests {
     }
 
     #[test]
-    fn embedded_lrclib_en_is_not_empty() {
-        assert!(!ritornello_i18n::try_parse(LRCLIB_EN).unwrap().is_empty());
+    fn embedded_lrclib_lyrics_en_is_not_empty() {
+        assert!(!ritornello_i18n::try_parse(LRCLIB_LYRICS_EN).unwrap().is_empty());
     }
 
     #[test]
     fn every_file_lives_in_the_plugin_s_own_directory() {
-        let d = Path::new("/x/plugins/lrclib");
+        let d = Path::new("/x/plugins/lrclib-lyrics");
         let cache = cache_dir_in(d);
         assert!(cache.starts_with(d));
         // A subdirectory of its own, never the data directory itself: the

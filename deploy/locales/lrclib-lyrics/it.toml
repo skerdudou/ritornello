@@ -1,4 +1,4 @@
-# Admin page of the lrclib plugin: the lyrics cache it keeps on the device.
+# Admin page of the lrclib-lyrics plugin: the lyrics cache it keeps on the device.
 # English is embedded in the binary; this Italian pack ships separately, and a
 # key-parity test forbids them to diverge.
 title = "Cache dei testi"
