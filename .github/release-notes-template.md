@@ -1,18 +1,36 @@
-**Action required** — update the `files` plugin with **ritornello-install**
-(`ritornello-install --host account@host --version v0.2.0-beta.9 --keep`),
-once, from a workstation.
+**Action required** — if the device has the `lrclib` plugin (beta.9),
+replace it with **`lrclib-lyrics`**, by hand, once: the update does not do
+it.
 
-The mount helper changed: `files-mount` moves from 1.0.1 to 1.0.2, for a new
-per-share flag (`archive_lyrics`) in the roots table it reads too. Only
-ritornello-install places the helper, so the page refuses to update `files`
-on its own and says so. Everything else — the core, the other plugins and
-the language packs — updates from the page as usual: no systemd unit,
-polkit rule or privileged updater changed since beta.8.
+The lyrics plugin is renamed: `lrclib` becomes `lrclib-lyrics` (same
+behaviour, still fed by LRCLIB). This release ships `lrclib-lyrics` and no
+longer ships `lrclib`. A device that has `lrclib` keeps running it
+untouched — the updater still finds its beta.9 archive, so it reports it
+up to date and never offers anything for it again — and never installs
+`lrclib-lyrics` on its own, automatic updates included. To switch:
 
-This is not a wire break: three contracts gained compatible additions
-(`source` 1.3, `display` 1.2, `metadata` 1.2) and the bootstrap
-`PROTOCOL_VERSION` did not move. Any mix of old and new components still
-talks: an older core ignores what it does not know.
+1. **Settings → Plugins**: **Uninstall** `lrclib`. That removes its entry
+   from `/etc/ritornello/plugins.toml` and its binary, and keeps its data.
+2. **Settings → Plugins → Add a plugin**: install **`lrclib-lyrics`**. The
+   list may still offer `lrclib` too, without a description: do not pick
+   it.
+3. Optional: the old lyrics cache is not migrated (the new plugin starts
+   an empty one in `/var/lib/ritornello/plugins/lrclib-lyrics`). Delete the
+   old one with `sudo rm -r /var/lib/ritornello/plugins/lrclib`.
+
+With **ritornello-install** instead: `--keep` leaves `lrclib` in place (it
+is listed as a third-party plugin, since the release no longer knows it)
+and does not add `lrclib-lyrics`. Name the plugins with `--plugins`,
+`lrclib-lyrics` included and `lrclib` left out; add `--purge-data` to
+erase `lrclib`'s cache in the same run. Interactively, untick `lrclib` and
+tick `lrclib-lyrics`.
+
+Left in place, both plugins run side by side: the lyrics shown do not
+change, but a song not yet cached can be looked up twice on LRCLIB, and
+is cached twice.
+
+This rename is not a wire break: no contract moved, and the bootstrap
+`PROTOCOL_VERSION` did not move.
 <!-- The opening block above is this release's answer to "is there anything
      to do by hand?", and it is rewritten at every release rather than left
      to rot. When the next one needs nothing, the whole block above becomes
@@ -48,52 +66,11 @@ talks: an older core ignores what it does not know.
 
 ## Behaviour changes
 
-**New plugin: Web streaming** (`web-streaming`, official, not installed by
-default — add it from Settings → Plugins). Paste links from YouTube,
-SoundCloud, Bandcamp or any site yt-dlp reads, a single video or a
-playlist; each becomes a preset, played without ads from the page or the
-remote. Next and Previous move within a playlist, and otherwise to the
-neighbouring preset.
-- **Download** the audio of chosen presets from the plugin's page into a
-  folder you pick on a writable share of the `files` plugin (a new folder
-  can be created there). The dialog reopens on the last folder used.
-- The plugin keeps its own **yt-dlp** up to date: its signature is checked
-  against the yt-dlp maintainers' key, and an older version is never put
-  back over a newer one. A stable or nightly channel, and a check button,
-  sit on the plugin's page.
-- **Never reaches your local network**: a link, a playlist entry or a
-  download that leads to a local address is refused. One known gap remains:
-  mpv itself follows redirections, playlists and manifests, which the
-  plugin cannot judge.
-- Needs **Python 3** on the device (DietPi and Raspberry Pi OS have it).
-  About 6.5 s pass on a Raspberry Pi 2 before each video is heard.
-
-**Lyrics.** A microphone key in the player card opens the lyrics of the
-current track, the sung line highlighted when they are timed. They come
-from a `<track>.lrc` beside the file, else from the file's tags, else from
-LRCLIB through the new **`lrclib`** plugin (official, not installed by
-default). The `files` plugin's Sources tab gains a per-share switch, off by
-default, to keep lyrics found online as a `.lrc` beside the track; it never
-overwrites one.
-
-**System alerts.** A warning triangle beside **System** (top bar, and the
-System tab of the phone's bottom bar) when a metric runs away, with one
-sentence per alert at the top of the System page: temperature (80 °C),
-processor (90 % of one core over three minutes), memory or disk (90 %), and
-under-voltage. A past under-voltage stays lit until you press
-**Acknowledge**, which holds until the next reboot.
-
-**The core's version in Settings.** The Updates card opens on the version
-of the core that runs, even before any check. The System page's line shows
-the same number and is now labelled "Core version" too, rather than
-"Ritornello version": the release's number differs when the core did not
-move.
-
-**Source keys away from standby.** In the player card's header the source
-icon keys now start at the left edge, and the corner keeps standby alone.
-
-**MPD: adding never wakes the device.** In standby, an `add` from an MPD
-client no longer wakes the device, whatever the source of the entry.
+**The lyrics plugin is now `lrclib-lyrics`.** The plugin that finds lyrics
+on LRCLIB, published in beta.9 as `lrclib`, is renamed `lrclib-lyrics`: its
+page is at `/plugins/lrclib-lyrics/`, its cache in
+`/var/lib/ritornello/plugins/lrclib-lyrics`. Nothing else changes. See the action above to switch a device that has
+`lrclib`.
 
 ## Install
 

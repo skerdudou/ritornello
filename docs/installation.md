@@ -1795,6 +1795,11 @@ local disk, the page and the files journey of the end-to-end harness against a
   for the Pi's first measured duration of a file on a sleeping NAS; past it,
   the song is searched without a duration and the version LRCLIB picks is
   cached;
+- the **switch from `lrclib` to `lrclib-lyrics`** (the plugin's name in
+  beta.9, and its name since) has been read from the code, not performed:
+  uninstalling `lrclib` from the page and adding `lrclib-lyrics`, or the
+  same through ritornello-install, where `lrclib` shows as a third-party
+  plugin once the release no longer lists it;
 - the **`lyrics` display frame** has no consumer: no bundled display asks
   for it, so the relay has only run in tests;
 - the **dialog following the song** has been checked in the end-to-end
