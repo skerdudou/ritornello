@@ -313,10 +313,12 @@ pub struct TimezoneRequest {
 /// service has nobody to type a password, so polkit must answer from its
 /// rules alone. Awaited up to 5 s, because no route may block (the admin
 /// protocol is serial) and because the answer is the point: a refusal is
-/// reported in timedated's or polkit's own words. Unlike a power-off, a
-/// change still running after 5 s is no success in disguise: it answers
-/// `502`, and `kill_on_drop` ends the stuck `busctl` rather than leaving one
-/// behind per click.
+/// reported in timedated's or polkit's own words. A change still running
+/// after 5 s answers `502`, and `kill_on_drop` ends the stuck `busctl` rather
+/// than leaving one behind per click. That does not cancel the D-Bus call
+/// already sent: `systemd-timedated` may still apply the zone, so a `502` by
+/// timeout is not proof that nothing changed — the next `/api/system` poll
+/// re-reads the link and shows what is actually set.
 ///
 /// `204` on success, after `tzset_now()` so the update schedule follows at
 /// once (see there).
