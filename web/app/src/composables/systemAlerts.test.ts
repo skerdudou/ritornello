@@ -31,6 +31,7 @@ function payload(overrides: Partial<SystemPayload> = {}): SystemPayload {
     device_unix_s: 0,
     timezone_settable: true,
     timedated_reachable: true,
+    timezone_polkit_answered: true,
     ...overrides,
   }
 }

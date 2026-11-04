@@ -143,22 +143,34 @@ pub fn parse_authorized(raw: &str) -> Option<bool> {
 
 /// What the startup probe learned about changing the zone.
 ///
-/// Two facts rather than one, for the reason `Metrics::logind_reachable`
+/// Three facts rather than one, for the reason `Metrics::logind_reachable`
 /// gives for power: polkit saying no means the rule is missing or was
 /// declined at install, whereas timedated not answering means there is no
-/// timedated to ask (a container, an image without it). Both leave the zone
-/// read-only on the page, but they are not fixed by the same thing.
+/// timedated to ask (a container, an image without it), and polkit not
+/// answering means there is no polkitd to ask — absent by default on DietPi,
+/// or bus-activated and too slow on a cold start. All three leave the zone
+/// read-only on the page, but they are not fixed by the same thing, and
+/// sending the owner to rerun the installer when polkitd is missing is the
+/// explanation that sends them looking in the wrong place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimezoneProbe {
     pub settable: bool,
     pub timedated_reachable: bool,
+    /// Whether polkit gave a readable yes or no. `false` when the call
+    /// failed, timed out, or answered something `parse_authorized` does not
+    /// recognise: then a `settable` of `false` says nothing about the grant.
+    pub polkit_answered: bool,
 }
 
 /// The rule for combining the two answers, apart from obtaining them, so it
 /// is tested without a D-Bus. Settable only when timedated answers **and**
 /// polkit says yes: polkit can grant an action whose service is absent.
 pub fn probe_summary(reachable: bool, authorized: Option<bool>) -> TimezoneProbe {
-    TimezoneProbe { settable: reachable && authorized == Some(true), timedated_reachable: reachable }
+    TimezoneProbe {
+        settable: reachable && authorized == Some(true),
+        timedated_reachable: reachable,
+        polkit_answered: authorized.is_some(),
+    }
 }
 
 /// Runs `busctl` with `args`, 3 s at most. `Some(stdout)` on success, `None`
@@ -496,13 +508,48 @@ mod tests {
 
     #[test]
     fn timezone_settable_needs_timedated_and_polkit() {
-        assert_eq!(probe_summary(true, Some(true)), TimezoneProbe { settable: true, timedated_reachable: true });
+        let probe = |settable, timedated_reachable, polkit_answered| TimezoneProbe {
+            settable,
+            timedated_reachable,
+            polkit_answered,
+        };
+        assert_eq!(probe_summary(true, Some(true)), probe(true, true, true));
         // timedated answers, polkit says no: the rule is missing or declined.
-        assert_eq!(probe_summary(true, Some(false)), TimezoneProbe { settable: false, timedated_reachable: true });
-        // timedated answers, polkit does not: nothing is offered.
-        assert_eq!(probe_summary(true, None), TimezoneProbe { settable: false, timedated_reachable: true });
+        assert_eq!(probe_summary(true, Some(false)), probe(false, true, true));
+        // timedated answers, polkit does not: nothing is offered, and nothing
+        // is known about the grant.
+        assert_eq!(probe_summary(true, None), probe(false, true, false));
         // polkit would allow it, but there is nobody to ask.
-        assert_eq!(probe_summary(false, Some(true)), TimezoneProbe { settable: false, timedated_reachable: false });
+        assert_eq!(probe_summary(false, Some(true)), probe(false, false, true));
+    }
+
+    /// The sentences that explain a greyed-out control send the owner where
+    /// the cause is, in every catalog. polkit not answering names polkitd and
+    /// never the installer (rerunning it changes nothing when polkitd is
+    /// missing); the power sentence, where logind cannot tell a refusal from
+    /// a missing polkitd, names both.
+    #[test]
+    fn power_and_polkit_sentences_name_the_right_cause() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut catalogs = vec![("en".to_string(), crate::i18n::EN.to_string())];
+        for lang in ["fr", "de", "es", "it"] {
+            let path = root.join(format!("../../deploy/locales/core/{lang}.toml"));
+            catalogs.push((lang.to_string(), std::fs::read_to_string(&path).unwrap()));
+        }
+        for (lang, text) in catalogs {
+            let table: toml::Table = text.parse().unwrap();
+            let get = |key: &str| table[key].as_str().unwrap_or_else(|| panic!("{lang}: {key}")).to_string();
+            let no_answer = get("system_time_polkit_no_answer");
+            assert!(no_answer.contains("polkitd"), "{lang}: {no_answer}");
+            assert!(no_answer.contains("docs/installation.md"), "{lang}: {no_answer}");
+            assert!(!no_answer.contains("ritornello-install"), "{lang}: {no_answer}");
+            let power = get("system_power_not_allowed");
+            assert!(power.contains("polkit"), "{lang}: {power}");
+            assert!(power.contains("ritornello-install"), "{lang}: {power}");
+            assert!(power.contains("docs/installation.md"), "{lang}: {power}");
+            let warning = get("update_hour_zone_warning");
+            assert!(warning.contains("{device_time}") && !warning.contains("{device_hour}"), "{lang}: {warning}");
+        }
     }
 
     fn app(info: SystemInfo) -> axum::Router {
@@ -601,6 +648,32 @@ mod tests {
         assert!(v["error"].as_str().is_some_and(|m| !m.is_empty() && m != "timezone_unreachable"), "{v}");
     }
 
+    /// The three answers of the polkit probe reach the page as three distinct
+    /// JSON shapes. The regression this guards: a polkit that did not answer
+    /// (polkitd absent on DietPi, or slow to bus-activate) was reported exactly
+    /// like a refusal, and the page sent the owner to rerun the installer.
+    #[tokio::test]
+    async fn timezone_polkit_three_states_reach_the_page() {
+        for (authorized, settable, answered) in
+            [(Some(true), true, true), (Some(false), false, true), (None, false, false)]
+        {
+            let p = probe_summary(true, authorized);
+            let info = SystemInfo {
+                timezone_settable: p.settable,
+                timedated_reachable: p.timedated_reachable,
+                timezone_polkit_answered: p.polkit_answered,
+                ..Default::default()
+            };
+            let resp = app(info).oneshot(Request::get("/api/system").body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let v: serde_json::Value =
+                serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+            assert_eq!(v["timedated_reachable"], true, "{authorized:?}");
+            assert_eq!(v["timezone_settable"], settable, "{authorized:?}");
+            assert_eq!(v["timezone_polkit_answered"], answered, "{authorized:?}");
+        }
+    }
+
     #[tokio::test]
     async fn timezone_keys_in_get_system() {
         let info = SystemInfo { timezone_settable: true, timedated_reachable: true, ..Default::default() };
@@ -608,7 +681,14 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let v: serde_json::Value =
             serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
-        for key in ["timezone", "utc_offset_seconds", "device_unix_s", "timezone_settable", "timedated_reachable"] {
+        for key in [
+            "timezone",
+            "utc_offset_seconds",
+            "device_unix_s",
+            "timezone_settable",
+            "timedated_reachable",
+            "timezone_polkit_answered",
+        ] {
             assert!(v.get(key).is_some(), "key {key} missing");
         }
         assert_eq!(v["timezone_settable"], true);

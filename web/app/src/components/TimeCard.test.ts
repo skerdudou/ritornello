@@ -23,6 +23,7 @@ const CATALOG = {
   system_time_zone_changed: 'Time zone changed.',
   system_time_no_timedated: 'NO-TIMEDATED',
   system_time_not_allowed: 'NOT-ALLOWED',
+  system_time_polkit_no_answer: 'POLKIT-NO-ANSWER',
 }
 
 /** 2026-11-04T14:05:30Z. */
@@ -40,6 +41,7 @@ function system(over: Partial<SystemPayload> = {}): SystemPayload {
     device_unix_s: NOW_S,
     timezone_settable: true,
     timedated_reachable: true,
+    timezone_polkit_answered: true,
     ...over,
   }
 }
@@ -162,20 +164,61 @@ describe('TimeCard', () => {
     expect(w.get('[data-time-error]').text()).toBe('busctl said no')
   })
 
+  /**
+   * Every control greyed out. Another zone is picked first: Apply is also
+   * disabled while the selection is the device's own zone, so without the
+   * pick its assertion would pass whether or not the card is unavailable.
+   */
+  async function expectAllDisabled(w: ReturnType<typeof mountCard>) {
+    await w.findComponent(Select).vm.$emit('update:modelValue', 'America/New_York')
+    await flushPromises()
+    expect(w.findComponent(Select).props('disabled')).toBe(true)
+    expect(w.get('[data-time-zone-select]').attributes('disabled')).toBeDefined()
+    expect(w.get('[data-time-apply]').attributes('disabled')).toBeDefined()
+    expect(w.get('[data-time-use-browser]').attributes('disabled')).toBeDefined()
+  }
+
   it('explains, and disables everything, when timedated did not answer', async () => {
     const w = mountCard(system({ timedated_reachable: false, timezone_settable: false }))
     await flushPromises()
     expect(w.get('[data-time-unavailable]').text()).toBe('NO-TIMEDATED')
-    expect(w.get('[data-time-apply]').attributes('disabled')).toBeDefined()
-    expect(w.get('[data-time-use-browser]').attributes('disabled')).toBeDefined()
+    await expectAllDisabled(w)
   })
 
   it('explains, and disables everything, when the install did not allow it', async () => {
     const w = mountCard(system({ timedated_reachable: true, timezone_settable: false }))
     await flushPromises()
     expect(w.get('[data-time-unavailable]').text()).toBe('NOT-ALLOWED')
-    expect(w.get('[data-time-apply]').attributes('disabled')).toBeDefined()
-    expect(w.get('[data-time-use-browser]').attributes('disabled')).toBeDefined()
+    await expectAllDisabled(w)
+  })
+
+  // A polkit that did not answer (polkitd absent, as on DietPi by default, or
+  // too slow to bus-activate) is not a refusal: blaming the install would send
+  // the owner to rerun an installer that changes nothing.
+  it('blames polkit, not the install, when polkit did not answer', async () => {
+    const w = mountCard(
+      system({ timedated_reachable: true, timezone_settable: false, timezone_polkit_answered: false }),
+    )
+    await flushPromises()
+    expect(w.get('[data-time-unavailable]').text()).toBe('POLKIT-NO-ANSWER')
+    await expectAllDisabled(w)
+  })
+
+  it('reports timedated first when neither timedated nor polkit answered', async () => {
+    const w = mountCard(
+      system({ timedated_reachable: false, timezone_settable: false, timezone_polkit_answered: false }),
+    )
+    await flushPromises()
+    expect(w.get('[data-time-unavailable]').text()).toBe('NO-TIMEDATED')
+  })
+
+  it('enables Apply once another zone is picked, when the zone can be changed', async () => {
+    const w = mountCard(system())
+    await flushPromises()
+    await w.findComponent(Select).vm.$emit('update:modelValue', 'America/New_York')
+    await flushPromises()
+    expect(w.findComponent(Select).props('disabled')).toBe(false)
+    expect(w.get('[data-time-apply]').attributes('disabled')).toBeUndefined()
   })
 
   it('says nothing and enables the controls when the zone can be changed', async () => {

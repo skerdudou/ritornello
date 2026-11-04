@@ -757,10 +757,17 @@ export interface SystemPayload {
   /** The device's clock (Unix seconds) when it answered: the Time card
    *  shows the device's time, not the browser's. */
   device_unix_s: number
-  /** Polkit lets the core change the zone: false when the operator declined
-   *  that grant at installation. Meaningful only when `timedated_reachable`. */
+  /** Polkit lets the core change the zone. False when the operator declined
+   *  that grant at installation — but also when polkit did not answer, which
+   *  `timezone_polkit_answered` tells apart. Meaningful only when
+   *  `timedated_reachable`. */
   timezone_settable: boolean
   /** Did timedated answer the startup probe, whatever its answer was? Same
    *  split as `logind_reachable`: two causes, two repairs, two sentences. */
   timedated_reachable: boolean
+  /** Did polkit give a yes or a no at the startup probe? False when polkitd is
+   *  absent or too slow to start: then `timezone_settable` being false says
+   *  nothing about what was allowed at install, and the page must not say it
+   *  does. */
+  timezone_polkit_answered: boolean
 }

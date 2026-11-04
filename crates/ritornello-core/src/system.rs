@@ -96,6 +96,11 @@ pub struct Metrics {
     /// granting the rule at install, an absent timedated is not.
     pub timezone_settable: bool,
     pub timedated_reachable: bool,
+    /// Whether polkit gave a yes or a no at the startup probe. `false` when it
+    /// did not answer (polkitd absent, or too slow to start): a
+    /// `timezone_settable` of `false` then says nothing about what was granted
+    /// at install, and the page must not say it does.
+    pub timezone_polkit_answered: bool,
 }
 
 /// Called to restart the service. A field rather than a direct
@@ -162,6 +167,7 @@ pub struct SystemInfo {
     /// `Metrics::timezone_settable`.
     pub timezone_settable: bool,
     pub timedated_reachable: bool,
+    pub timezone_polkit_answered: bool,
     /// Latches to `true` the first time the sticky flag is seen set, and
     /// never resets: the firmware itself only clears it at reboot, so once
     /// this process has observed it, spawning `vcgencmd` again can only ever
@@ -210,6 +216,7 @@ impl Default for SystemInfo {
             busctl: "busctl".to_string(),
             timezone_settable: false,
             timedated_reachable: false,
+            timezone_polkit_answered: false,
             under_voltage_latched: std::sync::atomic::AtomicBool::new(false),
             under_voltage_ack: None,
             under_voltage_acked: std::sync::atomic::AtomicBool::new(false),
@@ -514,6 +521,7 @@ pub fn collect(info: &SystemInfo) -> Metrics {
         device_unix_s: now,
         timezone_settable: info.timezone_settable,
         timedated_reachable: info.timedated_reachable,
+        timezone_polkit_answered: info.timezone_polkit_answered,
     }
 }
 
@@ -979,7 +987,10 @@ mod tests {
         assert!(m.cpu_total_jiffies.is_some(), "/proc/stat readable on Linux");
         assert!(m.cpu_idle_jiffies.is_some());
         assert!(m.utc_offset_seconds.is_some(), "localtime_r answers on Linux");
-        assert!(!m.timezone_settable && !m.timedated_reachable, "nothing offered by default");
+        assert!(
+            !m.timezone_settable && !m.timedated_reachable && !m.timezone_polkit_answered,
+            "nothing offered by default"
+        );
     }
 
     use crate::status::{router, AppState};
@@ -1013,6 +1024,7 @@ mod tests {
             "kernel", "version", "can_power_off", "can_reboot", "logind_reachable",
             "cpu_total_jiffies", "cpu_idle_jiffies", "under_voltage_acknowledged", "timezone",
             "utc_offset_seconds", "device_unix_s", "timezone_settable", "timedated_reachable",
+            "timezone_polkit_answered",
         ] {
             assert!(v.get(key).is_some(), "key {key} missing");
         }

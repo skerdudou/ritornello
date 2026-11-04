@@ -2384,6 +2384,7 @@ async fn main() -> Result<()> {
                 logind_reachable: probe.logind_reachable,
                 timezone_settable: tz_probe.settable,
                 timedated_reachable: tz_probe.timedated_reachable,
+                timezone_polkit_answered: tz_probe.polkit_answered,
                 // The very hook the update worker uses to leave once the core
                 // binary has been replaced: see where it is built, above, for
                 // why mpv has to die with this process.

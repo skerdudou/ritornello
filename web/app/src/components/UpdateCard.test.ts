@@ -70,7 +70,7 @@ const CATALOG = {
     'A major update is available: it changes how the core and its plugins talk, so it is not installed automatically. Install it from here when you can.',
   update_major_refused: 'Refused by the new core until updated: {components}',
   update_hour_zone_warning:
-    'The device is on {device_zone}, your browser on {browser_zone}: {device_hour}:00 on the device is {browser_time} for you.',
+    'The device is on {device_zone}, your browser on {browser_zone}: {device_time} on the device is {browser_time} for you.',
 }
 
 // The card is handed its payload as a prop and never fetches anything itself
@@ -149,8 +149,8 @@ function settings(over: Partial<SettingsPayload> = {}): SettingsPayload {
   }
 }
 
-function mountCard(update: UpdatePayload) {
-  return mount(UpdateCard, { props: { update, settings: settings() } })
+function mountCard(update: UpdatePayload, over: Partial<SettingsPayload> = {}) {
+  return mount(UpdateCard, { props: { update, settings: settings(over) } })
 }
 
 describe('UpdateCard', () => {
@@ -484,8 +484,17 @@ describe('UpdateCard', () => {
       const w = mountCard(payload())
       await flushPromises()
       expect(w.get('[data-update-hour-zone]').text()).toBe(
-        'The device is on UTC, your browser on Europe/Paris: 3:00 on the device is 04:00 for you.',
+        'The device is on UTC, your browser on Europe/Paris: 03:00 on the device is 04:00 for you.',
       )
+    })
+
+    // Both times follow the clock setting: the device's hour used to be
+    // written `3:00` whatever the setting, next to a browser time in `4:00 AM`.
+    it('writes both times on the 12-hour clock when that is the setting', async () => {
+      serve({ timezone: 'UTC', utc_offset_seconds: 0 })
+      const w = mountCard(payload(), { clock_24h: false })
+      await flushPromises()
+      expect(w.get('[data-update-hour-zone]').text()).toContain('3:00 AM on the device is 4:00 AM for you.')
     })
 
     it('follows the hour being typed', async () => {

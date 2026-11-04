@@ -110,12 +110,14 @@ const offerBrowser = computed(() => !!props.state && !sameZone(props.state.timez
 /**
  * Why the controls are greyed out, one sentence per cause — the same split
  * as the Power card's: timedated not answering calls for a running service,
- * a refusal calls for the installer, where the operator declined the grant.
+ * polkit not answering calls for polkitd, and only a refusal calls for the
+ * installer, where the operator declined the grant.
  */
 const unavailable = computed(() => {
   const s = props.state
   if (!s) return null
   if (!s.timedated_reachable) return t.value('system_time_no_timedated')
+  if (!s.timezone_settable && !s.timezone_polkit_answered) return t.value('system_time_polkit_no_answer')
   if (!s.timezone_settable) return t.value('system_time_not_allowed')
   return null
 })

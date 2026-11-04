@@ -207,7 +207,7 @@ const zoneWarning = computed(() => {
   return t.value('update_hour_zone_warning', {
     device_zone: d.timezone ?? formatOffset(d.utc_offset_seconds),
     browser_zone: browser,
-    device_hour: String(hour),
+    device_time: formatHourMinute(hour, props.settings.clock_24h),
     browser_time: formatHourMinute(atBrowser, props.settings.clock_24h),
   })
 })

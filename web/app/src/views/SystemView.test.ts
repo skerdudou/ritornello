@@ -38,6 +38,7 @@ function payload(overrides: Record<string, unknown> = {}) {
     device_unix_s: 1_793_801_130,
     timezone_settable: true,
     timedated_reachable: true,
+    timezone_polkit_answered: true,
     ...overrides,
   }
 }
@@ -387,9 +388,10 @@ describe('SystemView', () => {
     // `t` returns the key, which is enough to tell the two sentences apart.
     stub(payload({ can_power_off: false, can_reboot: false, logind_reachable: true }))
     const refused = await mountView()
-    // Since the installer asks, a refusal from a reachable logind means the
-    // operator declined the grant: the sentence sends them back to the
-    // installer, not to a polkit rule they would have to write by hand.
+    // A refusal from a reachable logind means the operator declined the grant
+    // at install — or that polkitd is missing, which logind does not tell
+    // apart: the sentence names both (its wording, in every catalog, is pinned
+    // by `power_and_polkit_sentences_name_the_right_cause` in the core).
     expect(refused.get('[data-power-unavailable]').text()).toContain('system_power_not_allowed')
     refused.unmount()
 
