@@ -1074,7 +1074,9 @@ afterwards. **Declining is a normal outcome, not an error**: the rule is not
 placed — or is removed, when an earlier run had placed it — and the page
 greys the matching controls with a sentence saying it was not allowed at
 install time. A permission is granted again by running the installer with it
-checked.
+checked. That sentence is not proof of a refusal, though: without polkitd the
+controls grey too, and the page cannot always tell (see
+[below](#shutdown-and-reboot-from-the-web-ui)).
 
 The registry records the choice. A declined rule's path is kept in the core's
 record with the identity `"declined"` in place of a hash, and the core
@@ -1085,6 +1087,13 @@ a file that is absent *by choice* is not a file someone altered. The
 exemption is for that one path: a difference on any other privileged file
 still sends the operator to the installer, and so does a rule that was never
 recorded at all.
+
+The `"declined"` identity reaches the registry only when a run completes. A
+run that stops midway leaves the provisional registry without it, so a later
+run that does not ask (`--keep`, or no `--grants`) finds no recorded refusal
+and grants the permission again — not silently, since the summary lists the
+rule being placed, but without a question. Pass `--grants` explicitly after
+an interrupted run that declined something.
 
 polkit must be installed for either rule to matter (see the next section for
 the package names), and `systemd-timedated` must exist for the time zone:
@@ -1122,7 +1131,9 @@ the endpoint requires.
 `/etc/polkit-1/rules.d/`, unless the operator declined the `power` permission
 ([System permissions](#system-permissions)): then the rule is absent on
 purpose, logind answers "no", and the page says it was not allowed when
-Ritornello was installed. The rule grants the `ritornello` user the six logind
+Ritornello was installed — or that polkit is missing, because logind answers
+the same "no" when there is no polkitd to ask and the core cannot tell the
+two apart. The rule grants the `ritornello` user the six logind
 actions involved — power-off and reboot, each in its plain,
 `-multiple-sessions` and `-ignore-inhibit` form. All six, because logind
 checks the plain action only when nothing else is going on: it switches to
@@ -1141,6 +1152,12 @@ time-zone rule does anything without `polkitd` running:
 - **other Debian-based distributions**: `polkitd`, or `policykit-1` before
   Debian 12;
 - **Arch, Fedora, openSUSE**: `polkit`, generally already installed.
+
+For the time zone the core asks polkit directly, so it does tell a refusal
+from silence: when polkit does not answer its startup probe within 3 s —
+polkitd absent, or bus-activated and slow on a cold start — the Time card
+says polkit did not answer and sends here, not to the installer. Restarting
+Ritornello once polkitd is installed and running asks again.
 
 To check, on the device:
 
@@ -1388,7 +1405,10 @@ development machine, with a stand-in for `busctl`:
 - the output of the polkit `CheckAuthorization` call the startup probe makes
   for `org.freedesktop.timedate1.set-timezone`, on a real device: the code
   reads the boolean out of the reply, and a reply of another shape counts as
-  "not allowed";
+  polkit not answering (not allowed, with the polkitd sentence);
+- polkitd's own bus activation on a cold start: slower than the probe's 3 s,
+  it leaves the Time card saying polkit did not answer until the service is
+  restarted;
 - `SetTimezone` through `systemd-timedated` as the `ritornello` user, with the
   rule in place: that the zone actually changes, that `/etc/localtime` is
   re-linked as the reader expects, and that the scheduler and the console

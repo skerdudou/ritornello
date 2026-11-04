@@ -1696,7 +1696,8 @@ set of keys stays stable:
   "under_voltage_acknowledged": false,
   "timezone": "Europe/Paris", "utc_offset_seconds": 3600,
   "device_unix_s": 1793800000,
-  "timezone_settable": true, "timedated_reachable": true
+  "timezone_settable": true, "timedated_reachable": true,
+  "timezone_polkit_answered": true
 }
 ```
 
@@ -1737,10 +1738,13 @@ effect at the next service start (see
 
 `logind_reachable` says whether that probe got an answer **at all**, and the
 page needs it to pick which sentence to show under the two disabled buttons.
-An answered "no" means the polkit rule is missing; no answer at all means
-logind itself is not there — a masked or unloadable `systemd-logind`, which
-no polkit rule will fix. The two look identical from the buttons alone, and
-naming the wrong one costs an evening.
+An answered "no" means the polkit rule is missing — declined at install — or
+that polkitd itself is missing: logind answers "no" in both cases and does
+not say which, so the sentence names both and points to
+[installation.md](installation.md#shutdown-and-reboot-from-the-web-ui). No
+answer at all means logind itself is not there — a masked or unloadable
+`systemd-logind`, which no polkit rule will fix. The two look identical from
+the buttons alone, and naming the wrong one costs an evening.
 
 `timezone` is the device's IANA zone, read at every poll from the
 `/etc/localtime` link (or `/etc/timezone` when that is a copied file), with no
@@ -1751,16 +1755,22 @@ zone's standard time. `device_unix_s` is the device's clock when the response
 was built: the page cannot learn it from its own `Date.now()`, and a clock that
 is wrong is worth showing.
 
-`timezone_settable` and `timedated_reachable` follow the pattern of the two
-power fields, and for the same reasons: a startup probe, cached for the
-process, and two facts kept apart because they call for different repairs.
-`timedated_reachable` says whether `systemd-timedated` answered;
-`timezone_settable` is true only when it did **and** polkit says this process
-may call `set-timezone` (asked of polkit directly, `CheckAuthorization`,
-because the only other way to know would be to try a change). An answered
-"no" means the permission was declined when Ritornello was installed; no
-answer means timedated is absent or slow to start (it is bus-activated, so
-the first call starts it). The probe waits 3 s at most.
+`timezone_settable`, `timedated_reachable` and `timezone_polkit_answered`
+follow the pattern of the power fields, and for the same reasons: a startup
+probe, cached for the process, and facts kept apart because they call for
+different repairs. `timedated_reachable` says whether `systemd-timedated`
+answered; `timezone_settable` is true only when it did **and** polkit says
+this process may call `set-timezone` (asked of polkit directly,
+`CheckAuthorization`, because the only other way to know would be to try a
+change). `timezone_polkit_answered` says whether polkit gave a readable yes
+or no at all. Unlike logind, polkit asked directly does tell its two "no"s
+apart: an answered "no" means the rule is not in place — the permission was
+declined when Ritornello was installed — while no answer (the call failed,
+timed out, or replied in a shape the core does not read) means polkitd is
+absent, as on DietPi by default, or was too slow to start; rerunning the
+installer would fix nothing then. No answer from timedated means it is absent
+or slow to start (it is bus-activated, so the first call starts it). Each
+call waits 3 s at most.
 
 `POST /api/system/timezone` takes `{"timezone": "Europe/Paris"}`. A name that
 is not a plausible zone name is refused with `422` before anything is spawned.
@@ -1875,15 +1885,17 @@ browser's own zone, for the owner who is sitting in the room the device is in.
 Choosing one posts it to `/api/system/timezone`; a refusal shows its message
 beside the card.
 
-The card is greyed, with a sentence, when it cannot work: one when the
-permission was declined at install time, another when timedated does not answer
-(`timezone_settable` and `timedated_reachable`). The same distinction as the
-power buttons, for the same reason: the first is repaired by running the
-installer again, the second by fixing the device, and naming the wrong one
+The card is greyed, with a sentence, when it cannot work: one when timedated
+does not answer, one when polkit does not answer (check that polkitd is
+installed), and one when polkit answers "no", the permission having been
+declined at install time (`timedated_reachable`, `timezone_polkit_answered`,
+`timezone_settable`, judged in that order). The same distinction as the power
+buttons, for the same reason: only the last is repaired by running the
+installer again, the others by fixing the device, and naming the wrong one
 costs an evening. The shut-down and restart buttons grey the same way when
-logind refuses, with the sentence "not allowed when Ritornello was installed"
-for an answered "no", the permission having been declined, and the logind
-sentence above for no answer at all.
+logind refuses, with the sentence "not allowed when Ritornello was installed,
+or polkit is missing" for an answered "no" — logind does not tell the two
+apart — and the logind sentence above for no answer at all.
 
 ### Alerts
 
