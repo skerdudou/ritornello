@@ -2621,7 +2621,7 @@ dependencies = [
  "libc",
  "lofty",
  "pgp",
- "rand 0.8.8",
+ "rand 0.10.3",
  "reqwest",
  "ritornello-files-mount",
  "ritornello-i18n",

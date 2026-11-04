@@ -55,4 +55,4 @@ lofty = "0.25.1"
 [dev-dependencies]
 tempfile = "3"
 # Signs the tests' sums with a key generated for the test, never a real one.
-rand = "0.8"
+rand = "0.10"
