@@ -38,8 +38,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::RwLock as AsyncRwLock;
 
-/// How long a background refresh may take before the tool is killed.
-const REFRESH_DEADLINE: Duration = Duration::from_secs(120);
+/// How long a background refresh may take before the tool is killed: one
+/// probe's, the JavaScript fallback included.
+const REFRESH_DEADLINE: Duration = ritornello_plugin_web_streaming::ytdlp::PROBE_DEADLINE;
 
 fn keyed(key: &str) -> Text {
     Text::Keyed { key: key.into(), params: HashMap::new() }

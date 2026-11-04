@@ -369,7 +369,7 @@ impl Default for Limits {
     fn default() -> Self {
         let (connect, total) = (Duration::from_secs(5), Duration::from_secs(20));
         Self {
-            probe: Duration::from_secs(120),
+            probe: crate::ytdlp::PROBE_DEADLINE,
             video: Duration::from_secs(30 * 60),
             fs: Duration::from_secs(10),
             fetch_cover: Arc::new(move |url| {
