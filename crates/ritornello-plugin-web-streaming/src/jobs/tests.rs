@@ -247,13 +247,27 @@ async fn the_view_round_trips_through_json_with_rows_of_every_state() {
             target: Target { root: "nas".into(), path: "a/b".into() },
             state: JobState::Failed("why".into()),
             rows: vec![
-                Row { preset: 1, id: "a".into(), title: "A".into(), state: VideoState::Pending, percent: None },
-                Row { preset: 1, id: "b".into(), title: "B".into(), state: VideoState::Running, percent: Some(12.5) },
-                Row { preset: 1, id: "c".into(), title: "C".into(), state: VideoState::Done, percent: Some(100.0) },
-                Row { preset: 1, id: "d".into(), title: "D".into(), state: VideoState::Failed("ERROR: x".into()), percent: None },
-                Row { preset: 2, id: "e".into(), title: "E".into(), state: VideoState::Skipped("unavailable".into()), percent: None },
-                Row { preset: 2, id: "f".into(), title: "F".into(), state: VideoState::Cancelled, percent: None },
+                Row { preset: 1, id: "a".into(), title: "A".into(), state: VideoState::Pending, percent: None, notes: Vec::new() },
+                Row { preset: 1, id: "b".into(), title: "B".into(), state: VideoState::Running, percent: Some(12.5), notes: Vec::new() },
+                Row { preset: 1, id: "c".into(), title: "C".into(), state: VideoState::Done, percent: Some(100.0), notes: Vec::new() },
+                Row { preset: 1, id: "d".into(), title: "D".into(), state: VideoState::Failed("ERROR: x".into()), percent: None, notes: Vec::new() },
+                Row { preset: 2, id: "e".into(), title: "E".into(), state: VideoState::Skipped("unavailable".into()), percent: None, notes: Vec::new() },
+                Row { preset: 2, id: "f".into(), title: "F".into(), state: VideoState::Cancelled, percent: None, notes: Vec::new() },
+                Row { preset: 2, id: "g".into(), title: "G".into(), state: VideoState::Converting, percent: None, notes: Vec::new() },
+                Row {
+                    preset: 2,
+                    id: "h".into(),
+                    title: "H".into(),
+                    state: VideoState::Done,
+                    percent: Some(100.0),
+                    notes: vec![Note::ConversionFailed("boom".into()), Note::CoverBeside],
+                },
             ],
+            options: JobOptions {
+                format: Format::Mp3,
+                cover: CoverMode::Embedded,
+                names: [(1, "Mine".to_string())].into(),
+            },
         }],
     };
     let text = serde_json::to_string(&view).unwrap();
@@ -269,7 +283,11 @@ async fn a_job_left_running_by_a_previous_run_is_failed_and_ids_go_on() {
             presets: vec![1],
             target: target(),
             state: JobState::Running,
-            rows: vec![Row { preset: 1, id: "a".into(), title: "A".into(), state: VideoState::Running, percent: Some(3.0) }],
+            rows: vec![
+                Row { preset: 1, id: "a".into(), title: "A".into(), state: VideoState::Running, percent: Some(3.0), notes: Vec::new() },
+                Row { preset: 1, id: "b".into(), title: "B".into(), state: VideoState::Converting, percent: None, notes: Vec::new() },
+            ],
+            options: JobOptions::default(),
         }],
     };
     std::fs::write(data.path().join("jobs.json"), serde_json::to_string(&old).unwrap()).unwrap();

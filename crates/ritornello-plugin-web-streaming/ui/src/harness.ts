@@ -46,6 +46,9 @@ export function state(partial: Partial<Data> = {}): Data {
     probe: { running: false, results: [] },
     targets: [],
     last_target: null,
+    last_format: 'original',
+    last_cover: 'separate',
+    default_names: {},
     explore: { busy: false, listing: null, error: null },
     jobs: [],
     tool: {
@@ -67,6 +70,8 @@ export function state(partial: Partial<Data> = {}): Data {
       checking: false,
       js_hopeless: false,
       js_runtime_unmaintained: false,
+      ffmpeg: '7.1.1-1+b1',
+      ffmpeg_hint: null,
     },
     last_failure: null,
     ...partial,

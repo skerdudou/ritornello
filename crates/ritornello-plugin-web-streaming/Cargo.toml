@@ -48,6 +48,9 @@ sha2 = "0.10"
 # crates and features as the core's and the installer's.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = "0.4"
+# Writes a single video's cover into its file (m4a, mp3, opus, ogg): the
+# same crate and version the files plugin and the core read covers with.
+lofty = "0.25.1"
 
 [dev-dependencies]
 tempfile = "3"

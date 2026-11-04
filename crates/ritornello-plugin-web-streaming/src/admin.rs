@@ -13,7 +13,7 @@
 //! | `save` | validates, writes `entries.toml` and the playlist caches | nothing |
 //! | `list_targets` | nothing | read the share roots and `/proc/mounts` (also spawned by `get_data` when the cache is stale) |
 //! | `list_dirs`, `create_dir` | nothing | the share's I/O, each under a deadline |
-//! | `download` | queues the job (no I/O on this thread) | settings write |
+//! | `download` | checks ffmpeg for mp3 (the last probe, in memory), queues the job (no I/O on this thread) | settings write |
 //! | `cancel` | flips the job's flag | nothing |
 //! | `update_tool` | flags the request | nothing (the scheduler runs it) |
 //! | `set_channel` | nothing | settings write, then an update request |
@@ -33,7 +33,8 @@ use ritornello_plugin_web_streaming::reason;
 use ritornello_files_mount::mounts::read_proc_mounts;
 use ritornello_plugin_sdk::AdminPlugin;
 use ritornello_plugin_web_streaming::entries::{Entries, Entry, ListCache};
-use ritornello_plugin_web_streaming::jobs::Jobs;
+use ritornello_plugin_web_streaming::download::{CoverMode, Format, default_name};
+use ritornello_plugin_web_streaming::jobs::{JobOptions, Jobs};
 use ritornello_plugin_web_streaming::link::parse_link;
 use ritornello_plugin_web_streaming::settings::Channel;
 use ritornello_plugin_web_streaming::targets::{self, files_roots_path, Target};
@@ -42,7 +43,7 @@ use ritornello_plugin_web_streaming::tool::Tool;
 use ritornello_plugin_web_streaming::ytdlp::{Kind, Ytdlp};
 use ritornello_proto::Text;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -58,6 +59,9 @@ const SAVE_DEADLINE: Duration = Duration::from_secs(4);
 pub const MAX_LINKS: usize = 20;
 /// The settings key holding the last download target.
 const LAST_TARGET: &str = "last_target";
+/// The settings keys holding the last format and cover choice.
+const LAST_FORMAT: &str = "last_format";
+const LAST_COVER: &str = "last_cover";
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -70,7 +74,19 @@ enum Op {
     ListTargets,
     ListDirs { target: Target },
     CreateDir { target: Target, name: String },
-    Download { presets: Vec<u8>, target: Target },
+    Download {
+        presets: Vec<u8>,
+        target: Target,
+        #[serde(default)]
+        format: Format,
+        #[serde(default)]
+        cover: CoverMode,
+        /// The name typed per preset, by its number as a string (a JSON
+        /// key; the internally tagged enum buffers the request, and a number
+        /// key would not be read back from that buffer).
+        #[serde(default)]
+        names: BTreeMap<String, String>,
+    },
     Cancel { job: u64 },
     /// `force` takes a release the rollback guard refused.
     UpdateTool {
@@ -267,7 +283,7 @@ impl WebStreamingAdmin {
         Ok(())
     }
 
-    fn download(&self, presets: Vec<u8>, target: Target) -> Result<(), Text> {
+    fn download(&self, presets: Vec<u8>, target: Target, options: JobOptions) -> Result<(), Text> {
         if presets.is_empty() {
             return Err(keyed("nothing_selected"));
         }
@@ -275,21 +291,40 @@ impl WebStreamingAdmin {
         if let Some(twice) = presets.iter().find(|p| !seen.insert(**p)) {
             return Err(keyed_with("duplicate_preset", "preset", twice));
         }
-        self.jobs.enqueue(presets, target.clone());
+        // mp3 is only ever a conversion by ffmpeg: not offered without it,
+        // and refused here whatever the page sent. (m4a goes through: the
+        // site's own m4a needs no ffmpeg, and the row says when the original
+        // had to be kept.)
+        if options.format == Format::Mp3 && self.tool.capabilities().ffmpeg_path.is_none() {
+            return Err(keyed("ffmpeg_missing"));
+        }
+        let (format, cover) = (options.format, options.cover);
+        self.jobs.enqueue_with(presets, target.clone(), options);
         // Remembered for the next time; the write is off this thread.
         let tool = self.tool.clone();
         tokio::task::spawn_blocking(move || {
-            let value = match toml::Value::try_from(&target) {
-                Ok(v) => v,
-                Err(e) => return tracing::warn!("last target not serialised: {e}"),
+            let values = (toml::Value::try_from(&target), toml::Value::try_from(format), toml::Value::try_from(cover));
+            let (Ok(target), Ok(format), Ok(cover)) = values else {
+                return tracing::warn!("last download choices not serialised: {values:?}");
             };
             if let Err(e) = tool.edit_settings(|s| {
-                s.other.insert(LAST_TARGET.to_string(), value);
+                s.other.insert(LAST_TARGET.to_string(), target);
+                s.other.insert(LAST_FORMAT.to_string(), format);
+                s.other.insert(LAST_COVER.to_string(), cover);
             }) {
-                tracing::warn!("last target not remembered: {e:#}");
+                tracing::warn!("last download choices not remembered: {e:#}");
             }
         });
         Ok(())
+    }
+
+    /// The last format and cover choice, the defaults when none was made
+    /// (or one this version does not know).
+    fn last_choices(&self) -> (Format, CoverMode) {
+        let other = self.tool.settings().other;
+        let format = other.get(LAST_FORMAT).cloned().and_then(|v| v.try_into().ok()).unwrap_or_default();
+        let cover = other.get(LAST_COVER).cloned().and_then(|v| v.try_into().ok()).unwrap_or_default();
+        (format, cover)
     }
 }
 
@@ -341,6 +376,11 @@ impl AdminPlugin for WebStreamingAdmin {
     async fn get_data(&self) -> serde_json::Value {
         let mut entries = self.entries.read().await.entry.clone();
         entries.sort_by_key(|e| e.preset);
+        // The names a download would give, shown and editable in the dialog:
+        // computed from the saved presets, no network.
+        let default_names: BTreeMap<String, String> =
+            entries.iter().map(|e| (e.preset.to_string(), default_name(e))).collect();
+        let (last_format, last_cover) = self.last_choices();
         let (targets, stale) = {
             let cache = self.shared.targets.lock().unwrap_or_else(|p| p.into_inner());
             let old = cache.fetched.is_none_or(|at| at.elapsed() >= self.env.targets_max_age);
@@ -366,6 +406,9 @@ impl AdminPlugin for WebStreamingAdmin {
             "entries": entries,
             "probe": probe,
             "last_target": self.last_target(&targets),
+            "last_format": last_format,
+            "last_cover": last_cover,
+            "default_names": default_names,
             "targets": targets,
             "explore": explore,
             "jobs": jobs,
@@ -396,7 +439,14 @@ impl AdminPlugin for WebStreamingAdmin {
                 explore::create_dir(&self.shared, &self.env, target, name);
                 Ok(())
             }
-            Op::Download { presets, target } => self.download(presets, target),
+            Op::Download { presets, target, format, cover, names } => {
+                let names = names
+                    .into_iter()
+                    .map(|(preset, name)| preset.parse::<u8>().map(|p| (p, name)))
+                    .collect::<Result<BTreeMap<u8, String>, _>>()
+                    .map_err(|e| keyed_with("bad_request", "detail", e))?;
+                self.download(presets, target, JobOptions { format, cover, names })
+            }
             Op::Cancel { job } => {
                 // A job that ended a moment ago is not an error.
                 self.jobs.cancel(job);

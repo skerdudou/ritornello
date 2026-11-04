@@ -34,6 +34,12 @@ const jsLine = computed(() => {
     <!-- No command here: nothing the operator could type would help. -->
     <p data-js>{{ jsLine }}</p>
 
+    <!-- Optional: without it, downloads stay in the site's format. -->
+    <p data-ffmpeg>
+      <template v-if="caps.ffmpeg">{{ t('ffmpeg_found', { version: caps.ffmpeg }) }}</template>
+      <template v-else>{{ t('ffmpeg_absent', { command: caps.ffmpeg_hint ?? '' }) }}</template>
+    </p>
+
     <div class="flex items-center gap-2">
       <Button variant="outline" size="sm" data-recheck :disabled="frozen || caps.checking" @click="$emit('recheck')">
         {{ t('btn_recheck') }}

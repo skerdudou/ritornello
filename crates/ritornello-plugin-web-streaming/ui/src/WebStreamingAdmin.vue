@@ -5,8 +5,8 @@ import {
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import AddLinks from './AddLinks.vue'
 import CapabilitiesPanel from './CapabilitiesPanel.vue'
-import { emptyData, workInProgress, type Data, type Entry, type Found, type Target } from './data'
-import DownloadDialog from './DownloadDialog.vue'
+import { emptyData, workInProgress, type Choices, type Data, type Entry, type Found, type Target } from './data'
+import DownloadDialog, { type Item } from './DownloadDialog.vue'
 import EntryList, { type Row } from './EntryList.vue'
 import JobList from './JobList.vue'
 import ToolPanel from './ToolPanel.vue'
@@ -239,9 +239,16 @@ async function createDir(target: Target, name: string): Promise<void> {
   if (err) message.value = err
 }
 
-async function download(target: Target): Promise<void> {
-  const presets = rows.value.filter((r) => selected.value.has(r.key) && r.saved !== null).map((r) => r.saved!)
-  const err = await send({ op: 'download', presets, target })
+/** The saved presets ticked for download, in order: what the dialog names. */
+const chosen = computed<Item[]>(() =>
+  rows.value
+    .filter((r) => selected.value.has(r.key) && r.saved !== null)
+    .map((r) => ({ preset: r.saved!, title: r.title, kind: r.kind })),
+)
+
+async function download(target: Target, choices: Choices): Promise<void> {
+  const presets = chosen.value.map((i) => i.preset)
+  const err = await send({ op: 'download', presets, target, ...choices })
   message.value = err ?? ''
   if (!err) {
     dialogOpen.value = false
@@ -354,6 +361,12 @@ async function recheck(): Promise<void> {
       :targets="data.targets"
       :last-target="data.last_target"
       :explore="data.explore"
+      :items="chosen"
+      :default-names="data.default_names ?? {}"
+      :last-format="data.last_format ?? 'original'"
+      :last-cover="data.last_cover ?? 'separate'"
+      :ffmpeg="data.capabilities.ffmpeg ?? null"
+      :ffmpeg-hint="data.capabilities.ffmpeg_hint ?? null"
       @update:open="dialogOpen = $event"
       @list="listDirs"
       @create="createDir"

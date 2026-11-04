@@ -1,4 +1,12 @@
-//! The cover lying next to the files: `folder.jpg` and its cousins.
+//! The cover lying next to the files: the track's own picture, `folder.jpg`
+//! and its cousins.
+//!
+//! In this order: a picture named after the track itself (`<stem>.jpg`,
+//! `.jpeg`, `.png`: what the web-streaming plugin writes beside a single
+//! video), then the folder's image by name, then an artwork subdirectory,
+//! then the folder's one image guessed. A track's own picture is never
+//! guessed to be the folder's: it would become the face of every other track
+//! of the folder.
 //!
 //! It is the plugin that does this work, and not the core: it is the one that
 //! mounted the share and that knows the root of the declared source. And a
@@ -78,9 +86,15 @@ const SUBDIRECTORIES: [&str; 4] = ["artwork", "scans", "covers", "art"];
 const EXCLUDED: [&str; 8] =
     ["back", "verso", "inlay", "cd", "disc", "disque", "booklet", "matrix"];
 
+/// The extensions of a track's own picture, in this order.
+const TRACK_EXTENSIONS: [&str; 3] = ["jpg", "jpeg", "png"];
+
 /// Searches for the cover of the played file. `None` = nothing certain, we stay silent.
 pub fn search(file: &Path) -> Option<CoverRef> {
     let directory = file.parent()?;
+    if let Some(p) = own_picture(file) {
+        return Some(path(p));
+    }
     if let Some(p) = by_preference(directory) {
         return Some(path(p));
     }
@@ -95,6 +109,42 @@ pub fn search(file: &Path) -> Option<CoverRef> {
 
 fn path(p: PathBuf) -> CoverRef {
     CoverRef::Path { path: p.to_string_lossy().into_owned() }
+}
+
+/// The picture named after the track (`<stem>.jpg`, `.jpeg`, `.png`, in that
+/// order), whatever the case of its name, as the rest of this module.
+fn own_picture(file: &Path) -> Option<PathBuf> {
+    let directory = file.parent()?;
+    let stem = file.file_stem()?.to_string_lossy().into_owned();
+    let candidates: Vec<PathBuf> = images_of(directory)
+        .into_iter()
+        .filter(|p| p.file_stem().is_some_and(|s| s.to_string_lossy().eq_ignore_ascii_case(&stem)))
+        .collect();
+    TRACK_EXTENSIONS.iter().find_map(|wanted| {
+        candidates
+            .iter()
+            .find(|p| p.extension().is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case(wanted)))
+            .cloned()
+    })
+}
+
+/// Whether `p` is a track: what `files` plays, and webm, which a download
+/// of the web-streaming plugin may leave beside its own picture.
+fn is_track(p: &Path) -> bool {
+    ritornello_plugin_files::scan::is_audio(p)
+        || p.extension().is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("webm"))
+}
+
+/// The stems of the tracks of `directory`, lowercased.
+fn track_stems(directory: &Path) -> Vec<String> {
+    std::fs::read_dir(directory)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| is_track(p))
+        .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().to_ascii_lowercase()))
+        .collect()
 }
 
 /// The artwork subdirectory, whatever its case.
@@ -143,11 +193,17 @@ pub(crate) fn names_a_cover(path: &Path) -> bool {
 }
 
 /// The single image of the directory, if it is unique **and** if its name does
-/// not say it is something other than the front face.
+/// not say it is something other than the front face: neither a back cover,
+/// nor the own picture of a track of the folder (named after it). Without the
+/// last rule, a single video's `<stem>.jpg` would be shown for every other
+/// track of the folder.
 fn single_image(directory: &Path) -> Option<PathBuf> {
     let images = images_of(directory);
     let [only] = images.as_slice() else { return None };
     let stem = only.file_stem()?.to_string_lossy().to_ascii_lowercase();
+    if track_stems(directory).contains(&stem) {
+        return None;
+    }
     EXCLUDED.iter().all(|excluded| !stem.contains(excluded)).then(|| only.clone())
 }
 
@@ -191,6 +247,51 @@ mod tests {
             }
             _ => None,
         }
+    }
+
+    fn found_for(dir: &tempfile::TempDir, track: &str) -> Option<String> {
+        match search(&dir.path().join(track)) {
+            Some(ritornello_proto::CoverRef::Path { path }) => {
+                Some(std::path::Path::new(&path).file_name().unwrap().to_string_lossy().into_owned())
+            }
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_track_s_own_picture_comes_before_the_folder_s() {
+        let dir = tree(&["Song.m4a", "Song.jpg", "cover.jpg", "Other.mp3"]);
+        assert_eq!(found_for(&dir, "Song.m4a").as_deref(), Some("Song.jpg"));
+        // The other track of the folder keeps the folder's image.
+        assert_eq!(found_for(&dir, "Other.mp3").as_deref(), Some("cover.jpg"));
+        // Before an artwork subdirectory too.
+        let dir = tree(&["Song.opus", "Song.png", "Artwork/front.jpg"]);
+        assert_eq!(found_for(&dir, "Song.opus").as_deref(), Some("Song.png"));
+    }
+
+    #[test]
+    fn a_track_s_own_picture_is_found_whatever_its_case_jpg_first() {
+        let dir = tree(&["Song.mp3", "SONG.JPEG"]);
+        assert_eq!(found_for(&dir, "Song.mp3").as_deref(), Some("SONG.JPEG"));
+        let dir = tree(&["Song.mp3", "Song.png", "Song.jpeg", "song.jpg"]);
+        assert_eq!(found_for(&dir, "Song.mp3").as_deref(), Some("song.jpg"));
+        // webp is not a track's own picture (only jpg, jpeg, png are).
+        let dir = tree(&["Song.mp3", "Song.webp", "x.mp3"]);
+        assert_eq!(found_for(&dir, "Song.mp3"), None);
+    }
+
+    #[test]
+    fn another_track_s_own_picture_is_never_guessed_to_be_the_folder_s() {
+        // What a single video downloaded into a folder leaves: the next
+        // track must not take its picture.
+        let dir = tree(&["Song.m4a", "Song.jpg", "Other.mp3"]);
+        assert_eq!(found_for(&dir, "Other.mp3"), None);
+        // Whatever the case, and beside a webm the files plugin does not list.
+        let dir = tree(&["Clip.webm", "clip.JPG", "Other.mp3"]);
+        assert_eq!(found_for(&dir, "Other.mp3"), None);
+        // A lone image named after no track is still guessed.
+        let dir = tree(&["Song.m4a", "scan001.jpg", "Other.mp3"]);
+        assert_eq!(found_for(&dir, "Other.mp3").as_deref(), Some("scan001.jpg"));
     }
 
     #[test]

@@ -56,7 +56,21 @@ export interface Explore {
   error: Fault | null
 }
 
-export type RowState = 'pending' | 'running' | 'done' | 'failed' | 'skipped' | 'cancelled'
+export type RowState = 'pending' | 'running' | 'converting' | 'done' | 'failed' | 'skipped' | 'cancelled'
+
+/** The format a download is kept in. */
+export type Format = 'original' | 'm4a' | 'mp3'
+
+/** Where a single video's cover goes. */
+export type CoverMode = 'embedded' | 'separate'
+
+/** What the operator chose in the download dialog. */
+export interface Choices {
+  format: Format
+  cover: CoverMode
+  /** The name of each preset's file (a video) or folder (a playlist), by its number. */
+  names: Record<string, string>
+}
 
 export interface JobRow {
   preset: number
@@ -67,6 +81,8 @@ export interface JobRow {
   /** The reason of a failure or a skip: a code, and yt-dlp's own words as `detail`. */
   detail?: Fault
   percent?: number
+  /** What went otherwise than asked: a code, and ffmpeg's own words as `detail`. */
+  notes?: Fault[]
 }
 
 export interface Job {
@@ -109,6 +125,10 @@ export interface Capabilities {
   js_hopeless: boolean
   /** The runtime is the plugin's own node 22, past its end of life: kept as it is. */
   js_runtime_unmaintained: boolean
+  /** ffmpeg's version; null without it (no mp3, no m4a conversion). */
+  ffmpeg: string | null
+  /** The command that installs ffmpeg, when it is missing. */
+  ffmpeg_hint: string | null
 }
 
 /** How each runtime is usually written; the wire carries yt-dlp's names. */
@@ -135,6 +155,11 @@ export interface Data {
   /** The shares a download may go to. */
   targets: string[]
   last_target: Target | null
+  /** The last format and cover chosen. */
+  last_format: Format
+  last_cover: CoverMode
+  /** The name a download would give each preset, by its number: the dialog's default. */
+  default_names: Record<string, string>
   explore: Explore
   jobs: Job[]
   tool: ToolStatus
@@ -149,6 +174,9 @@ export function emptyData(): Data {
     probe: { running: false, results: [] },
     targets: [],
     last_target: null,
+    last_format: 'original',
+    last_cover: 'separate',
+    default_names: {},
     explore: { busy: false, listing: null, error: null },
     jobs: [],
     tool: {
@@ -157,7 +185,7 @@ export function emptyData(): Data {
     },
     capabilities: {
       python3: null, js_runtime: null, js_runtime_slow: false, apt_hint: null, checking: false, js_hopeless: false,
-      js_runtime_unmaintained: false,
+      js_runtime_unmaintained: false, ffmpeg: null, ffmpeg_hint: null,
     },
     last_failure: null,
   }
@@ -247,6 +275,27 @@ export function faultText(t: T, fault: Fault): string {
     default:
       // `failed`, and a code a newer plugin may add: the tool's own words.
       return t('fault_failed', { detail: detail || fault.code })
+  }
+}
+
+/** What a download row says besides its state. One key per code. */
+export function noteText(t: T, note: Fault): string {
+  switch (note.code) {
+    case 'already_present':
+      return t('note_already_present')
+    case 'no_ffmpeg':
+      return t('note_no_ffmpeg')
+    case 'converted_name_taken':
+      return t('note_converted_name_taken')
+    case 'conversion_failed':
+      return t('note_conversion_failed', { detail: note.detail ?? '' })
+    case 'cover_beside':
+      return t('note_cover_beside')
+    case 'cover_name_taken':
+      return t('note_cover_name_taken')
+    default:
+      // A code a newer plugin may add: show it rather than nothing.
+      return note.code
   }
 }
 
@@ -383,6 +432,8 @@ export function stateText(t: T, state: string): string {
       return t('state_queued')
     case 'running':
       return t('state_running')
+    case 'converting':
+      return t('state_converting')
     case 'done':
       return t('state_done')
     case 'cancelled':

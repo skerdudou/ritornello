@@ -1,14 +1,15 @@
 //! Downloading the audio of presets into a folder of a writable share.
 //!
 //! **One video at a time**, so that one failure never stops a playlist. The
-//! command is `<bin> -f bestaudio --no-playlist --downloader native
+//! command is `<bin> -f <selector> --no-playlist --downloader native
 //! --hls-prefer-native --ffmpeg-location /dev/null/ffmpeg --newline
 //! --progress-template ... -o <template> -- <address>`: `bin` is the wrapper
 //! that already carries the configuration flags. The address is the video's
 //! [`Video::play_url`]: YouTube's rebuilt `watch` URL, another site's address
-//! judged like an operator's link. One stream, no merge, **no ffmpeg
-//! anywhere**: no thumbnail is asked of yt-dlp, no conversion, nothing
-//! embedded.
+//! judged like an operator's link. One stream, no merge, and **yt-dlp never
+//! finds ffmpeg**: no thumbnail is asked of it, no conversion, nothing
+//! embedded by it. The selector is the [`Format`]'s: `bestaudio`, or for m4a
+//! `bestaudio[ext=m4a]/bestaudio` (the site's m4a stream when it has one).
 //!
 //! **Only yt-dlp's own downloader runs**, so that every byte goes through the
 //! network guard of the wrapper (`tool/wrapper.rs`), which sees the sockets
@@ -25,16 +26,31 @@
 //! then fails, rather than downloading outside the guard. A live stream
 //! (always ffmpeg's) is refused before any of this.
 //!
+//! **A conversion is the plugin's own, and touches only a local file.** When
+//! the operator asked for mp3 (or for m4a and the site had none), the plugin
+//! itself runs the system's ffmpeg on the file yt-dlp wrote, once it is
+//! complete: `-nostdin -protocol_whitelist file`, both paths spelled
+//! `file:...`, into a hidden temporary that is renamed onto `<stem>.<ext>`
+//! only if that name is still free, the original then removed. It runs in its
+//! own process group, under a deadline, and a cancel kills it like a
+//! download. No ffmpeg on the device: the site's own file is kept and the
+//! row says so ([`Note`]).
+//!
 //! **The names are the plugin's.** yt-dlp is handed a finished path, not a
-//! template to fill from remote data: [`sanitize`] turns a title into a name
-//! that cannot leave its folder, and `%` is doubled so that a title cannot
-//! write an output-template field of its own.
+//! template to fill from remote data: [`sanitize`] turns a title, or the name
+//! the operator typed, into a name that cannot leave its folder, and `%` is
+//! doubled so that a title cannot write an output-template field of its own.
+//! A name already taken is never overwritten: yt-dlp leaves an existing file
+//! alone, and the row says the file was already there.
 //!
 //! **The cover is fetched here**, from the `jpg` the probe named, with
 //! timeouts, through the network guard (`netguard.rs`: never the local
-//! network, every redirect judged again), and written as `cover.jpg` (a playlist's folder; or, for a single
-//! video, next to it and only if the folder has none yet). A missing or failed
-//! cover is never a failure of the download.
+//! network, every redirect judged again). A playlist's is written as
+//! `cover.jpg` in its folder, replacing the previous one. A single video's is
+//! the track's own, never the folder's: written into the file with `lofty`
+//! (m4a, mp3, opus, ogg) or, as the operator chose or when the container
+//! takes none (webm), beside it as `<stem>.jpg`, never over an existing one.
+//! A missing or failed cover is never a failure of the download.
 //!
 //! **A spawn is a process group**, and cancelling or running out of time kills
 //! the whole group: the wrapper is a shell script and yt-dlp a child of it,
@@ -244,12 +260,106 @@ pub async fn run_ytdlp(
 /// comment).
 pub const NO_FFMPEG: &str = "/dev/null/ffmpeg";
 
+// ---- what the operator chose -------------------------------------------------
+
+/// The format a download is kept in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Format {
+    /// As the site gives it (webm/opus on YouTube): no conversion.
+    #[default]
+    Original,
+    /// The site's m4a stream when it has one, else converted by the plugin
+    /// when ffmpeg is there, else the original kept.
+    M4a,
+    /// The best stream, converted by the plugin with ffmpeg.
+    Mp3,
+}
+
+impl Format {
+    /// What `-f` is handed.
+    pub fn selector(self) -> &'static str {
+        match self {
+            Format::Original | Format::Mp3 => "bestaudio",
+            Format::M4a => "bestaudio[ext=m4a]/bestaudio",
+        }
+    }
+
+    /// The extension the file must end up with; `None` takes what comes.
+    pub fn wanted_ext(self) -> Option<&'static str> {
+        match self {
+            Format::Original => None,
+            Format::M4a => Some("m4a"),
+            Format::Mp3 => Some("mp3"),
+        }
+    }
+}
+
+/// Where a single video's cover goes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverMode {
+    /// Written into the audio file, where its container takes one.
+    Embedded,
+    /// `<stem>.jpg` beside the track: read by `files` whatever the container.
+    #[default]
+    Separate,
+}
+
+/// What the operator chose for one preset.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Choices {
+    pub format: Format,
+    pub cover: CoverMode,
+    /// The name typed for the file (a video) or the folder (a playlist):
+    /// cleaned by [`sanitize`]; empty once cleaned, the default stands.
+    pub name: Option<String>,
+}
+
+/// What a row says besides its state: a download that went through, but not
+/// quite as asked. Carried to the page as a code (and, for what ffmpeg said,
+/// its own words as `detail`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "code", content = "detail", rename_all = "snake_case")]
+pub enum Note {
+    /// A file of that name was already there: left as it was, nothing
+    /// converted, no cover written.
+    AlreadyPresent,
+    /// m4a or mp3 was asked and ffmpeg is not installed: the site's own
+    /// format was kept.
+    NoFfmpeg,
+    /// The converted file's name is taken: the original was kept.
+    ConvertedNameTaken,
+    /// ffmpeg failed, with its last line: the original was kept.
+    ConversionFailed(String),
+    /// The cover could not go into this container: it was written beside
+    /// the track instead.
+    CoverBeside,
+    /// `<stem>.jpg` exists already: it was kept, no cover written.
+    CoverNameTaken,
+}
+
+/// The name a preset's file (a video) or folder (a playlist) gets when the
+/// operator types none: its title, cleaned, else its id. Computed from the
+/// saved preset alone (no network): the page shows it before a download.
+pub fn default_name(entry: &Entry) -> String {
+    let link = parse_link(&entry.url).ok();
+    let fallback = match entry.kind {
+        Kind::Video => link
+            .as_ref()
+            .and_then(|l| l.watch_id().map(str::to_string))
+            .or_else(|| entry.identity.as_deref().and_then(|i| i.split_once(':')).map(|(_, id)| id.to_string())),
+        Kind::Playlist => link.as_ref().and_then(|l| l.list_id().map(str::to_string).or_else(|| l.cache_key())),
+    };
+    sanitize(&entry.title, &fallback.unwrap_or_default())
+}
+
 /// The arguments of one video's download.
-pub fn download_args(dir: &Path, stem: &str, url: &str) -> Vec<String> {
+pub fn download_args(dir: &Path, stem: &str, url: &str, format: Format) -> Vec<String> {
     let template = format!("{}/{}.%(ext)s", template_escape(&dir.to_string_lossy()), template_escape(stem));
     [
         "-f",
-        "bestaudio",
+        format.selector(),
         "--no-playlist",
         "--downloader",
         "native",
@@ -355,14 +465,230 @@ pub async fn fetch_jpg(url: &str, connect: Duration, total: Duration, guard: &Gu
     is_jpeg(&body).then_some(body)
 }
 
+/// The containers `lofty` writes a picture into: m4a (`covr`), mp3 (an ID3v2
+/// APIC frame), opus and ogg (a METADATA_BLOCK_PICTURE comment). webm, what
+/// YouTube's original usually is, is not one of them.
+pub const EMBEDDABLE: [&str; 4] = ["m4a", "mp3", "opus", "ogg"];
+
+/// Writes `jpg` into the audio file at `path` as its front cover, in place.
+/// Refused before anything is read when the extension is not one of
+/// [`EMBEDDABLE`].
+pub fn embed_cover(path: &Path, jpg: &[u8]) -> Result<(), String> {
+    use lofty::config::WriteOptions;
+    use lofty::file::{AudioFile, FileType, TaggedFileExt};
+    use lofty::picture::{MimeType, Picture, PictureType};
+    use lofty::tag::Tag;
+    let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    if !EMBEDDABLE.contains(&ext.as_str()) {
+        return Err(format!("no cover is written into a .{ext} file"));
+    }
+    let mut file = lofty::read_from_path(path).map_err(|e| e.to_string())?;
+    if !matches!(file.file_type(), FileType::Mp4 | FileType::Mpeg | FileType::Opus | FileType::Vorbis) {
+        return Err(format!("{:?} takes no cover here", file.file_type()));
+    }
+    let tag_type = file.primary_tag_type();
+    if file.tag(tag_type).is_none() {
+        file.insert_tag(Tag::new(tag_type));
+    }
+    let tag = file.tag_mut(tag_type).ok_or("the tag could not be made")?;
+    tag.push_picture(Picture::unchecked(jpg.to_vec()).pic_type(PictureType::CoverFront).mime_type(MimeType::Jpeg).build());
+    file.save_to_path(path, WriteOptions::default()).map_err(|e| e.to_string())
+}
+
+// ---- what yt-dlp wrote, and converting it ----------------------------------
+
+/// Whether `ext`, the part of a name after `<stem>.`, names a finished
+/// download: one extension (not yt-dlp's `.webm.part` or `.webm.ytdl`), and
+/// not a picture.
+fn is_output_ext(ext: &str) -> bool {
+    !ext.is_empty()
+        && ext.chars().all(|c| c.is_ascii_alphanumeric())
+        && !matches!(ext.to_ascii_lowercase().as_str(), "part" | "ytdl" | "temp" | "tmp" | "jpg" | "jpeg" | "png" | "webp")
+}
+
+/// The extensions of the files named `<stem>.<ext>` in `dir`.
+fn outputs_of(dir: &Path, stem: &str) -> std::io::Result<std::collections::BTreeSet<String>> {
+    let prefix = format!("{stem}.");
+    let mut found = std::collections::BTreeSet::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if let Some(ext) = entry.file_name().to_str().and_then(|n| n.strip_prefix(&prefix))
+            && is_output_ext(ext)
+        {
+            found.insert(ext.to_string());
+        }
+    }
+    Ok(found)
+}
+
+/// The hidden temporary a conversion writes into, renamed once complete.
+fn conversion_temporary(dir: &Path, stem: &str, ext: &str) -> PathBuf {
+    dir.join(format!(".{stem}.{ext}.converting"))
+}
+
+/// ffmpeg's arguments for turning `from` into `format` at `to`. Only local
+/// files: the protocol whitelist and the `file:` spelling keep a name that
+/// looks like a protocol from being one, and nothing is read from stdin.
+pub fn conversion_args(from: &Path, to: &Path, format: Format) -> Vec<String> {
+    let codec: &[&str] = match format {
+        Format::Mp3 => &["-c:a", "libmp3lame", "-q:a", "2", "-f", "mp3"],
+        // AAC in the container yt-dlp itself writes an m4a with.
+        Format::M4a | Format::Original => &["-c:a", "aac", "-b:a", "192k", "-f", "ipod"],
+    };
+    let mut args: Vec<String> = ["-nostdin", "-hide_banner", "-loglevel", "error", "-protocol_whitelist", "file", "-i"]
+        .map(str::to_string)
+        .to_vec();
+    args.push(format!("file:{}", from.display()));
+    args.extend(["-vn", "-map", "0:a:0"].map(str::to_string));
+    args.extend(codec.iter().map(|a| a.to_string()));
+    // Never over an existing file, the temporary included.
+    args.push("-n".into());
+    args.push(format!("file:{}", to.display()));
+    args
+}
+
+enum Converted {
+    /// The file is now `<stem>.<ext>`.
+    Done(String),
+    /// The original is kept, for this reason.
+    Kept(Note),
+    Cancelled,
+}
+
+/// Converts `<stem>.<from>` into the format's extension with ffmpeg; never
+/// over an existing file, the original removed only once the new one is in
+/// place.
+async fn convert(ctx: &Ctx, ffmpeg: &Path, dir: &Path, stem: &str, from: &str, format: Format, cancel: &Cancel) -> Converted {
+    let Some(to) = format.wanted_ext() else { return Converted::Done(from.to_string()) };
+    let (source, target, tmp) = (dir.join(format!("{stem}.{from}")), dir.join(format!("{stem}.{to}")), conversion_temporary(dir, stem, to));
+    let (check, leftover) = (target.clone(), tmp.clone());
+    // The name must be free; a temporary a crash left is ours to clear.
+    let free = blocking(ctx.limits.fs, move || {
+        if check.try_exists()? {
+            return Ok(false);
+        }
+        match std::fs::remove_file(&leftover) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(true),
+        }
+    })
+    .await;
+    if free != Ok(true) {
+        return Converted::Kept(Note::ConvertedNameTaken);
+    }
+    let args = conversion_args(&source, &tmp, format);
+    let end = run_ytdlp(ffmpeg, &args, cancel, ctx.limits.convert, &mut |_| {}).await;
+    let clear = |tmp: PathBuf| async move {
+        let _ = blocking(ctx.limits.fs, move || std::fs::remove_file(tmp)).await;
+    };
+    let why = match end {
+        RunEnd::Exited { success: true, .. } => None,
+        RunEnd::Cancelled => {
+            clear(tmp).await;
+            return Converted::Cancelled;
+        }
+        RunEnd::Exited { success: false, last_error } => Some(last_error.unwrap_or_default()),
+        RunEnd::TimedOut => Some(reason::TIMED_OUT.to_string()),
+        RunEnd::Spawn(m) => Some(m),
+    };
+    if let Some(why) = why {
+        clear(tmp).await;
+        return Converted::Kept(Note::ConversionFailed(why));
+    }
+    let placed = blocking(ctx.limits.fs, move || {
+        // Judged again: the name may have been taken while ffmpeg ran.
+        if target.try_exists()? {
+            std::fs::remove_file(&tmp)?;
+            return Ok(false);
+        }
+        std::fs::rename(&tmp, &target)?;
+        if let Err(e) = std::fs::remove_file(&source) {
+            tracing::warn!("original {} not removed after its conversion: {e}", source.display());
+        }
+        Ok(true)
+    })
+    .await;
+    match placed {
+        Ok(true) => Converted::Done(to.to_string()),
+        Ok(false) => Converted::Kept(Note::ConvertedNameTaken),
+        Err(e) => Converted::Kept(Note::ConversionFailed(e.to_string())),
+    }
+}
+
+/// A single video's cover: into the file, or beside it as `<stem>.jpg`,
+/// never over an existing one. What did not go as asked is said.
+async fn place_track_cover(ctx: &Ctx, dir: &Path, stem: &str, ext: &str, mode: CoverMode, url: Option<&str>) -> Vec<Note> {
+    let Some(url) = url else { return Vec::new() };
+    let mut notes = Vec::new();
+    let embeddable = EMBEDDABLE.contains(&ext.to_ascii_lowercase().as_str());
+    let beside = dir.join(format!("{stem}.jpg"));
+    let beside_free = || {
+        let probe = beside.clone();
+        // A name that cannot be judged is not free either.
+        async move { matches!(blocking(ctx.limits.fs, move || probe.try_exists()).await, Ok(false)) }
+    };
+    if mode == CoverMode::Separate || !embeddable {
+        if mode == CoverMode::Embedded {
+            notes.push(Note::CoverBeside);
+        }
+        if !beside_free().await {
+            notes.push(Note::CoverNameTaken);
+            return notes;
+        }
+    }
+    let Some(bytes) = (ctx.limits.fetch_cover)(url.to_string()).await else {
+        tracing::info!("no cover fetched for {stem}");
+        return notes;
+    };
+    if mode == CoverMode::Embedded && embeddable {
+        let (track, jpg) = (dir.join(format!("{stem}.{ext}")), bytes.clone());
+        match blocking(ctx.limits.embed, move || embed_cover(&track, &jpg).map_err(std::io::Error::other)).await {
+            Ok(()) => return notes,
+            Err(e) => {
+                tracing::warn!("cover not embedded into {stem}.{ext}: {e}");
+                notes.push(Note::CoverBeside);
+                if !beside_free().await {
+                    notes.push(Note::CoverNameTaken);
+                    return notes;
+                }
+            }
+        }
+    }
+    let written = blocking(ctx.limits.fs, move || {
+        // Judged again at the write: a cover is never written over a file.
+        if beside.try_exists()? {
+            return Ok(false);
+        }
+        write_atomically(&beside, &bytes).map_err(std::io::Error::other)?;
+        Ok(true)
+    })
+    .await;
+    match written {
+        Ok(true) => {}
+        Ok(false) => notes.push(Note::CoverNameTaken),
+        Err(e) => tracing::warn!("cover not written beside {stem}: {e}"),
+    }
+    notes
+}
+
 // ---- the context and the events --------------------------------------------
+
+/// Where the system's ffmpeg is, as the last probe of the machine found it
+/// (`tool/runtime.rs`); `None` when it has none.
+pub type FfmpegLookup = Arc<dyn Fn() -> Option<PathBuf> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct Limits {
     pub probe: Duration,
     pub video: Duration,
     pub fs: Duration,
+    /// One conversion by ffmpeg (a long mix on a Pi 2 takes minutes).
+    pub convert: Duration,
+    /// Writing a cover into a file: `lofty` may rewrite the whole file, on a
+    /// share.
+    pub embed: Duration,
     pub fetch_cover: CoverFetch,
+    pub ffmpeg: FfmpegLookup,
 }
 
 impl Default for Limits {
@@ -372,6 +698,9 @@ impl Default for Limits {
             probe: crate::ytdlp::PROBE_DEADLINE,
             video: Duration::from_secs(30 * 60),
             fs: Duration::from_secs(10),
+            convert: Duration::from_secs(60 * 60),
+            embed: Duration::from_secs(120),
+            ffmpeg: Arc::new(|| None),
             fetch_cover: Arc::new(move |url| {
                 Box::pin(async move {
                     fetch_jpg(&url, connect, total, &Guard::system()).await
@@ -392,6 +721,8 @@ pub struct Ctx {
 pub enum VideoState {
     Pending,
     Running,
+    /// Downloaded; ffmpeg turns it into the format asked.
+    Converting,
     Done,
     /// With yt-dlp's last line of stderr.
     Failed(String),
@@ -405,6 +736,9 @@ pub enum Event {
     Planned(Vec<Planned>),
     Started(usize),
     Progress(usize, f32),
+    Converting(usize),
+    /// Said of a video before it ends: see [`Note`].
+    Noted(usize, Note),
     Ended(usize, VideoState),
 }
 
@@ -505,18 +839,11 @@ async fn subfolder(resolved: &Resolved, name: String, deadline: Duration) -> Res
     dir.ok_or(TargetError::Escapes)
 }
 
-async fn place_cover(ctx: &Ctx, dir: &Path, url: Option<&str>, replace: bool) {
+/// A playlist's cover: `cover.jpg` in its own folder, replacing the previous
+/// one (the folder is the playlist's).
+async fn place_cover(ctx: &Ctx, dir: &Path, url: Option<&str>) {
     let Some(url) = url else { return };
     let path = dir.join("cover.jpg");
-    if !replace {
-        let probe = path.clone();
-        // A folder that already has a cover keeps it; an unreadable one is
-        // left alone.
-        match blocking(ctx.limits.fs, move || probe.try_exists()).await {
-            Ok(false) => {}
-            _ => return,
-        }
-    }
     let Some(bytes) = (ctx.limits.fetch_cover)(url.to_string()).await else {
         tracing::info!("no cover fetched for {}", dir.display());
         return;
@@ -527,12 +854,72 @@ async fn place_cover(ctx: &Ctx, dir: &Path, url: Option<&str>, replace: bool) {
     }
 }
 
+/// The extensions of `<stem>.*` in `dir`, or `None` when the share did not
+/// say (then nothing yt-dlp wrote can be told from what was there).
+async fn outputs(ctx: &Ctx, dir: &Path, stem: &str) -> Option<std::collections::BTreeSet<String>> {
+    let (dir, stem) = (dir.to_path_buf(), stem.to_string());
+    blocking(ctx.limits.fs, move || outputs_of(&dir, &stem)).await.ok()
+}
+
+/// What follows a download that went through: the conversion asked, then a
+/// single video's cover. `Err(())` is a cancel.
+#[allow(clippy::too_many_arguments)]
+async fn finish_video(
+    ctx: &Ctx,
+    dir: &Path,
+    stem: &str,
+    before: Option<std::collections::BTreeSet<String>>,
+    choices: &Choices,
+    cover: Option<&str>,
+    cancel: &Cancel,
+    i: usize,
+    sink: &mut (dyn FnMut(Event) + Send),
+) -> Result<(), ()> {
+
+    // The file yt-dlp wrote: the one `<stem>.<ext>` that was not there
+    // before. None new: the name was taken, and yt-dlp left it alone.
+    let Some(before) = before else { return Ok(()) };
+    let Some(after) = outputs(ctx, dir, stem).await else { return Ok(()) };
+    let new: Vec<&String> = after.difference(&before).collect();
+    let mut ext = match new.as_slice() {
+        [one] => (*one).clone(),
+        [] => {
+            sink(Event::Noted(i, Note::AlreadyPresent));
+            return Ok(());
+        }
+        _ => {
+            tracing::warn!("several new files for {stem}: {new:?}");
+            return Ok(());
+        }
+    };
+    if let Some(wanted) = choices.format.wanted_ext()
+        && !ext.eq_ignore_ascii_case(wanted)
+    {
+        match (ctx.limits.ffmpeg)() {
+            None => sink(Event::Noted(i, Note::NoFfmpeg)),
+            Some(ffmpeg) => {
+                sink(Event::Converting(i));
+                match convert(ctx, &ffmpeg, dir, stem, &ext, choices.format, cancel).await {
+                    Converted::Done(to) => ext = to,
+                    Converted::Kept(why) => sink(Event::Noted(i, why)),
+                    Converted::Cancelled => return Err(()),
+                }
+            }
+        }
+    }
+    for n in place_track_cover(ctx, dir, stem, &ext, choices.cover, cover).await {
+        sink(Event::Noted(i, n));
+    }
+    Ok(())
+}
+
 /// Downloads one preset (one video, or every available one of a playlist).
 /// Progress is reported through `sink`; a video that fails is an event, not an
 /// end.
 pub async fn download_preset(
     ctx: &Ctx,
     entry: &Entry,
+    choices: &Choices,
     resolved: &Resolved,
     share: &ShareCheck,
     cancel: &Cancel,
@@ -549,7 +936,15 @@ pub async fn download_preset(
         return PresetEnd::Cancelled;
     }
     let playlist = probe.kind == Kind::Playlist;
-    let planned = plan(&probe.entries, playlist);
+    let typed = choices.name.as_deref().unwrap_or("");
+    let mut planned = plan(&probe.entries, playlist);
+    // A single video's file takes the name typed, cleaned like a title; one
+    // that cleans to nothing leaves the default.
+    if !playlist
+        && let [Planned { action: Action::Download { stem, .. }, .. }] = planned.as_mut_slice()
+    {
+        *stem = sanitize(typed, stem);
+    }
     sink(Event::Planned(planned.clone()));
     let mut any = false;
     for (i, p) in planned.iter().enumerate() {
@@ -562,14 +957,20 @@ pub async fn download_preset(
         return PresetEnd::Finished;
     }
     let dir = if playlist {
-        match subfolder(resolved, sanitize(&probe.title, &probe.id), ctx.limits.fs).await {
+        // The folder takes the name typed, the same way.
+        match subfolder(resolved, sanitize(typed, &sanitize(&probe.title, &probe.id)), ctx.limits.fs).await {
             Ok(d) => d,
             Err(e) => return PresetEnd::Failed(reason::target_error(&e)),
         }
     } else {
         resolved.dir.clone()
     };
-    place_cover(ctx, &dir, probe.thumbnail_jpg.as_deref(), playlist).await;
+    if playlist {
+        place_cover(ctx, &dir, probe.thumbnail_jpg.as_deref()).await;
+    }
+    // A single video's cover is its own: never the folder's `cover.jpg`,
+    // which every other track of the folder would then show.
+    let track_cover = (!playlist).then_some(probe.thumbnail_jpg.as_deref()).flatten();
 
     for (i, p) in planned.iter().enumerate() {
         let Action::Download { stem, url } = &p.action else { continue };
@@ -577,7 +978,8 @@ pub async fn download_preset(
             return PresetEnd::Cancelled;
         }
         sink(Event::Started(i));
-        let args = download_args(&dir, stem, url);
+        let before = outputs(ctx, &dir, stem).await;
+        let args = download_args(&dir, stem, url, choices.format);
         let mut on_line = |line: &str| {
             if let Some((percent, id)) = parse_progress(line)
                 && id == p.id
@@ -607,6 +1009,12 @@ pub async fn download_preset(
                 }
             }
             return PresetEnd::ShareLost(why);
+        }
+        if state == VideoState::Done
+            && finish_video(ctx, &dir, stem, before, choices, track_cover, cancel, i, sink).await.is_err()
+        {
+            sink(Event::Ended(i, VideoState::Cancelled));
+            return PresetEnd::Cancelled;
         }
         sink(Event::Ended(i, state));
     }
