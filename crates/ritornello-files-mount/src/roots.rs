@@ -6,7 +6,21 @@
 //!
 //! This module's validation is **read by a root binary**. It is therefore
 //! strict, and refuses on principle anything it cannot prove harmless.
+//!
+//! **A plugin preference does not belong here.** `Root` carries what
+//! describes a share — what the root helper mounts, and what the plugin
+//! needs to reach it — and nothing else. Every byte of this module is
+//! compiled into the root binary: a field added here changes that binary,
+//! which moves `files-mount`'s number (`changed-components.sh` refuses
+//! otherwise), which sends every device to `ritornello-install` instead of
+//! the page. That happened once for `archive_lyrics`, a flag root never
+//! reads. A preference of the `files` plugin goes into the plugin's own row
+//! (`ritornello-plugin-files/src/roots.rs`), which embeds this one: the file
+//! on disk keeps one table, and this side ignores the keys it does not know
+//! (hence no `deny_unknown_fields` here, ever). The test
+//! `a_root_row_carries_only_the_share_fields` pins the list.
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -36,23 +50,6 @@ pub struct Root {
     /// playlist onto the share is an explicit choice, not a given.
     #[serde(default)]
     pub writable: bool,
-    /// Keep on this root the full-size cover a network contributor found for a
-    /// track that has none. False by default: writing into someone's music
-    /// library is an explicit choice, like `writable` above.
-    ///
-    /// **Not a mount option.** Unlike `writable`, changing it remounts
-    /// nothing; on an SMB root it is inert until `writable` is set too, and
-    /// the write path says so rather than letting an `EROFS` bubble up.
-    #[serde(default)]
-    pub archive_covers: bool,
-    /// Keep on this root, beside a track, the lyrics a network contributor
-    /// found for it when it has no `.lrc` of its own. Its own flag rather
-    /// than a rider on `archive_covers`: a cover speaks for a whole folder,
-    /// a `.lrc` for one track, and an owner may welcome one and not the
-    /// other. False by default, for the same reason as `archive_covers`, and
-    /// like it **not a mount option** and inert on a share until `writable`.
-    #[serde(default)]
-    pub archive_lyrics: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,10 +59,31 @@ pub enum RootKind {
     Smb,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Roots {
+/// The table, `media-roots.toml`: one `[[root]]` per declared root.
+///
+/// Generic over its row so that the `files` plugin reads, validates and
+/// writes the same file with a row of its own — this one plus its
+/// preferences — while the root helper reads it with the bare `Root`, and
+/// both go through this module's validation, the only one there is.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+// The bound by hand: serde's own would ask `R: Default` for the `default`
+// below, which only the `Vec` needs.
+#[serde(bound(deserialize = "R: Deserialize<'de>"))]
+pub struct Roots<R = Root> {
     #[serde(default)]
-    pub root: Vec<Root>,
+    pub root: Vec<R>,
+}
+
+impl<R> Default for Roots<R> {
+    fn default() -> Self {
+        Roots { root: Vec::new() }
+    }
+}
+
+impl AsRef<Root> for Root {
+    fn as_ref(&self) -> &Root {
+        self
+    }
 }
 
 /// Typed validation error: the user-facing text is produced at the boundary
@@ -130,17 +148,19 @@ fn subpath_on(s: &str) -> bool {
         && s.split('/').all(|c| !c.is_empty() && c != "." && c != "..")
 }
 
-impl Roots {
+impl<R: AsRef<Root> + DeserializeOwned> Roots<R> {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path)?;
-        let roots: Roots = toml::from_str(&text)?;
+        let roots: Roots<R> = toml::from_str(&text)?;
         roots.validate()?;
         Ok(roots)
     }
+}
 
+impl<R: AsRef<Root>> Roots<R> {
     pub fn validate(&self) -> Result<(), RootError> {
         let mut seen: Vec<&str> = Vec::new();
-        for r in &self.root {
+        for r in self.root.iter().map(AsRef::as_ref) {
             if !valid_name(&r.name) {
                 return Err(RootError::BadName { name: r.name.clone() });
             }
@@ -173,8 +193,8 @@ impl Roots {
         Ok(())
     }
 
-    pub fn by_name(&self, name: &str) -> Option<&Root> {
-        self.root.iter().find(|r| r.name == name)
+    pub fn by_name(&self, name: &str) -> Option<&R> {
+        self.root.iter().find(|r| r.as_ref().name == name)
     }
 
     /// The root that owns `path`, by **longest** matching `base_dir()`.
@@ -203,11 +223,11 @@ impl Roots {
     /// risk in practice (it takes a symlink planted inside a share the owner
     /// already trusted enough to declare), but a real one for a caller that
     /// writes at the path this returns, such as `archive::store`.
-    pub fn root_of(&self, path: &Path) -> Option<&Root> {
+    pub fn root_of(&self, path: &Path) -> Option<&R> {
         self.root
             .iter()
-            .filter(|r| path.starts_with(r.base_dir()))
-            .max_by_key(|r| r.base_dir().components().count())
+            .filter(|r| path.starts_with(r.as_ref().base_dir()))
+            .max_by_key(|r| r.as_ref().base_dir().components().count())
     }
 }
 
@@ -356,8 +376,6 @@ mod tests {
             user: "steven".into(),
             domain: String::new(),
             writable: false,
-            archive_covers: false,
-            archive_lyrics: false,
         }
     }
 
@@ -372,8 +390,6 @@ mod tests {
             user: String::new(),
             domain: String::new(),
             writable: false,
-            archive_covers: false,
-            archive_lyrics: false,
         }
     }
 
@@ -522,8 +538,6 @@ mod tests {
             user: "u".into(),
             domain: String::new(),
             writable: false,
-            archive_covers: false,
-            archive_lyrics: false,
         }
     }
 
@@ -549,7 +563,7 @@ path = "/media/usb"
 "#,
         )
         .unwrap();
-        let roots = Roots::load(&f).unwrap();
+        let roots: Roots = Roots::load(&f).unwrap();
         assert_eq!(roots.root.len(), 2);
         assert_eq!(roots.by_name("nas").unwrap().kind, RootKind::Smb);
         assert_eq!(roots.by_name("usb").unwrap().base_dir(), PathBuf::from("/media/usb"));
@@ -559,39 +573,38 @@ path = "/media/usb"
     }
 
     #[test]
-    fn a_table_without_archive_lyrics_reads_back_as_false() {
-        // Every table written before this flag existed lacks it, and the
-        // device must read those as they were meant: nothing was ever
-        // allowed to write a lyrics file. The other flags are set here so a
-        // default borrowed from one of them (`archive_covers`, `writable`)
-        // could not pass for this one.
-        let roots: Roots = toml::from_str(
-            r#"
-[[root]]
-name = "nas"
-kind = "smb"
-host = "192.168.1.20"
-share = "musique"
-writable = true
-archive_covers = true
-"#,
-        )
-        .unwrap();
-        let nas = roots.by_name("nas").unwrap();
-        assert!(nas.archive_covers && nas.writable);
-        assert!(!nas.archive_lyrics);
-
-        // And the flag reads back when it is there.
-        let roots: Roots = toml::from_str(
-            "[[root]]
-name = \"usb\"
-kind = \"local\"
-path = \"/media/usb\"
-archive_lyrics = true
-",
-        )
-        .unwrap();
-        assert!(roots.by_name("usb").unwrap().archive_lyrics);
+    fn a_root_row_carries_only_the_share_fields() {
+        // The guard of the rule at the head of this module. `archive_lyrics`
+        // once lived here although root never reads it, and moved
+        // `files-mount` — hence sent every device to `ritornello-install` —
+        // for a plugin preference. A field added to `Root` lands in the root
+        // binary: if it describes the share, add it to this list *and* move
+        // `files-mount`'s version; if it is a preference of the plugin, it
+        // belongs to the plugin's own row (`ritornello-plugin-files`'s
+        // `roots.rs`), not here.
+        //
+        // Every optional field is set, so that every field serialises: a
+        // field this literal does not name fails to compile, one it names
+        // fails the comparison below.
+        let full = Root {
+            name: "nas".into(),
+            kind: RootKind::Smb,
+            path: Some("/media/usb".into()),
+            host: "192.168.1.20".into(),
+            share: "musique".into(),
+            subpath: Some("Albums".into()),
+            user: "steven".into(),
+            domain: "WORKGROUP".into(),
+            writable: true,
+        };
+        let row: toml::Table = toml::from_str(&toml::to_string(&full).unwrap()).unwrap();
+        let mut keys: Vec<&str> = row.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["domain", "host", "kind", "name", "path", "share", "subpath", "user", "writable"],
+            "a field of `Root` is compiled into the root helper: a plugin preference does not belong here"
+        );
     }
 
     #[test]

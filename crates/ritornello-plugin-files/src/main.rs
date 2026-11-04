@@ -1615,7 +1615,7 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ritornello_plugin_files::roots::Root;
+    use ritornello_plugin_files::roots::{MountRoot, Root};
     use ritornello_proto::IdentityUpdate;
 
     /// An SMB root on `share`, with every field a `Root` must carry filled in
@@ -1629,15 +1629,17 @@ mod tests {
     /// `root_of` would no longer see the file as owned by this root.
     fn smb_root(share: &str) -> Root {
         Root {
-            name: "nas".into(),
-            kind: RootKind::Smb,
-            path: None,
-            host: "192.168.1.20".into(),
-            share: share.into(),
-            subpath: None,
-            user: "steven".into(),
-            domain: String::new(),
-            writable: false,
+            mount: MountRoot {
+                name: "nas".into(),
+                kind: RootKind::Smb,
+                path: None,
+                host: "192.168.1.20".into(),
+                share: share.into(),
+                subpath: None,
+                user: "steven".into(),
+                domain: String::new(),
+                writable: false,
+            },
             archive_covers: false,
             archive_lyrics: false,
         }
@@ -1649,9 +1651,8 @@ mod tests {
         let file = dir.join("01.flac");
         let table = Roots {
             root: vec![Root {
-                name: "nas".into(),
+                mount: MountRoot { name: "nas".into(), writable: true, ..smb_root("musique").mount },
                 archive_covers: true,
-                writable: true,
                 ..smb_root("musique")
             }],
         };
@@ -1673,10 +1674,10 @@ mod tests {
     #[test]
     fn an_offer_needs_the_flag_and_a_writable_share() {
         let file = std::path::Path::new("/mnt/ritornello/nas/Album/01.flac");
-        let base = Root { name: "nas".into(), ..smb_root("musique") };
+        let base = Root { mount: MountRoot { name: "nas".into(), ..smb_root("musique").mount }, ..smb_root("musique") };
 
         // The flag off: no offer, whatever the mount says.
-        let off = Roots { root: vec![Root { writable: true, ..base.clone() }] };
+        let off = Roots { root: vec![Root { mount: MountRoot { writable: true, ..base.mount.clone() }, ..base.clone() }] };
         assert!(!offers_archive(&off, file, FolderState::NoImage));
 
         // The flag on but the share read-only: no offer. The control is
@@ -1688,11 +1689,14 @@ mod tests {
         // decides, and the filesystem has the last word at write time.
         let local = Roots {
             root: vec![Root {
-                name: "usb".into(),
-                kind: RootKind::Local,
-                path: Some("/media/usb".into()),
+                mount: MountRoot {
+                    name: "usb".into(),
+                    kind: RootKind::Local,
+                    path: Some("/media/usb".into()),
+                    writable: false,
+                    ..base.mount.clone()
+                },
                 archive_covers: true,
-                writable: false,
                 ..base
             }],
         };
@@ -2288,9 +2292,12 @@ mod tests {
     fn lyrics_root(dir: &Path) -> Roots {
         Roots {
             root: vec![Root {
-                name: "usb".into(),
-                kind: RootKind::Local,
-                path: Some(dir.to_string_lossy().into_owned()),
+                mount: MountRoot {
+                    name: "usb".into(),
+                    kind: RootKind::Local,
+                    path: Some(dir.to_string_lossy().into_owned()),
+                    ..smb_root("unused").mount
+                },
                 archive_lyrics: true,
                 ..smb_root("unused")
             }],
@@ -2358,7 +2365,13 @@ mod tests {
         let on_nas = Path::new("/mnt/ritornello/nas/Album/01.flac");
         let ro = Roots { root: vec![Root { archive_lyrics: true, ..smb_root("musique") }] };
         assert!(!offers_lyrics_archive(&ro, on_nas, &absent));
-        let rw = Roots { root: vec![Root { archive_lyrics: true, writable: true, ..smb_root("musique") }] };
+        let rw = Roots {
+            root: vec![Root {
+                mount: MountRoot { writable: true, ..smb_root("musique").mount },
+                archive_lyrics: true,
+                ..smb_root("musique")
+            }],
+        };
         assert!(offers_lyrics_archive(&rw, on_nas, &absent));
     }
 
@@ -3171,9 +3184,12 @@ mod tests {
         std::fs::write(album.join("cover.jpg"), b"\xFF\xD8\xFF").unwrap();
         s.roots = Arc::new(AsyncRwLock::new(Roots {
             root: vec![Root {
-                name: "usb".into(),
-                kind: RootKind::Local,
-                path: Some(music.path().to_string_lossy().into_owned()),
+                mount: MountRoot {
+                    name: "usb".into(),
+                    kind: RootKind::Local,
+                    path: Some(music.path().to_string_lossy().into_owned()),
+                    ..smb_root("unused").mount
+                },
                 archive_covers: true,
                 ..smb_root("unused")
             }],

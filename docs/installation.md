@@ -1785,6 +1785,13 @@ local disk, the page and the files journey of the end-to-end harness against a
   only adds that field to the roots table) on the device, not the write
   through a temporary and a hard link on a cifs mount — nor, where that
   mount refuses hard links, the exclusive-create fallback;
+- **the plugin's preferences moved out of the root helper's `Root`** (the
+  `files` plugin now writes `archive_covers` and `archive_lyrics` from a row
+  of its own, beside the share's fields): no device has yet run a helper
+  built from that split against a table carrying them, nor had its real
+  `media-roots.toml` rewritten by such a plugin — the tests cover the
+  layout byte for byte, and the old flat row's reading of it, on fixtures
+  only;
 - **LRCLIB under real use**: its behaviour is known from a handful of
   requests made by hand on 2026-11-02 (the 503 for an unknown song, the
   ±2 s tolerance, the twenty versions of "Get Lucky"). Nobody has watched

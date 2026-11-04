@@ -29,8 +29,10 @@ pub fn location_of(roots: &Roots, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::roots::{Root, RootKind};
+    use crate::roots::{MountRoot as Root, RootKind};
 
+    /// The share part only: an address is built from nothing else, and a
+    /// table row is this with every preference at its default.
     fn smb(name: &str, subpath: Option<&str>) -> Root {
         Root {
             name: name.into(),
@@ -42,14 +44,12 @@ mod tests {
             user: "steven".into(),
             domain: "WORKGROUP".into(),
             writable: false,
-            archive_covers: false,
-            archive_lyrics: false,
         }
     }
 
     #[test]
     fn a_share_is_named_by_its_address_without_any_credential() {
-        let roots = Roots { root: vec![smb("nas", None)] };
+        let roots = Roots { root: vec![smb("nas", None).into()] };
         let file = smb("nas", None).mount_point().join("Mon Album/01 Titre.flac");
         let got = location_of(&roots, &file);
         assert_eq!(got, "smb://192.168.1.20/musique/Mon Album/01 Titre.flac");
@@ -60,14 +60,14 @@ mod tests {
     fn the_subpath_is_part_of_the_address() {
         let root = smb("nas", Some("Jazz/Vinyles"));
         let file = root.base_dir().join("Kind of Blue/01.flac");
-        let roots = Roots { root: vec![root] };
+        let roots = Roots { root: vec![root.into()] };
         assert_eq!(location_of(&roots, &file), "smb://192.168.1.20/musique/Jazz/Vinyles/Kind of Blue/01.flac");
     }
 
     #[test]
     fn a_local_root_or_no_root_gives_the_path_on_the_device() {
         let local = Root { name: "usb".into(), kind: RootKind::Local, path: Some("/media/cle".into()), ..smb("usb", None) };
-        let roots = Roots { root: vec![local] };
+        let roots = Roots { root: vec![local.into()] };
         assert_eq!(location_of(&roots, Path::new("/media/cle/a.mp3")), "/media/cle/a.mp3");
         assert_eq!(location_of(&roots, Path::new("/elsewhere/b.mp3")), "/elsewhere/b.mp3");
     }
@@ -84,7 +84,7 @@ mod tests {
             host: "192.168.1.20".into(),
             ..smb("usb", None)
         };
-        let roots = Roots { root: vec![local] };
+        let roots = Roots { root: vec![local.into()] };
         assert_eq!(location_of(&roots, Path::new("/mnt/ritornello/usb/a.mp3")), "/mnt/ritornello/usb/a.mp3");
     }
 }

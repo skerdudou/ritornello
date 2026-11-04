@@ -84,8 +84,6 @@ mod tests {
             user: "steven".into(),
             domain: String::new(),
             writable: false,
-            archive_covers: false,
-            archive_lyrics: false,
         }
     }
 

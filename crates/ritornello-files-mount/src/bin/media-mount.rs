@@ -109,7 +109,9 @@ fn main() -> Result<()> {
     let (roots_path, creds_dir) = paths_in(Path::new(FILES_DATA_DIR));
     let user = env_or("RITORNELLO_USER", "ritornello");
 
-    let roots = match Roots::load(&roots_path) {
+    // The bare row: the plugin's preferences that share these rows are keys
+    // this binary does not know, hence ignores.
+    let roots: Roots = match Roots::load(&roots_path) {
         Ok(r) => r,
         Err(e) => {
             // No configuration = nothing to mount, not a failure: the service
@@ -420,5 +422,49 @@ bsize=1048576,retrans=1,echo_interval=10,actimeo=30,closetimeo=1 0 0\n";
         let (roots, creds) = paths_in(d);
         assert_eq!(roots, d.join("media-roots.toml"));
         assert_eq!(creds, d.join("credentials"));
+    }
+
+    /// One `[[root]]` row, as the plugin writes it, followed by `extra`.
+    fn table_with(host: &str, extra: &str) -> String {
+        format!(
+            "[[root]]\nname = \"music\"\nkind = \"smb\"\nhost = \"{host}\"\nshare = \"music\"\n\
+             user = \"ritornello\"\ndomain = \"\"\nwritable = true\n{extra}\n\
+             [[root]]\nname = \"usb\"\nkind = \"local\"\npath = \"/media/usb\"\n{extra}"
+        )
+    }
+
+    fn load(dir: &Path, file: &str, text: &str) -> anyhow::Result<Roots> {
+        let path = dir.join(file);
+        std::fs::write(&path, text).unwrap();
+        Roots::load(&path)
+    }
+
+    #[test]
+    fn the_plugin_preferences_and_unknown_keys_are_ignored_and_change_no_verdict() {
+        // The plugin's preferences live in the same rows as the share, in the
+        // same file, but no longer in this binary's `Root`: a preference must
+        // never again have to change the root helper. That holds only while
+        // this side ignores a key it does not know — today's preferences and
+        // tomorrow's alike, hence an invented one. A `deny_unknown_fields`
+        // would refuse the whole table, and leave every share unmounted.
+        let dir = tempfile::tempdir().unwrap();
+        let prefs = "archive_covers = true\narchive_lyrics = true\na_preference_from_the_future = \"x\"\n";
+
+        let bare = load(dir.path(), "bare.toml", &table_with("192.168.1.15", "")).unwrap();
+        let decorated = load(dir.path(), "decorated.toml", &table_with("192.168.1.15", prefs))
+            .expect("a table carrying the plugin's preferences must read");
+        assert_eq!(decorated.root, bare.root);
+        let creds = Path::new("/c");
+        assert_eq!(
+            mount_command(&decorated.root[0], creds, 1, 1),
+            mount_command(&bare.root[0], creds, 1, 1)
+        );
+
+        // And the verdict on a hostile row is the same with or without them:
+        // the extra keys neither excuse nor hide the comma.
+        let refused = load(dir.path(), "refused.toml", &table_with("nas,uid=0", prefs)).unwrap_err();
+        let refused_bare = load(dir.path(), "refused-bare.toml", &table_with("nas,uid=0", "")).unwrap_err();
+        assert_eq!(refused.to_string(), refused_bare.to_string());
+        assert!(refused.to_string().contains("invalid host"), "{refused}");
     }
 }

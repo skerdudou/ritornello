@@ -15,8 +15,6 @@ fn root(name: &str, kind: RootKind, writable: bool) -> Root {
         user: String::new(),
         domain: String::new(),
         writable,
-        archive_covers: false,
-        archive_lyrics: false,
     }
 }
 
