@@ -33,6 +33,11 @@ function payload(overrides: Record<string, unknown> = {}) {
     cpu_total_jiffies: null,
     cpu_idle_jiffies: null,
     under_voltage_acknowledged: false,
+    timezone: 'Europe/Paris',
+    utc_offset_seconds: 3600,
+    device_unix_s: 1_793_801_130,
+    timezone_settable: true,
+    timedated_reachable: true,
     ...overrides,
   }
 }
@@ -366,14 +371,26 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('blames polkit when logind answered, logind when it did not answer', async () => {
+  it("shows the device's time and zone in their own card", async () => {
+    // 14:05:30 UTC on a device on UTC+01:00.
+    stub(payload())
+    const w = await mountView()
+    expect(w.get('[data-time-device]').text()).toBe('15:05')
+    expect(w.get('[data-time-zone]').text()).toContain('Europe/Paris')
+    w.unmount()
+  })
+
+  it('sends to the installer when logind refused, to logind when it did not answer', async () => {
     // The two causes of a greyed-out button are not fixed the same way, and
     // the sentence that conflates them sends one looking for a polkit rule
     // that is already in place. The test catalog does not carry these keys:
     // `t` returns the key, which is enough to tell the two sentences apart.
     stub(payload({ can_power_off: false, can_reboot: false, logind_reachable: true }))
     const refused = await mountView()
-    expect(refused.get('[data-power-unavailable]').text()).toContain('system_power_unavailable')
+    // Since the installer asks, a refusal from a reachable logind means the
+    // operator declined the grant: the sentence sends them back to the
+    // installer, not to a polkit rule they would have to write by hand.
+    expect(refused.get('[data-power-unavailable]').text()).toContain('system_power_not_allowed')
     refused.unmount()
 
     stub(payload({ can_power_off: false, can_reboot: false, logind_reachable: false }))
@@ -955,7 +972,7 @@ describe('SystemView', () => {
     w.unmount()
   })
 
-  it('orders the cards CPU, Memory, History, Storage, Device, Power', async () => {
+  it('orders the cards CPU, Memory, History, Storage, Device, Time, Power', async () => {
     stub(payload())
     const w = await mountView()
     const titles = w.findAllComponents(CardTitle).map((c) => c.text())
@@ -966,7 +983,8 @@ describe('SystemView', () => {
     expect(titles[2]).toContain('system_history')
     expect(titles[3]).toBe('system_storage')
     expect(titles[4]).toBe('system_device')
-    expect(titles[5]).toBe('system_power')
+    expect(titles[5]).toBe('system_time')
+    expect(titles[6]).toBe('system_power')
     w.unmount()
   })
 

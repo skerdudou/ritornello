@@ -748,4 +748,19 @@ export interface SystemPayload {
    *  (`POST /api/system/under-voltage/acknowledge`): qualifies
    *  `under_voltage_since_boot` only, never the live `under_voltage`. */
   under_voltage_acknowledged: boolean
+  /** The device's IANA zone, read from `/etc/localtime`; `null` when the
+   *  link names none the core recognises. */
+  timezone: string | null
+  /** The device's current offset from UTC, seconds east; `null` when the
+   *  core could not compute it. */
+  utc_offset_seconds: number | null
+  /** The device's clock (Unix seconds) when it answered: the Time card
+   *  shows the device's time, not the browser's. */
+  device_unix_s: number
+  /** Polkit lets the core change the zone: false when the operator declined
+   *  that grant at installation. Meaningful only when `timedated_reachable`. */
+  timezone_settable: boolean
+  /** Did timedated answer the startup probe, whatever its answer was? Same
+   *  split as `logind_reachable`: two causes, two repairs, two sentences. */
+  timedated_reachable: boolean
 }

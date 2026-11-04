@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import {
-  Button, Card, CardContent, CardHeader, CardTitle,
+  api, Button, Card, CardContent, CardHeader, CardTitle,
   Input, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Switch,
 } from '@ritornello/ui'
-import { computed } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { defaultSelection, refusedByNewCore } from '../composables/majorUpdate'
+import {
+  browserOffsetSeconds, browserZone, formatHourMinute, formatOffset, hourAtBrowser, sameZone,
+} from '../composables/timezone'
 import { useCatalog } from '../composables/useCatalog'
-import type { SettingsPayload, UpdatePayload, Weekday } from '../types'
+import type { SettingsPayload, SystemPayload, UpdatePayload, Weekday } from '../types'
 import UpdateSummary from './UpdateSummary.vue'
 
 /**
@@ -15,12 +18,14 @@ import UpdateSummary from './UpdateSummary.vue'
  * — check, install — plus, below a separator, the automatic-checks policy
  * that decides what the device does on its own.
  *
- * **No network call of its own.** It takes its update payload and the page's
- * shared `settings` object as props — the same reference the page reads and
- * writes elsewhere, mutated in place rather than copied — and emits
+ * **One network call of its own, a read**: `/api/system` once on mount, for
+ * the zone warning under the hour (see `zoneWarning`), which a failure
+ * merely leaves out. Apart from that it takes its update payload and the
+ * page's shared `settings` object as props — the same reference the page
+ * reads and writes elsewhere, mutated in place rather than copied — and emits
  * `check`/`install`/`save`; the page that mounts it owns `GET /api/update`,
  * the two update `POST`s, and the one `PUT /api/settings`. This is what
- * makes the card testable without stubbing `fetch` — the same shape as
+ * makes the card testable without serving it anything but the catalog — the same shape as
  * `CoverCacheDetails.vue`'s panel, one level up (that one reads its own
  * snapshot; this one is handed one because two different buttons on the same
  * page — Check and Install — must react to the very same payload without
@@ -160,6 +165,52 @@ const weekdayLabel = computed(() => t.value(`weekday_${weeklyDay.value}`))
 function onCadenceKindChange(kind: unknown) {
   props.settings.update_cadence = kind === 'weekly' ? { kind: 'weekly', day: 'sunday' } : { kind: 'daily' }
 }
+
+/**
+ * The device's zone and offset, read once on mount. Its own `.catch`, and a
+ * failure means no warning: the warning is a courtesy, and a page that
+ * cannot reach `/api/system` has louder things to say than this.
+ *
+ * Here and not handed down by the page: the Configuration page has no other
+ * use for `/api/system`, and this card is the one place that needs it.
+ */
+const device = ref<Pick<SystemPayload, 'timezone' | 'utc_offset_seconds'> | null>(null)
+onMounted(() => {
+  void api
+    .get<SystemPayload>('/api/system')
+    .then((s) => {
+      device.value = { timezone: s.timezone ?? null, utc_offset_seconds: s.utc_offset_seconds }
+    })
+    .catch(() => {})
+})
+
+/**
+ * "The device is on UTC, your browser on Europe/Paris: 3:00 on the device is
+ * 04:00 for you." The hour above is counted on the **device's** clock, and
+ * whoever types it reads their own: without this sentence a device left on
+ * UTC updates an hour early all winter in Paris, and nothing says why.
+ *
+ * Silent when both are the same zone (`sameZone` folds UTC's aliases), when
+ * the device's offset is unknown (there is no hour to convert), and while the
+ * hour field holds something that is not an hour — the core refuses it on
+ * save anyway. A device zone with no name goes by its offset.
+ */
+const zoneWarning = computed(() => {
+  const d = device.value
+  if (!d || typeof d.utc_offset_seconds !== 'number') return null
+  const browser = browserZone()
+  if (sameZone(d.timezone, browser)) return null
+  // `Number`: the hour `Input` hands back a string once typed into.
+  const hour = Number(props.settings.update_hour)
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) return null
+  const atBrowser = hourAtBrowser(hour, d.utc_offset_seconds, browserOffsetSeconds(new Date()))
+  return t.value('update_hour_zone_warning', {
+    device_zone: d.timezone ?? formatOffset(d.utc_offset_seconds),
+    browser_zone: browser,
+    device_hour: String(hour),
+    browser_time: formatHourMinute(atBrowser, props.settings.clock_24h),
+  })
+})
 </script>
 
 <template>
@@ -308,6 +359,13 @@ function onCadenceKindChange(kind: unknown) {
             </Select>
           </label>
         </div>
+
+        <!-- Under the whole row rather than inside the hour's label: the
+             sentence is longer than the row is wide on a phone, and inside
+             a `grid` label it would stretch the hour field with it. -->
+        <p v-if="zoneWarning" data-update-hour-zone class="text-xs text-muted-foreground">
+          {{ zoneWarning }}
+        </p>
 
         <Button data-update-save @click="emit('save')">{{ t('save') }}</Button>
       </div>

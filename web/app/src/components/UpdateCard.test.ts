@@ -1,9 +1,18 @@
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { resetCatalog, useCatalog } from '../composables/useCatalog'
 import type { ComponentOffer, Fit, SettingsPayload, UpdatePayload } from '../types'
 import UpdateCard from './UpdateCard.vue'
+
+// The browser's zone and offset are the test machine's own: pinned here so
+// the zone warning depends on the fixture only.
+const browser = vi.hoisted(() => ({ zone: 'Europe/Paris', offset: 3600 }))
+vi.mock('../composables/timezone', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../composables/timezone')>()),
+  browserZone: () => browser.zone,
+  browserOffsetSeconds: () => browser.offset,
+}))
 
 // The catalog keys this card reads are already shipped in `en.toml` (Ruling
 // 43), so this fixture is a literal copy of the real English strings rather
@@ -60,6 +69,8 @@ const CATALOG = {
   update_major_waiting:
     'A major update is available: it changes how the core and its plugins talk, so it is not installed automatically. Install it from here when you can.',
   update_major_refused: 'Refused by the new core until updated: {components}',
+  update_hour_zone_warning:
+    'The device is on {device_zone}, your browser on {browser_zone}: {device_hour}:00 on the device is {browser_time} for you.',
 }
 
 // The card is handed its payload as a prop and never fetches anything itself
@@ -446,6 +457,66 @@ describe('UpdateCard', () => {
       const w = mountCard(payload({ components: rows(), major_update_waiting: false }))
       expect(w.find('[data-update-major-waiting]').exists()).toBe(false)
       expect(w.find('[data-update-major-waiting-refused]').exists()).toBe(false)
+    })
+  })
+
+  describe('the update hour across time zones', () => {
+    /** Serves the catalog, and `/api/system` with `system` — or fails it
+     *  when `system` is `null`. */
+    function serve(system: Record<string, unknown> | null) {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: string) => {
+          if (url === '/api/i18n') return new Response(JSON.stringify(CATALOG), { status: 200 })
+          if (url === '/api/system' && system) return new Response(JSON.stringify(system), { status: 200 })
+          return new Response('', { status: 503 })
+        }),
+      )
+    }
+
+    beforeEach(() => {
+      browser.zone = 'Europe/Paris'
+      browser.offset = 3600
+    })
+
+    it("says what the hour means in the browser's zone when the zones differ", async () => {
+      serve({ timezone: 'UTC', utc_offset_seconds: 0 })
+      const w = mountCard(payload())
+      await flushPromises()
+      expect(w.get('[data-update-hour-zone]').text()).toBe(
+        'The device is on UTC, your browser on Europe/Paris: 3:00 on the device is 04:00 for you.',
+      )
+    })
+
+    it('follows the hour being typed', async () => {
+      serve({ timezone: 'UTC', utc_offset_seconds: 0 })
+      const w = mountCard(payload())
+      await flushPromises()
+      await w.get('[data-update-hour]').setValue('23')
+      expect(w.get('[data-update-hour-zone]').text()).toContain('23:00 on the device is 00:00 for you')
+    })
+
+    it('names an unknown device zone by its offset', async () => {
+      serve({ timezone: null, utc_offset_seconds: 0 })
+      const w = mountCard(payload())
+      await flushPromises()
+      expect(w.get('[data-update-hour-zone]').text()).toContain('The device is on UTC+00:00,')
+    })
+
+    it('says nothing when both are the same zone under two names', async () => {
+      browser.zone = 'UTC'
+      browser.offset = 0
+      serve({ timezone: 'Etc/UTC', utc_offset_seconds: 0 })
+      const w = mountCard(payload())
+      await flushPromises()
+      expect(w.find('[data-update-hour-zone]').exists()).toBe(false)
+    })
+
+    it('says nothing when the device could not be asked', async () => {
+      serve(null)
+      const w = mountCard(payload())
+      await flushPromises()
+      expect(w.find('[data-update-hour-zone]').exists()).toBe(false)
     })
   })
 })
