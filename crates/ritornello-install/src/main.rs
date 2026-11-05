@@ -121,6 +121,17 @@ fn check_device(dev: &DeviceState) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// What the survey refuses once the action is known: anything but a total
+/// removal on a device without a CA bundle, whose binaries would reach no
+/// HTTPS service. Said right after the action, before the version, the
+/// inventory and every other question; `plan::compute` refuses it again.
+fn check_ca_certificates(dev: &DeviceState, action: Action, remove_all: bool) -> anyhow::Result<()> {
+    if !dev.ca_certificates && action != Action::RemoveAll && !remove_all {
+        bail!(PlanError::NoCaCertificates);
+    }
+    Ok(())
+}
+
 /// What applying a plan needs of the device's `sudo`: refused only once
 /// there is a plan to apply, so that a device already up to date is told
 /// so even with no passwordless `sudo` and no terminal to ask a password
@@ -273,6 +284,7 @@ fn run(args: &Args) -> anyhow::Result<()> {
     } else {
         Action::InstallOrUpdate
     };
+    check_ca_certificates(&dev, action, args.remove_all)?;
 
     // 4 and 5. The source, its version, its inventory. A total removal
     // does not ask for a version: it removes what the registry and the
@@ -616,6 +628,30 @@ mod tests {
         // needs none.
         assert!(check_sudo(Sudo::Password, true).is_ok());
         assert!(check_sudo(Sudo::NoPassword, false).is_ok() && check_sudo(Sudo::NotNeeded, false).is_ok());
+    }
+
+    /// A device without a CA bundle is refused an install, an update or a
+    /// repair as soon as the action is known — before the version, the
+    /// inventory and the questions — while a total removal, chosen on the
+    /// screen or by `--remove-all`, goes on.
+    ///
+    /// **[MUTATION]**: drop either removal exemption from
+    /// `check_ca_certificates`, or the check itself — this test fails.
+    #[test]
+    fn a_device_without_ca_certificates_is_refused_right_after_the_action_unless_removed() {
+        let mut bare = crate::plan::tests::dev(&[], None, &[], &[]);
+        bare.ca_certificates = false;
+        for action in [Action::InstallOrUpdate, Action::Repair] {
+            let err = check_ca_certificates(&bare, action, false).unwrap_err();
+            assert_eq!(err.to_string(), PlanError::NoCaCertificates.to_string(), "{action:?}");
+        }
+        assert!(check_ca_certificates(&bare, Action::RemoveAll, false).is_ok());
+        // `--remove-all` leaves the action at its default.
+        assert!(check_ca_certificates(&bare, Action::InstallOrUpdate, true).is_ok());
+        bare.ca_certificates = true;
+        for action in [Action::InstallOrUpdate, Action::Repair, Action::RemoveAll] {
+            assert!(check_ca_certificates(&bare, action, false).is_ok(), "{action:?}");
+        }
     }
 
     /// The up-to-date line names the device, the release and its source,
