@@ -314,14 +314,20 @@ worth knowing about rather than discovering it the day it happens.
 A published release that is still some component's home must never be
 deleted, nor its attached files removed. The archive of a component that has
 not changed in a long time lives only in the release where it last changed,
-and that is where the device installs or repairs it from. A release no
-component's current version lives in any more — every archive it carries,
-language packs and `files-mount` included, has been republished since — may
-be deleted to keep the list short; keep its git tag (`gh release delete
-<tag>` without `--cleanup-tag`). What that costs is installing that exact old
-version on purpose (`ritornello-install --version`). A device's own rollback
-is not affected: it restores the backup the updater kept, and downloads
-nothing.
+and that is where the device installs or repairs it from. A release is no
+longer any component's home once every archive it carries, language packs
+and `files-mount` included, has been republished in a later published
+release. Then, to keep the list short:
+
+- a **prerelease** may be deleted at once;
+- a **finished release** is kept while it is one of the three newest
+  finished releases, home or not, so that a previous stable version can still
+  be installed on purpose.
+
+Keep the git tag (`gh release delete <tag>` without `--cleanup-tag`). What a
+deletion costs is installing that exact old version on purpose
+(`ritornello-install --version`). A device's own rollback is not affected: it
+restores the backup the updater kept, and downloads nothing.
 
 **This is an upgrade path, not a fresh install.** The archives carry
 binaries, units and polkit rules — nothing else. A language pack is never

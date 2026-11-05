@@ -75,12 +75,15 @@ prerelease component.
 **Never delete a release that is still some component's home, nor any file
 attached to one.** The archive of a component that has not changed in a long
 time lives only in the release where it last changed, and that is where a
-device installs and repairs it from. A release becomes deletable once **no**
-component's current version lives there any more — every one it carries has
-been republished in a later published release (check the language packs and
-`files-mount` too, not only the plugins). Deleting one only costs installing
-that exact old version on purpose (`ritornello-install --version`); a device's
-own rollback restores what it holds and downloads nothing. Keep the git tag
+device installs and repairs it from. A release is no longer anyone's home
+once every archive it carries has been republished in a later published
+release (check the language packs and `files-mount` too, not only the
+plugins). A **prerelease** may then be deleted at once. A **finished
+release** is kept longer: the three newest finished releases stay even when
+no longer anyone's home, so a previous stable version can still be installed
+on purpose. Deleting a release only costs installing that exact old version
+on purpose (`ritornello-install --version`); a device's own rollback restores
+what it holds and downloads nothing. Keep the git tag
 (`gh release delete <tag>`, without `--cleanup-tag`). The fixed release tagged
 `installer` is apart: its assets are replaced by each installer release, since
 no device ever fetches the installer.
