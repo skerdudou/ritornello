@@ -80,6 +80,7 @@ elif sudo -n true 2>/dev/null; then echo no-password
 else echo password; fi
 m CORE; [ -x "$R/usr/local/bin/ritornello-core" ] && echo yes || echo no
 m USER; id -u ritornello >/dev/null 2>&1 && echo yes || echo no
+m CA_BUNDLE; [ -s "$R{ca}" ] && echo yes || echo no
 gone() {{
   p="${{1%/*}}"
   while [ -n "$p" ]; do
@@ -110,9 +111,14 @@ done
 m END
 "#,
         n = nonce,
-        over = READ_CAP + 1
+        over = READ_CAP + 1,
+        ca = CA_BUNDLE
     )
 }
+
+/// The Debian CA bundle, which the `ca-certificates` package provides: the
+/// survey reports whether it exists and is not empty (`CA_BUNDLE` section).
+pub const CA_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
 
 /// The most the survey reads of any one file: far above any real
 /// `plugins.toml`, `installed.toml` or `placed.json` (a few kilobytes).
@@ -189,6 +195,12 @@ pub struct DeviceState {
     pub packs: BTreeSet<String>,
     pub data_nonempty: BTreeSet<String>,
     pub user_exists: bool,
+    /// The Debian CA bundle, `/etc/ssl/certs/ca-certificates.crt` (the
+    /// `ca-certificates` package), exists and is not empty. The core and
+    /// the plugins verify every HTTPS peer against the system store
+    /// (rustls-platform-verifier, under reqwest): without it, every one of
+    /// them fails, so installing or updating is refused (`plan::compute`).
+    pub ca_certificates: bool,
 }
 
 /// One entry of the updater's `placed.json`: only its version is read.
@@ -257,6 +269,7 @@ const SECTIONS: &[&str] = &[
     "SUDO",
     "CORE",
     "USER",
+    "CA_BUNDLE",
     "PLUGINS_TOML",
     "PLUGINS_TOML_STATE",
     "REGISTRY",
@@ -361,6 +374,7 @@ pub fn parse(output: &str, nonce: &str) -> anyhow::Result<DeviceState> {
     };
     let core_present = get("CORE").trim() == "yes";
     let user_exists = get("USER").trim() == "yes";
+    let ca_certificates = get("CA_BUNDLE").trim() == "yes";
 
     let plugins_toml = file_content("plugins.toml", get("PLUGINS_TOML"), get("PLUGINS_TOML_STATE"))?;
     let declared = match &plugins_toml {
@@ -412,6 +426,7 @@ pub fn parse(output: &str, nonce: &str) -> anyhow::Result<DeviceState> {
         packs,
         data_nonempty,
         user_exists,
+        ca_certificates,
     })
 }
 
@@ -437,6 +452,7 @@ mod tests {
             packs: BTreeSet::new(),
             data_nonempty: BTreeSet::new(),
             user_exists: false,
+            ca_certificates: true,
         }
     }
 
@@ -480,6 +496,8 @@ no-password
 yes
 @@n1@@ USER
 no
+@@n1@@ CA_BUNDLE
+yes
 @@n1@@ PLUGINS_TOML
 [[plugin]]
 name = \"radio\"
@@ -519,6 +537,7 @@ radio
         assert_eq!(state.sudo, Sudo::NoPassword);
         assert!(state.core_present);
         assert!(!state.user_exists);
+        assert!(state.ca_certificates);
         assert_eq!(
             state.declared,
             vec![
@@ -562,6 +581,8 @@ not-needed
 no
 @@real@@ USER
 no
+@@real@@ CA_BUNDLE
+yes
 @@real@@ PLUGINS_TOML
 # @@other@@ END
 [[plugin]]
@@ -619,6 +640,8 @@ not-needed
 no
 @@n@@ USER
 no
+@@n@@ CA_BUNDLE
+yes
 @@n@@ PLUGINS_TOML
 this is not valid toml [[[
 @@n@@ PLUGINS_TOML_STATE
@@ -660,6 +683,8 @@ not-needed
 no
 @@n@@ USER
 no
+@@n@@ CA_BUNDLE
+yes
 @@n@@ PLUGINS_TOML
 @@n@@ PLUGINS_TOML_STATE
 absent
@@ -713,6 +738,10 @@ ritornello-lang-fr
 
         std::fs::create_dir_all(root.join("run/systemd/system")).expect("systemd dir");
 
+        std::fs::create_dir_all(root.join("etc/ssl/certs")).expect("certs dir");
+        std::fs::write(root.join("etc/ssl/certs/ca-certificates.crt"), "-----BEGIN CERTIFICATE-----\n")
+            .expect("CA bundle");
+
         let shell = if std::path::Path::new("/bin/dash").exists() { "/bin/dash" } else { "sh" };
         println!("running probe_script under {shell}");
 
@@ -729,6 +758,7 @@ ritornello-lang-fr
         let state = parse(&stdout, nonce).expect("the real script's output parses");
         assert!(state.core_present, "{stdout}");
         assert!(state.systemd, "{stdout}");
+        assert!(state.ca_certificates, "{stdout}");
         assert_eq!(state.packs, BTreeSet::from(["ritornello-lang-fr".to_string()]), "{stdout}");
         assert_eq!(state.data_nonempty, BTreeSet::from(["radio".to_string()]), "{stdout}");
         assert_eq!(state.declared.len(), 1, "{stdout}");
@@ -767,6 +797,9 @@ no
 @@n@@ USER
 no
 
+@@n@@ CA_BUNDLE
+no
+
 @@n@@ PLUGINS_TOML
 [[plugin]]
 name = \"radio\"
@@ -799,6 +832,7 @@ radio
         assert_eq!(state.kernel, "Linux");
         assert_eq!(state.machine, "x86_64");
         assert!(!state.systemd);
+        assert!(!state.ca_certificates);
         assert_eq!(state.sudo, Sudo::NotNeeded);
         assert_eq!(
             state.declared,
@@ -906,7 +940,7 @@ radio
     fn survey_full(plugins_toml: (&str, &str), registry: (&str, &str), owner: &str, placed: (&str, &str)) -> String {
         format!(
             "\n@@n@@ KERNEL\nLinux\n\n@@n@@ MACHINE\nx86_64\n\n@@n@@ SYSTEMD\nyes\n\n@@n@@ UID\n0\n\
-             \n@@n@@ SUDO\nnot-needed\n\n@@n@@ CORE\nyes\n\n@@n@@ USER\nyes\n\
+             \n@@n@@ SUDO\nnot-needed\n\n@@n@@ CORE\nyes\n\n@@n@@ USER\nyes\n\n@@n@@ CA_BUNDLE\nyes\n\
              \n@@n@@ PLUGINS_TOML\n{}\n@@n@@ PLUGINS_TOML_STATE\n{}\n\
              \n@@n@@ REGISTRY\n{}\n@@n@@ REGISTRY_STATE\n{}\n@@n@@ REGISTRY_OWNER\n{}\n\
              \n@@n@@ PLACED\n{}\n@@n@@ PLACED_STATE\n{}\n\
@@ -1180,6 +1214,31 @@ radio
         assert_eq!(state.registry, None, "{stdout}");
         let stdout = run_probe(|_| {});
         assert_eq!(parse(&stdout, "real").unwrap().plugins_toml, None, "{stdout}");
+    }
+
+    /// The CA bundle for real: present and not empty is the one `yes`. A
+    /// missing bundle (no `ca-certificates` package) and an empty one (a
+    /// package half-configured) both verify no HTTPS peer, so both are `no`.
+    ///
+    /// **[MUTATION]**: `[ -e ]` in place of `[ -s ]`, or `echo yes` on both
+    /// arms — this test fails (on the empty bundle, the first one not `yes`).
+    #[test]
+    #[cfg(unix)]
+    fn probe_script_reports_the_ca_bundle_only_when_present_and_not_empty() {
+        let bundle = |content: Option<&'static str>| {
+            run_probe(move |root| {
+                if let Some(content) = content {
+                    std::fs::create_dir_all(root.join("etc/ssl/certs")).expect("certs dir");
+                    std::fs::write(root.join("etc/ssl/certs/ca-certificates.crt"), content).expect("bundle");
+                }
+            })
+        };
+        let present = bundle(Some("-----BEGIN CERTIFICATE-----\n"));
+        assert!(parse(&present, "real").expect("parses").ca_certificates, "{present}");
+        let empty = bundle(Some(""));
+        assert!(!parse(&empty, "real").expect("parses").ca_certificates, "{empty}");
+        let missing = bundle(None);
+        assert!(!parse(&missing, "real").expect("parses").ca_certificates, "{missing}");
     }
 
     /// R36 for real: a `plugins.toml` with mode 000 must be refused by name,
