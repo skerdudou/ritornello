@@ -311,10 +311,17 @@ its own within the last hundred deliveries would drop off that page and out
 of the catalogue: distant at this project's pace, but not impossible, and
 worth knowing about rather than discovering it the day it happens.
 
-A published release must never be deleted, nor its attached files removed.
-The archive of a component that has not changed in a long time lives in the
-release where it last changed, and that is where the device installs or
-repairs it from.
+A published release that is still some component's home must never be
+deleted, nor its attached files removed. The archive of a component that has
+not changed in a long time lives only in the release where it last changed,
+and that is where the device installs or repairs it from. A release no
+component's current version lives in any more — every archive it carries,
+language packs and `files-mount` included, has been republished since — may
+be deleted to keep the list short; keep its git tag (`gh release delete
+<tag>` without `--cleanup-tag`). What that costs is installing that exact old
+version on purpose (`ritornello-install --version`). A device's own rollback
+is not affected: it restores the backup the updater kept, and downloads
+nothing.
 
 **This is an upgrade path, not a fresh install.** The archives carry
 binaries, units and polkit rules — nothing else. A language pack is never

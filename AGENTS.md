@@ -72,12 +72,18 @@ The wire fingerprint test of `ritornello-proto` forces the decision. The first
 finished release republishes everything, since a finished product refuses any
 prerelease component.
 
-**Never delete a published release, or any file attached to one.** The
-archive of a component that has not changed in a long time lives in the
-release where it last changed, and that is where a device installs it from.
-The one exception is the fixed release tagged `installer`, whose assets are
-replaced by each installer release: no device ever fetches the installer, so
-nothing depends on what it held before.
+**Never delete a release that is still some component's home, nor any file
+attached to one.** The archive of a component that has not changed in a long
+time lives only in the release where it last changed, and that is where a
+device installs and repairs it from. A release becomes deletable once **no**
+component's current version lives there any more — every one it carries has
+been republished in a later published release (check the language packs and
+`files-mount` too, not only the plugins). Deleting one only costs installing
+that exact old version on purpose (`ritornello-install --version`); a device's
+own rollback restores what it holds and downloads nothing. Keep the git tag
+(`gh release delete <tag>`, without `--cleanup-tag`). The fixed release tagged
+`installer` is apart: its assets are replaced by each installer release, since
+no device ever fetches the installer.
 
 **The security boundary.** The core runs unprivileged. A small root binary
 (`crates/ritornello-updater`) can form **exactly two** path shapes —
