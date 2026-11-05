@@ -2451,7 +2451,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-core"
-version = "0.2.0-beta.10"
+version = "0.2.0-beta.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2498,7 +2498,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-i18n"
-version = "0.2.0-beta.10"
+version = "0.2.0-beta.11"
 dependencies = [
  "serde",
  "serde_json",
@@ -2509,7 +2509,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-install"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2530,7 +2530,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-manifest"
-version = "0.2.0-beta.10"
+version = "0.2.0-beta.11"
 dependencies = [
  "toml_edit",
 ]
@@ -2556,7 +2556,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-console"
-version = "0.2.0-beta.8"
+version = "0.2.0-beta.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2572,7 +2572,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-files"
-version = "0.2.0-beta.10"
+version = "0.2.0-beta.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2612,7 +2612,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-lrclib-lyrics"
-version = "0.2.0-beta.10"
+version = "0.2.0-beta.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2649,7 +2649,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-musicbrainz"
-version = "0.2.0-beta.8"
+version = "0.2.0-beta.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2667,7 +2667,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-nrj-metas"
-version = "0.2.0-beta.6"
+version = "0.2.0-beta.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2685,7 +2685,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-ouifm-metas"
-version = "0.2.0-beta.7"
+version = "0.2.0-beta.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2704,7 +2704,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-radio"
-version = "0.2.0-beta.8"
+version = "0.2.0-beta.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2723,7 +2723,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-radiofrance-metas"
-version = "0.2.0-beta.6"
+version = "0.2.0-beta.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2741,7 +2741,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-sdk"
-version = "0.2.0-beta.10"
+version = "0.2.0-beta.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2756,7 +2756,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-web-streaming"
-version = "0.2.0-beta.10"
+version = "0.2.0-beta.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2785,7 +2785,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-proto"
-version = "0.2.0-beta.10"
+version = "0.2.0-beta.11"
 dependencies = [
  "base64 0.23.1",
  "serde",
