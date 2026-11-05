@@ -1,51 +1,50 @@
-**Action required** — run **ritornello-install** once, from a workstation,
-and, if the device has the `lrclib` plugin (beta.9), replace it with
-**`lrclib-lyrics`**: the update does neither by itself.
+**Action required** — make sure the device has **`ca-certificates`**, then
+run **ritornello-install 0.4.0** once, from a workstation: the page will not
+update the core by itself.
 
-**1. The mount helper changed one last time for this reason.** `files-mount`
-moves from 1.0.2 to 1.0.3: the `files` plugin's own preferences
-(`archive_covers`, `archive_lyrics`) leave the library the root helper is
-built from, so that a future `files` preference never again needs the
-installer. What root mounts does not change, and `media-roots.toml` stays
-byte for byte the same. Only ritornello-install places the helper, so the
-page refuses to update `files` on its own and says so:
+**1. `ca-certificates` is now required.** From this release on, the core and
+the plugins check HTTPS certificates against the device's own certificate
+store (`/etc/ssl/certs`) instead of a list compiled into them. Without the
+`ca-certificates` package every HTTPS request fails: radio search, Radio
+France, MusicBrainz covers, lyrics, and the update check itself. Most images
+already have it; check, and install it if needed, **before** anything else:
 
 ```sh
-ritornello-install --host account@host --version v0.2.0-beta.10 --keep
+dpkg -s ca-certificates >/dev/null 2>&1 || sudo apt install ca-certificates
 ```
 
-Everything else — the core, the other plugins and the language packs —
-updates from the page as usual: no systemd unit, polkit rule or privileged
-updater changed since beta.9.
+ritornello-install 0.4.0 refuses to install or update a device without it.
+An update from the page does not check.
 
-**2. The lyrics plugin is renamed**: `lrclib` becomes `lrclib-lyrics` (same
-behaviour, still fed by LRCLIB). This release ships `lrclib-lyrics` and no
-longer ships `lrclib`. A device that has `lrclib` keeps running it
-untouched — the updater still finds its beta.9 archive, so it reports it
-up to date and never offers anything for it again — and never installs
-`lrclib-lyrics` on its own, automatic updates included. To switch:
+**2. A new polkit rule, and the installer now asks.** This release ships
+`53-ritornello-time.rules`, which lets Ritornello change the device's time
+zone from the System page. Only ritornello-install places a polkit rule, so
+the page refuses to update the core until it has run, and says so. Use
+**ritornello-install 0.4.0** (the README's download link): it now asks which
+system permissions to grant —
+*power off or restart the system* and *change the time zone* — each one
+placing its polkit rule only when granted. The page is not authenticated:
+whatever it may do, anyone on your network may do, so untick what you do not
+want. On a device already installed, both are granted unless you say
+otherwise:
 
-1. **Settings → Plugins**: **Uninstall** `lrclib`. That removes its entry
-   from `/etc/ritornello/plugins.toml` and its binary, and keeps its data.
-2. **Settings → Plugins → Add a plugin**: install **`lrclib-lyrics`**. The
-   list may still offer `lrclib` too, without a description: do not pick
-   it.
-3. Optional: the old lyrics cache is not migrated (the new plugin starts
-   an empty one in `/var/lib/ritornello/plugins/lrclib-lyrics`). Delete the
-   old one with `sudo rm -r /var/lib/ritornello/plugins/lrclib`.
+```sh
+ritornello-install --host account@host --version v0.2.0-beta.11 --keep
+# or, to decline one or both:
+ritornello-install --host account@host --version v0.2.0-beta.11 --keep --grants power
+ritornello-install --host account@host --version v0.2.0-beta.11 --keep --grants none
+```
 
-Or both points in the one ritornello-install run: instead of `--keep`, name
-the plugins with `--plugins`, `lrclib-lyrics` included and `lrclib` left
-out (add `--purge-data` to erase `lrclib`'s cache). Interactively, untick
-`lrclib` and tick `lrclib-lyrics`. With `--keep`, `lrclib` stays (listed as
-a third-party plugin, since the release no longer knows it) and
-`lrclib-lyrics` is not added.
+Declining a permission removes its rule; running the installer again
+changes your mind. A declined permission never blocks the page's own
+updates.
 
-Left in place, both lyrics plugins run side by side: the lyrics shown do
-not change, but a song not yet cached can be looked up twice on LRCLIB.
+An older installer (0.3.x) still installs this release, but grants both
+permissions without asking and does not check `ca-certificates`.
 
-This is not a wire break: no contract moved, and the bootstrap
-`PROTOCOL_VERSION` did not move.
+The plugins and the language packs update from the page as usual. No
+systemd unit or privileged updater changed since beta.10. This is not a wire
+break: no contract moved, and the bootstrap `PROTOCOL_VERSION` did not move.
 <!-- The opening block above is this release's answer to "is there anything
      to do by hand?", and it is rewritten at every release rather than left
      to rot. When the next one needs nothing, the whole block above becomes
@@ -81,54 +80,29 @@ This is not a wire break: no contract moved, and the bootstrap
 
 ## Behaviour changes
 
-**The lyrics plugin is now `lrclib-lyrics`.** The plugin that finds lyrics
-on LRCLIB, published in beta.9 as `lrclib`, is renamed `lrclib-lyrics`: its
-page is at `/plugins/lrclib-lyrics/`, its cache in
-`/var/lib/ritornello/plugins/lrclib-lyrics`, and it introduces itself to
-LRCLIB under the new name. What it does is unchanged. See the action above
-to switch a device that has `lrclib`.
+**The device's time, and its time zone, on the System page.** A new
+**Time** card shows the device's clock and time zone, lets you pick another
+zone, and offers "use my browser's zone" when the two differ. The change
+applies at once: the automatic update schedule and the standby clock on the
+HDMI screen follow it without a restart.
 
-**Web streaming: videos that need JavaScript now play, faster.** Some
-YouTube videos no longer resolve without a JavaScript runtime ("This video
-is not available"). Measured on a Raspberry Pi 2:
-- On 32-bit ARM the plugin now installs and updates its own **node 22**
-  (about 108 MB), the last node line built for that architecture; its list
-  of sums must be signed by one of node's release keys, an older version
-  never replaces a newer one, and after node 22's end of life (April 2027)
-  it is kept and the page says so. Such a video: 2 min 10 s with QuickJS,
-  about 30 s with node, then **about 15 s** once yt-dlp's player cache,
-  which the plugin now turns on, has the current YouTube player.
-- Adding a link, refreshing a playlist or probing a download may now take
-  up to 5 minutes before the page gives up (was 2).
-- The capabilities panel says the JavaScript runtime only serves when a
-  video fails without one.
+**The update hour says which clock it means.** The automatic update hour
+is counted in the **device's** time zone. When the device and your browser
+are on different zones, the Updates card now says so under the hour, with
+what that hour is for you ("03:00 on the device is 04:00 for you"). A device
+left on UTC was the reason an update set for 3 am ran at 4 am.
 
-**Web streaming downloads: format, cover, name.**
-- **Format**: original (as the site gives it, webm for YouTube), **m4a** or
-  **mp3**, remembered. mp3 (and m4a from a site without an m4a stream) is
-  converted on the device by ffmpeg, offered only when ffmpeg is installed
-  (`sudo apt install ffmpeg`); the page says when it is missing.
-- **Cover of a single video**: beside the track as `<name>.jpg` (default),
-  or embedded in the file (m4a, mp3, opus, ogg; a webm falls back beside the
-  file). No more `cover.jpg` for a single video: it became the cover of
-  every later video in the folder. Playlists keep their folder's
-  `cover.jpg`.
-- **Name**: the file's (or the playlist folder's) name can be changed in
-  the dialog, prefilled with the usual one; nothing is ever overwritten.
-- Creating a folder in the dialog now enters it.
+**Greyed buttons say why.** Shut down, Restart and the time zone controls
+stay visible when they cannot work, and one sentence says why: not allowed
+when Ritornello was installed, polkit did not answer, or the system service
+is unreachable.
 
-**Files: a track's own cover, and more formats.** `<track>.jpg` (or
-`.jpeg`, `.png`) beside a track is now its cover, before the folder's
-image, and a folder's lone image is no longer guessed from another track's
-own cover. The files plugin now lists every audio format mpv was seen to
-play, `.webm` included (a web-streaming download in its original format).
-
-**The configuration page fits a phone.** It no longer scrolls sideways on
-a narrow screen, the Updates card included.
-
-**Plugins table after an install.** The configuration page reads the
-plugins table again once an install job is over, instead of showing the
-state from before it.
+**HTTPS trusts the device's certificate store** (see the action above). The
+core and the plugins that talk HTTPS (radio, Radio France, NRJ, Oüi FM,
+MusicBrainz, lyrics, web streaming) now use the device's certificates, so a
+certificate authority Debian removes is removed here too, and they trust
+exactly what mpv and yt-dlp already trust on the device. The core and
+plugins are about 0.7 MB larger each on armv7.
 
 ## Install
 
