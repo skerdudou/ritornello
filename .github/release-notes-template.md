@@ -180,8 +180,9 @@ not this release's tag: `ritornello-plugin-radio-0.2.1-<arch>.tar.gz` says
 nothing about the tag it ships under. Only `ritornello-plugins-<version>`,
 the bundle of every plugin, is named after this release's own tag.
 
-**Never delete a published release or its attached files.** The appliance
-goes back to fetch, from there, the components that have not changed since.
+**Never delete a release that still holds some component's current
+archive.** The appliance goes back to fetch, from there, the components that
+have not changed since.
 
 ## Architectures
 
