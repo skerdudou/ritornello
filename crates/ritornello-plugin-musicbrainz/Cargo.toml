@@ -37,7 +37,7 @@ async-trait = "0.1"
 # No `json` feature: the response is read as text and parsed by hand
 # (`parse_lookup`), to extract only the first medium whose track count
 # matches the inserted disc.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 ritornello-proto = { path = "../ritornello-proto" }
 ritornello-plugin-sdk = { path = "../ritornello-plugin-sdk" }
 ritornello-i18n = { path = "../ritornello-i18n" }

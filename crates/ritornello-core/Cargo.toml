@@ -41,10 +41,12 @@ rust-embed = { version = "8", features = ["debug-embed"] }
 # in Cargo.lock (tokio depends on it), so this adds no compilation.
 libc = "0.2"
 # The core fetches the covers itself: the browser never contacts the outside.
-# `rustls` like the plugins, no OpenSSL on the Pi.
+# `rustls` like the plugins, no OpenSSL on the Pi: reqwest's default rustls
+# setup, the aws-lc crypto provider and the device's system certificate store
+# (rustls-platform-verifier, fed by the `ca-certificates` package).
 # `chunk()` (the cap applied while streaming) does not depend on the `stream`
 # feature: that one only gates `bytes_stream()`, which we do not use.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 # Serves the local cover as a stream rather than as a single `Vec`: already in
 # the graph (reqwest depends on it), so no new compiled dependency.
 tokio-util = { version = "0.7", features = ["io"] }
