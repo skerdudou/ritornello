@@ -2411,8 +2411,12 @@ const MAX_HOPS: usize = 10;
 /// Shared HTTP client: building it at every call would redo the `rustls`
 /// configuration and the loading of the root store each time, which
 /// `reqwest`'s documentation asks precisely to avoid. The configuration is
-/// frozen (no proxy, no user input): a build failure would be a defect of the
-/// environment, not a per-request outage, hence the `expect`.
+/// frozen (no proxy, no user input), but the build still reads the device's
+/// certificate store (rustls-platform-verifier, since reqwest 0.13) and fails
+/// when it holds no certificate — a device without `ca-certificates`. That
+/// is a fetch that fails (`None`, with a warning), never a panic, and the
+/// failure is not remembered: the next fetch tries again, so installing the
+/// package mends covers without a restart (`cached_or_built`).
 ///
 /// **Redirects are followed, but every hop is revalidated.** The design
 /// requires following them (Radio France answers a cross-host 301, measured),
@@ -2423,9 +2427,9 @@ const MAX_HOPS: usize = 10;
 /// `302 http://192.168.1.1/…` to make the device issue a GET on its local
 /// network, scheme change included. One hop of indirection cancelled the
 /// entire safeguard.
-fn client() -> &'static reqwest::Client {
+fn client() -> Option<&'static reqwest::Client> {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
+    cached_or_built(&CLIENT, || {
         reqwest::Client::builder()
             .user_agent(concat!(
                 "ritornello/",
@@ -2445,8 +2449,25 @@ fn client() -> &'static reqwest::Client {
                 }
             }))
             .build()
-            .expect("frozen HTTP configuration, must never fail")
     })
+}
+
+/// The value `cell` holds, or the one `build` makes, kept for every later
+/// call. A failed build is logged and not kept: the next call builds again.
+fn cached_or_built<T, E: std::fmt::Display>(
+    cell: &'static OnceLock<T>,
+    build: impl FnOnce() -> Result<T, E>,
+) -> Option<&'static T> {
+    if let Some(value) = cell.get() {
+        return Some(value);
+    }
+    match build() {
+        Ok(value) => Some(cell.get_or_init(|| value)),
+        Err(e) => {
+            tracing::warn!("cover HTTP client could not be built (is ca-certificates installed?): {e}");
+            None
+        }
+    }
 }
 
 /// Is the target acceptable for an outgoing request?
@@ -2495,7 +2516,7 @@ fn allowed_target(url: &str) -> bool {
 /// testable at more than one value, where a hard-coded bound could only ever
 /// be exercised at the one figure baked into the binary.
 async fn download(url: &str, cap: usize) -> Option<CoverPayload> {
-    let mut response = client().get(url).send().await.ok()?;
+    let mut response = client()?.get(url).send().await.ok()?;
     if !response.status().is_success() {
         tracing::debug!("cover fetch returned {}", response.status());
         return None;
@@ -6019,6 +6040,25 @@ mod tests {
         assert!(
             ptrs.iter().all(|p| *p == ptrs[0]),
             "all eight must share the very same buffer, not merely equal bytes"
+        );
+    }
+
+    /// The shared client's cache: a build that fails (an empty certificate
+    /// store, since reqwest 0.13) is a `None`, not a panic, and is not kept —
+    /// the next call builds again; a build that succeeds is kept and never
+    /// redone.
+    ///
+    /// **[MUTATION]**: panic on a failed build (the old `expect`), or build
+    /// again when a value is held — this test fails. A remembered failure
+    /// would answer `None` to the second call, which is asserted `Some`.
+    #[test]
+    fn the_cover_client_is_not_cached_when_its_build_fails() {
+        static CELL: OnceLock<u32> = OnceLock::new();
+        assert_eq!(cached_or_built(&CELL, || Err::<u32, _>("No CA certificates were loaded from the system")), None);
+        assert_eq!(cached_or_built(&CELL, || Ok::<_, &str>(7)), Some(&7), "a failure is not remembered");
+        assert_eq!(
+            cached_or_built(&CELL, || -> Result<u32, &str> { panic!("built again while a client is held") }),
+            Some(&7)
         );
     }
 
