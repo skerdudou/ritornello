@@ -137,7 +137,13 @@ pub fn day_key(tm_year: i32, tm_yday: i32) -> i64 {
 /// tested directly, by name, for all seven days. What is left in this
 /// function — the FFI call and two numeric conversions `localtime_r` cannot
 /// make fail in practice — is not logic worth a test of its own.
+///
+/// `tzset_now()` first: glibc's `localtime_r` reads the zone once per process,
+/// and the zone can now be changed from the System tab. Without it, the hour
+/// the page shows (`/api/system`, which re-reads the zone) and the hour this
+/// schedule fires at would disagree until the next restart of the service.
 pub fn local_now(unix_s: i64) -> Option<LocalNow> {
+    crate::timezone::tzset_now();
     // SAFETY: `tm` is fully initialised by `localtime_r`, which is given a
     // valid pointer to it and to `unix_s`. The `_r` variant is the reentrant
     // one: no shared static, so nothing here races with another thread

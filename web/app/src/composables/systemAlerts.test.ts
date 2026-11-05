@@ -26,6 +26,12 @@ function payload(overrides: Partial<SystemPayload> = {}): SystemPayload {
     cpu_total_jiffies: 0,
     cpu_idle_jiffies: 0,
     under_voltage_acknowledged: false,
+    timezone: 'Etc/UTC',
+    utc_offset_seconds: 0,
+    device_unix_s: 0,
+    timezone_settable: true,
+    timedated_reachable: true,
+    timezone_polkit_answered: true,
     ...overrides,
   }
 }

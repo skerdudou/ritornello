@@ -1,0 +1,18 @@
+// Ritornello's System tab lets the operator set the device's time zone. The
+// service runs as the unprivileged `ritornello` user with NoNewPrivileges=true,
+// so `sudo` and any setuid path are structurally unavailable: timedated
+// through polkit is the mechanism, and this file is the authorisation.
+//
+// Exactly one action is granted: `set-timezone`. Not `set-time` (the clock
+// itself), not `set-ntp`, not `set-local-rtc`: the page chooses a zone and
+// nothing else about time.
+//
+// Like the power rule, `ritornello-install` asks before placing this file and
+// places nothing if the operator declines: a device without it simply refuses
+// the change, and the core learns that from polkit's answer.
+polkit.addRule(function (action, subject) {
+  if (subject.user === "ritornello" &&
+      action.id === "org.freedesktop.timedate1.set-timezone") {
+    return polkit.Result.YES;
+  }
+});

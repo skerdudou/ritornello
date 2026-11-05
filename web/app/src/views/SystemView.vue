@@ -8,6 +8,7 @@ import {
 } from '@ritornello/ui'
 import { ExclamationTriangleIcon } from '@radix-icons/vue'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import TimeCard from '../components/TimeCard.vue'
 import type { Alert } from '../composables/systemAlerts'
 import { useCatalog } from '../composables/useCatalog'
 import { PERIODS_S, useMetrics } from '../composables/useMetrics'
@@ -1133,6 +1134,8 @@ async function pollUntilBack(before: number | null, maxMs: number, successKey: s
       </CardContent>
     </Card>
 
+    <TimeCard :state="state" :clock="clock" />
+
     <Card>
       <CardHeader><CardTitle>{{ t('system_power') }}</CardTitle></CardHeader>
       <CardContent class="space-y-3">
@@ -1148,7 +1151,10 @@ async function pollUntilBack(before: number | null, maxMs: number, successKey: s
           data-power-unavailable
           class="text-sm text-muted-foreground"
         >
-          {{ state.logind_reachable ? t('system_power_unavailable') : t('system_power_no_logind') }}
+          <!-- logind answered and refused: since the installer asks, that is
+               the operator having declined the grant, and the repair is to
+               run the installer again — not to write a polkit rule by hand. -->
+          {{ state.logind_reachable ? t('system_power_not_allowed') : t('system_power_no_logind') }}
         </p>
         <div class="flex flex-wrap gap-2">
           <Button

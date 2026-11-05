@@ -3,6 +3,12 @@ use ritornello_proto::{Overlay, Playback, PlayerState};
 use std::io::Write;
 use std::path::Path;
 
+// `libc` 0.2 declares `tzset` for Windows only, so it is declared here, as in
+// the core. Only glibc builds are shipped (armv7 and aarch64 `-gnu`).
+unsafe extern "C" {
+    fn tzset();
+}
+
 /// What gets written in place of the source name when the core has none.
 const NO_SOURCE: &str = "—";
 
@@ -17,13 +23,12 @@ const NO_SOURCE: &str = "—";
 /// `system.rs` and the cd plugin), and `libc` is already there. Adding `chrono`
 /// would cost a dependency and its transitive timezone one, for two integers.
 ///
-/// **The timezone is the one glibc loads on the first call**, and that covers
-/// what matters: the daylight-saving rules live *inside* the timezone file, so
-/// the switch to summer time is followed without re-reading anything. What is
-/// not followed is an operator changing the machine's timezone while the
-/// service runs — rare, and a plugin restart settles it. `tzset()` on every
-/// tick would have covered it at the price of one `stat` per clock tick, and
-/// the function is not exposed by the `libc` crate on every target anyway.
+/// **The zone is re-read on every call** (`tzset`): glibc's `localtime_r`
+/// loads it once per process, and the zone can now be changed from the web
+/// page, so without this the standby clock would show the old zone until the
+/// plugin restarts. `tzset()` re-reads `/etc/localtime` when `TZ` is unset
+/// and costs one `stat` when the file is unchanged. This is only reached in
+/// standby (see `show`), one call per 10 s tick.
 ///
 /// The reentrant variant, the only safe one in a process with several threads.
 pub fn local_time() -> Option<(u32, u32)> {
@@ -31,6 +36,9 @@ pub fn local_time() -> Option<(u32, u32)> {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
     let t = libc::time_t::try_from(seconds).ok()?;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // Safety: `tzset` takes no argument and only updates libc's own zone state,
+    // which glibc guards with the lock `localtime_r` shares.
+    unsafe { tzset() };
     // Safety: `localtime_r` fills `tm` and keeps no pointer to it; we pass it
     // two references valid for the duration of the call. It returns NULL —
     // never a half-written `tm` — for a time it cannot convert, which the test

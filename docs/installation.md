@@ -786,13 +786,20 @@ supported.
 ### The options
 
     ritornello-install [--host account@host] [--plugins a,b|none]
-        [--packs fr,de|none] [--keep] [--remove-all] [--purge-data]
-        [--reinstall] [--version <tag>] [--from-dir <dir>] [--yes]
+        [--packs fr,de|none] [--grants power,timezone|none] [--keep]
+        [--remove-all] [--purge-data] [--reinstall] [--version <tag>]
+        [--from-dir <dir>] [--yes]
 
 - `--host`, or `RITORNELLO_HOST`: the device, as `account@host`.
 - `--plugins`, `--packs`: what is wanted, comma-separated; `none` is the
   core alone, respectively no language pack. Whatever is left out is kept
   as it is on the device.
+- `--grants`: the system permissions to give the service, comma-separated
+  from `power` (shut down and restart the machine) and `timezone` (change the
+  device's time zone); `none` gives neither. Whatever is left out is
+  **declined**. Without the option the previous choices stand, and a first
+  install grants both. It is refused with `--remove-all`, which grants
+  nothing. See [System permissions](#system-permissions).
 - `--keep`: keep exactly what is installed — a plain update.
 - `--remove-all`: remove everything Ritornello placed. `--purge-data` also
   erases the data of what is removed.
@@ -838,6 +845,13 @@ none of them.
 What to do with an installation that is already there has three answers:
 "Install or update", "Repair (reinstall everything)" — the same as
 `--reinstall` — and "Remove everything".
+
+After the plugins and the packs comes a checklist of **system permissions**,
+every one checked by default: shut down and restart the machine, and change
+the time zone. On a device that already has an installation the boxes start
+as the registry recorded them: a permission recorded as declined starts
+unchecked, any other starts checked. Without `--grants`, a run that does not
+ask keeps the recorded choices.
 
 The summary names what is installed, updated and removed, and what is
 **already up to date** and left exactly as it is. When everything is — no
@@ -1040,6 +1054,62 @@ An installation deployed before this change ran as root. The next
 `sudo chown -R ritornello:ritornello /etc/ritornello /var/lib/ritornello`
 yourself, or the service cannot write there.
 
+## System permissions
+
+Two things the web UI can do act on the machine rather than on Ritornello:
+shutting it down or restarting it, and changing its time zone. The service
+is unprivileged and runs with `NoNewPrivileges=true`, so both go through
+polkit, and each has a rule of its own that `ritornello-install` places:
+
+| Permission | Rule | What it grants |
+|---|---|---|
+| `power` | `deploy/50-ritornello-power.rules` | the six logind power-off and reboot actions ([below](#shutdown-and-reboot-from-the-web-ui)) |
+| `timezone` | `deploy/53-ritornello-time.rules` | `org.freedesktop.timedate1.set-timezone`, and nothing else: not the clock, not NTP |
+
+Both rules are written for the user `ritornello` alone. The installer asks
+before placing them (the checklist above, or `--grants`), because a rule
+that lets a network page power the machine off or change its zone is a
+decision about the device that its owner should make, not one to discover
+afterwards. **Declining is a normal outcome, not an error**: the rule is not
+placed — or is removed, when an earlier run had placed it — and the page
+greys the matching controls with a sentence saying it was not allowed at
+install time. A permission is granted again by running the installer with it
+checked. That sentence is not proof of a refusal, though: without polkitd the
+controls grey too, and the page cannot always tell (see
+[below](#shutdown-and-reboot-from-the-web-ui)).
+
+The registry records the choice. A declined rule's path is kept in the core's
+record with the identity `"declined"` in place of a hash, and the core
+accepts that value, and only that value, when it decides whether it may
+update itself from the page (see
+[The core updates itself only while its root files stay](#the-core-updates-itself-only-while-its-root-files-stay)):
+a file that is absent *by choice* is not a file someone altered. The
+exemption is for that one path: a difference on any other privileged file
+still sends the operator to the installer, and so does a rule that was never
+recorded at all.
+
+The `"declined"` identity reaches the registry only when a run completes. A
+run that stops midway leaves the provisional registry without it, so a later
+run that does not ask (`--keep`, or no `--grants`) finds no recorded refusal
+and grants the permission again — not silently, since the summary lists the
+rule being placed, but without a question. Pass `--grants` explicitly after
+an interrupted run that declined something.
+
+polkit must be installed for either rule to matter (see the next section for
+the package names), and `systemd-timedated` must exist for the time zone:
+the second is checked at startup, the page greys the Time card when
+`systemd-timedated` does not answer, and it says which of the two causes it
+is. Both answers are cached for the life of the process, so a change takes
+effect at the next start of the service. A run that changes a grant places the
+core again (its recorded identities no longer match), and placing the core
+stops and starts the service, which is the restart that makes it take effect.
+
+The time zone is read without any privilege, from the `/etc/localtime` link
+(`/etc/timezone` when that is a copied file). Setting it calls timedated's
+`SetTimezone` through `busctl` with no interactive authentication: polkit must
+answer from its rules alone. How the page uses it is in
+[interface.md](interface.md#time-card).
+
 ## Shutdown and reboot from the web UI
 
 The System tab offers three power actions. Two of them act on the machine
@@ -1058,24 +1128,36 @@ the endpoint requires.
 | Restart **Ritornello** | the process exits, systemd starts it again (`Restart=always` in the unit) | none |
 
 `ritornello-install` installs `deploy/50-ritornello-power.rules` into
-`/etc/polkit-1/rules.d/`. It grants the `ritornello` user the six logind
+`/etc/polkit-1/rules.d/`, unless the operator declined the `power` permission
+([System permissions](#system-permissions)): then the rule is absent on
+purpose, logind answers "no", and the page says it was not allowed when
+Ritornello was installed — or that polkit is missing, because logind answers
+the same "no" when there is no polkitd to ask and the core cannot tell the
+two apart. The rule grants the `ritornello` user the six logind
 actions involved — power-off and reboot, each in its plain,
 `-multiple-sessions` and `-ignore-inhibit` form. All six, because logind
 checks the plain action only when nothing else is going on: it switches to
-`-multiple-sessions` as soon as another session exists (an open SSH
-connection is enough, which is the usual situation while testing) and to
+`-multiple-sessions` as soon as another session exists (an open SSH connection
+is enough, which is the usual situation while testing) and to
 `-ignore-inhibit` when an inhibitor is held — which also means a confirmed
-shutdown overrides shutdown inhibitors and will not wait for an
-in-progress `apt`/`dpkg` run to finish.
+shutdown overrides shutdown inhibitors and will not wait for an in-progress
+`apt`/`dpkg` run to finish.
 
 polkit itself is not installed by `ritornello-install` — it installs no
-package — and it is not present everywhere:
+package — and it is not present everywhere. Neither the power rule nor the
+time-zone rule does anything without `polkitd` running:
 
 - **DietPi**: absent by default, `sudo apt install polkitd`;
 - **Raspberry Pi OS Lite**: normally already there; if not, same command;
 - **other Debian-based distributions**: `polkitd`, or `policykit-1` before
   Debian 12;
 - **Arch, Fedora, openSUSE**: `polkit`, generally already installed.
+
+For the time zone the core asks polkit directly, so it does tell a refusal
+from silence: when polkit does not answer its startup probe within 3 s —
+polkitd absent, or bus-activated and slow on a cold start — the Time card
+says polkit did not answer and sends here, not to the installer. Restarting
+Ritornello once polkitd is installed and running asks again.
 
 To check, on the device:
 
@@ -1316,7 +1398,38 @@ machine, never on the device they are meant to run on. This section names
 each gesture, rather than leaving one blanket disclaimer that a reader could
 mistake for caution instead of fact.
 
-**Nothing has run on a Pi.** Installing, uninstalling and reordering a
+**The system permissions have never run on a Pi.** The installer's question,
+the two rules and the time-zone change were built and tested on a
+development machine, with a stand-in for `busctl`:
+
+- the output of the polkit `CheckAuthorization` call the startup probe makes
+  for `org.freedesktop.timedate1.set-timezone`, on a real device: the code
+  reads the boolean out of the reply, and a reply of another shape counts as
+  polkit not answering (not allowed, with the polkitd sentence);
+- polkitd's own bus activation on a cold start: slower than the probe's 3 s,
+  it leaves the Time card saying polkit did not answer until the service is
+  restarted;
+- `SetTimezone` through `systemd-timedated` as the `ritornello` user, with the
+  rule in place: that the zone actually changes, that `/etc/localtime` is
+  re-linked as the reader expects, and that the scheduler and the console
+  clock follow without a restart;
+- whether `systemd-timedated` exists, and starts, on DietPi, which removes
+  services to save memory (logind is masked there, see above);
+- timedated being **bus-activated**: nothing owns its name until the first
+  call starts it. A cold activation slower than the probe's 3 s leaves
+  `timedated_reachable` false, and so the Time card greyed, until the service
+  is restarted;
+- a `SetTimezone` call that times out (5 s) may still have applied the zone,
+  since the call already sent is not cancelled; the page reports a failure
+  and the next poll shows what is actually set;
+- the declined path end to end: an installer run with a grant declined, then
+  an automatic core update from the page, which must accept the `"declined"`
+  identity and refuse anything else;
+- polkitd picking up the new rule file, or noticing its removal, without a
+  restart. It watches `rules.d`, but here the service restart that follows
+  is what has been relied on.
+
+**Nothing else has run on a Pi.** Installing, uninstalling and reordering a
 plugin, and updating the core itself, all rewrite
 `/etc/ritornello/plugins.toml` and ask the privileged
 `ritornello-update.service` to place the files. None of the following has

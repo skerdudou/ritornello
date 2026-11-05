@@ -25,6 +25,7 @@ mod system;
 #[cfg(all(test, unix))]
 mod test_exec;
 mod theme;
+mod timezone;
 mod types;
 mod update;
 mod web;
@@ -2336,8 +2337,10 @@ async fn main() -> Result<()> {
     {
         // Asked once, before serving: the answer gates the System tab's two
         // OS buttons, and asking per request would mean spawning `busctl`
-        // twice every five seconds.
-        let probe = system::probe_capabilities().await;
+        // twice every five seconds. The time-zone probe is joined with it, not
+        // run after it: both run before the listener binds, and a hung D-Bus
+        // must cost one 3 s timeout, not two in a row.
+        let (probe, tz_probe) = tokio::join!(system::probe_capabilities(), timezone::probe());
         // Beside `state.json`, in the unit's `StateDirectory`. No `boot_id`
         // (not Linux): no acknowledgement offered, the route answers 503.
         let under_voltage_ack = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
@@ -2379,6 +2382,9 @@ async fn main() -> Result<()> {
                 can_power_off: probe.can_power_off,
                 can_reboot: probe.can_reboot,
                 logind_reachable: probe.logind_reachable,
+                timezone_settable: tz_probe.settable,
+                timedated_reachable: tz_probe.timedated_reachable,
+                timezone_polkit_answered: tz_probe.polkit_answered,
                 // The very hook the update worker uses to leave once the core
                 // binary has been replaced: see where it is built, above, for
                 // why mpv has to die with this process.

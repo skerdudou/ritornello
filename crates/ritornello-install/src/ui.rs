@@ -13,6 +13,7 @@ use anyhow::Context;
 use dialoguer::{Confirm, Input, MultiSelect, Password, Select};
 
 use crate::device::DeviceState;
+use crate::grants::Grant;
 use crate::inventory::Inventory;
 use crate::plan::Plan;
 use crate::source::Release;
@@ -102,6 +103,9 @@ pub fn summary_lines(plan: &Plan) -> Vec<String> {
     section("languages removed", &summary.languages_removed);
     section("left as they are (third-party)", &summary.kept_third_party);
     section("already up to date", &summary.up_to_date);
+    for (grant, allowed) in &summary.grants {
+        lines.push(format!("  {}: {}", if *allowed { "allowed" } else { "not allowed" }, grant.effect()));
+    }
     if plan.remove_trees.iter().any(|t| t == DATA_TREE) {
         lines.push(format!("  ALL DATA ERASED: the whole of {DATA_TREE}, every setting and every plugin's data"));
     }
@@ -229,6 +233,21 @@ pub fn ask_plugins(choices: &[Choice], checked: &BTreeSet<String>) -> anyhow::Re
 /// Step 6, the same rule.
 pub fn ask_packs(choices: &[Choice], checked: &BTreeSet<String>) -> anyhow::Result<BTreeSet<String>> {
     checklist("Languages (space to check, enter to go on)", choices, checked)
+}
+
+/// The system permissions: every one checked unless it is in `declined`
+/// (the device's recorded choice). Returns the **declined** ones, which are
+/// the lines left unchecked.
+pub fn ask_grants(declined: &BTreeSet<Grant>) -> anyhow::Result<BTreeSet<Grant>> {
+    let labels: Vec<&str> = Grant::ALL.iter().map(|g| g.label()).collect();
+    let defaults: Vec<bool> = Grant::ALL.iter().map(|g| !declined.contains(g)).collect();
+    let picked = MultiSelect::new()
+        .with_prompt("System permissions (space to check, enter to go on)")
+        .items(&labels)
+        .defaults(&defaults)
+        .interact()
+        .context("asking for the system permissions")?;
+    Ok(Grant::ALL.iter().enumerate().filter(|(i, _)| !picked.contains(i)).map(|(_, g)| *g).collect())
 }
 
 /// Step 7: one question per unchecked plugin that has data. Only called
@@ -450,5 +469,17 @@ mod tests {
         let mut d = nothing.clone();
         d.user_exists = true;
         assert!(offers_remove_all(&d), "the account");
+    }
+
+    #[test]
+    fn the_summary_says_each_grant_that_changed_or_is_new() {
+        use crate::grants::Grant;
+        let summary =
+            Summary { grants: vec![(Grant::Power, true), (Grant::Timezone, false)], ..Summary::default() };
+        let plan = Plan { summary, ..Plan::default() };
+        assert_eq!(
+            summary_lines(&plan),
+            ["  allowed: power off / restart", "  not allowed: change the time zone"]
+        );
     }
 }

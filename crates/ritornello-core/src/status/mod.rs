@@ -253,6 +253,7 @@ pub fn router(state: AppState) -> Router {
             "/api/system/under-voltage/acknowledge",
             axum::routing::post(crate::system::under_voltage_ack_post),
         )
+        .route("/api/system/timezone", axum::routing::post(crate::timezone::timezone_post))
         .route("/api/system/processes", get(crate::processes::processes_json))
         .route("/api/command", axum::routing::post(command_post))
         .route("/api/cover/{key}", get(crate::cover::cover_get))

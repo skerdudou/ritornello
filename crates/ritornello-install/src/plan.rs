@@ -23,7 +23,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::device::DeviceState;
-use crate::inventory::{Companion, Component, Inventory};
+use crate::grants::{DECLINED, Grant};
+use crate::inventory::{Companion, Component, FileEntry, Inventory};
 use crate::names::{self, DATA_ROOT, PACKS_ROOT, PLUGINS_DIR};
 use crate::registry::{Recorded, Registry};
 
@@ -59,6 +60,10 @@ pub enum Intent {
         packs: BTreeSet<String>,
         erase_data: BTreeSet<String>,
         reinstall: bool,
+        /// The system permissions the operator declines: the core's rule
+        /// for each is not placed, and its record carries `DECLINED` in
+        /// place of the rule's identity (`grants`).
+        declined: BTreeSet<Grant>,
     },
     /// Everything Ritornello placed. `/var/lib/ritornello` and the
     /// `ritornello` account go only with `erase_data`.
@@ -104,6 +109,9 @@ pub struct Summary {
     /// Language packs placed (installed or replaced) and removed, by id.
     pub languages_placed: Vec<String>,
     pub languages_removed: Vec<String>,
+    /// The system permissions that are new on the device or whose state
+    /// changed, each with whether it is now allowed.
+    pub grants: Vec<(Grant, bool)>,
 }
 
 /// Everything the device script does, in the order it does it: stop,
@@ -281,8 +289,8 @@ pub fn compute(inv: &Inventory, dev: &DeviceState, intent: &Intent) -> Result<Pl
     }
     match intent {
         Intent::RemoveAll { erase_data } => remove_all(inv, dev, *erase_data),
-        Intent::InstallOrUpdate { plugins, packs, erase_data, reinstall } => {
-            install_or_update(inv, dev, arch, plugins, packs, erase_data, *reinstall)
+        Intent::InstallOrUpdate { plugins, packs, erase_data, reinstall, declined } => {
+            install_or_update(inv, dev, arch, plugins, packs, erase_data, *reinstall, declined)
         }
     }
 }
@@ -448,8 +456,9 @@ fn finish(
 }
 
 /// Whether the device already has `name` at `offered`, with exactly the
-/// privileged files `identity` names, each recorded as that same content, so
-/// that placing it again would change nothing.
+/// privileged files `privileged` lists, each recorded with the identity
+/// `identity` gives (a declined grant's rule has an identity and no file),
+/// so that placing it again would change nothing.
 ///
 /// **The trust rule: only root-owned data may justify a skip.** Skipping is
 /// the one decision here that makes the installer do *less* as root, so it
@@ -479,12 +488,13 @@ fn is_current(
     untrusted: &BTreeMap<String, String>,
     name: &str,
     offered: &str,
+    privileged: &[String],
     identity: &BTreeMap<String, String>,
 ) -> bool {
     let Some(rec) = recorded.get(name) else { return false };
     let same_files = {
         let a: BTreeSet<&String> = rec.privileged.iter().collect();
-        let b: BTreeSet<&String> = identity.keys().collect();
+        let b: BTreeSet<&String> = privileged.iter().collect();
         a == b
     };
     if rec.version != offered || !same_files || rec.identity != *identity {
@@ -508,6 +518,7 @@ fn same_registry(a: &Registry, b: &Registry) -> bool {
         })
 }
 
+#[allow(clippy::too_many_arguments)] // the intent, unpacked
 fn install_or_update(
     inv: &Inventory,
     dev: &DeviceState,
@@ -516,6 +527,7 @@ fn install_or_update(
     packs: &BTreeSet<String>,
     erase_data: &BTreeSet<String>,
     reinstall: bool,
+    declined: &BTreeSet<Grant>,
 ) -> Result<Plan, PlanError> {
     let ours: BTreeSet<&str> = inv.plugins.iter().map(|p| p.name.as_str()).collect();
     let declared: BTreeSet<&str> = dev.declared.iter().map(|d| d.name.as_str()).collect();
@@ -635,14 +647,25 @@ fn install_or_update(
         // 10. The registry records every component placed, with its
         // version and what it places privileged (none, for most plugins):
         // the version is what lets the next run leave it alone.
-        let privileged: Vec<String> = c.files.iter().filter(|f| f.privileged).map(|f| f.dest.clone()).collect();
+        //
+        // A grant the operator declined is a rule of the core's that is not
+        // placed: it is neither put nor listed as privileged, and its
+        // identity is `DECLINED`, so the choice is on record. A rule the
+        // release does not carry records nothing.
+        let is_declined = |dest: &str| {
+            c.name == inv.core.name && declined.iter().any(|g| g.rule_path() == dest)
+        };
+        let files: Vec<&FileEntry> = c.files.iter().filter(|f| !is_declined(&f.dest)).collect();
+        let privileged: Vec<String> = files.iter().filter(|f| f.privileged).map(|f| f.dest.clone()).collect();
         // `Inventory::parse` refused a privileged file without one.
-        let identity: BTreeMap<String, String> = c
-            .files
+        let mut identity: BTreeMap<String, String> = files
             .iter()
             .filter(|f| f.privileged)
             .filter_map(|f| Some((f.dest.clone(), f.identity.clone()?)))
             .collect();
+        identity.extend(
+            c.files.iter().filter(|f| is_declined(&f.dest)).map(|f| (f.dest.clone(), DECLINED.to_string())),
+        );
         // A companion was there with its plugin, or on its own record.
         let was_there = if c.name == inv.core.name {
             dev.core_present
@@ -652,11 +675,11 @@ fn install_or_update(
             declared.contains(c.name.as_str())
         };
         let current =
-            !reinstall && was_there && is_current(&recorded, &dev.updater_placed, &c.name, &c.version, &identity);
+            !reinstall && was_there && is_current(&recorded, &dev.updater_placed, &c.name, &c.version, &privileged, &identity);
         if !current {
             let archive = c.archive_for(arch);
             plan.archives.insert(archive.clone());
-            for f in &c.files {
+            for f in &files {
                 plan.puts.push(Put {
                     archive: archive.clone(),
                     archive_path: f.archive_path.clone(),
@@ -683,7 +706,7 @@ fn install_or_update(
         // (A current component recorded exactly these files: nothing here.)
         if let Some(old) = recorded.get(&c.name) {
             for p in &old.privileged {
-                if !c.files.iter().any(|f| &f.dest == p) {
+                if !files.iter().any(|f| &f.dest == p) {
                     remove_files.insert(p.clone());
                 }
             }
@@ -695,6 +718,22 @@ fn install_or_update(
             plan.summary.updated.push(c.name.clone());
         } else {
             plan.summary.installed.push(c.name.clone());
+        }
+    }
+
+    // The grants the summary names: those the release carries a rule for,
+    // whose state is new on this device or differs from the record's. The
+    // record says "declined" for a declined one and holds the rule's content
+    // identity for a granted one; a rule it does not mention is new.
+    let before = recorded.get(&inv.core.name);
+    for g in Grant::ALL {
+        if !inv.core.files.iter().any(|f| f.dest == g.rule_path()) {
+            continue;
+        }
+        let allowed = !declined.contains(&g);
+        let was = before.and_then(|r| r.identity.get(g.rule_path())).map(|id| id != DECLINED);
+        if was != Some(allowed) {
+            plan.summary.grants.push((g, allowed));
         }
     }
 
@@ -761,7 +800,7 @@ fn install_or_update(
         if let Some(p) = shipped(l) {
             let current = !reinstall
                 && dev.packs.contains(&id)
-                && is_current(&recorded, &BTreeMap::new(), &id, &p.version, &BTreeMap::new());
+                && is_current(&recorded, &BTreeMap::new(), &id, &p.version, &[], &BTreeMap::new());
             if current {
                 plan.summary.up_to_date.push(id.clone());
             } else {
@@ -1192,7 +1231,7 @@ pub(crate) mod tests {
     }
 
     fn install(plugins: &[&str], packs: &[&str], erase: &[&str]) -> Intent {
-        Intent::InstallOrUpdate { plugins: set(plugins), packs: set(packs), erase_data: set(erase), reinstall: false }
+        Intent::InstallOrUpdate { plugins: set(plugins), packs: set(packs), erase_data: set(erase), reinstall: false, declined: BTreeSet::new() }
     }
 
     fn declared_in(plan: &Plan) -> Vec<String> {
@@ -1565,7 +1604,7 @@ pub(crate) mod tests {
         let exec = "/usr/local/lib/ritornello/plugins/acme-widget";
         let device = dev(&[("radio", RADIO_EXEC), ("Acme_Widget", exec)], None, &[], &[]);
         let (plugins, packs) = preselection(&inv(), &device);
-        let plan = compute(&inv(), &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false })
+        let plan = compute(&inv(), &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false, declined: BTreeSet::new() })
             .expect("the preselection of a device with Acme_Widget plans");
         assert_eq!(plan.summary.kept_third_party, vec!["Acme_Widget"]);
         // Removed, it goes by its exec; its data, by name, is still refused.
@@ -1776,7 +1815,7 @@ pub(crate) mod tests {
         let device = dev(&[("radio", RADIO_EXEC), ("files", FILES_EXEC)], Some(files_registry()), &[], &[]);
         let (plugins, packs) = preselection(&inv(), &device);
         assert_eq!(plugins, set(&["radio", "files"]));
-        let plan = compute(&inv(), &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false }).unwrap();
+        let plan = compute(&inv(), &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false, declined: BTreeSet::new() }).unwrap();
         assert!(dests(&plan).contains(&MEDIA_HELPER));
     }
 
@@ -1803,7 +1842,7 @@ pub(crate) mod tests {
         assert_eq!(compute(&inv(), &device, &Intent::RemoveAll { erase_data: false }), refused);
         let (plugins, packs) = preselection(&inv(), &device);
         assert_eq!(
-            compute(&inv(), &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false }),
+            compute(&inv(), &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false, declined: BTreeSet::new() }),
             refused
         );
     }
@@ -1900,7 +1939,7 @@ privileged = [
         let device = the_pi(&real);
         let (plugins, packs) = preselection(&real, &device);
         assert!(plugins.contains("files"));
-        let plan = compute(&real, &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false })
+        let plan = compute(&real, &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false, declined: BTreeSet::new() })
             .expect("the Pi's registry plans");
 
         let moved = [MEDIA_UNIT, MEDIA_RULE, MEDIA_HELPER];
@@ -1955,7 +1994,7 @@ privileged = [
         let device = the_pi(&real);
         let (mut plugins, packs) = preselection(&real, &device);
         plugins.remove("files");
-        let plan = compute(&real, &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false })
+        let plan = compute(&real, &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false, declined: BTreeSet::new() })
             .expect("the Pi without files plans");
         for p in [MEDIA_UNIT, MEDIA_RULE, MEDIA_HELPER, FILES_EXEC] {
             assert!(has(&plan.remove_files, p), "{p}: {:?}", plan.remove_files);
@@ -2291,7 +2330,7 @@ privileged = [
         assert_eq!(preselection(&inv(), &dev(&[], None, &[], &[])), (BTreeSet::new(), BTreeSet::new()));
         // The preselection, fed back unchanged, is a valid choice.
         let (plugins, packs) = preselection(&inv(), &device);
-        let intent = Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false };
+        let intent = Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false, declined: BTreeSet::new() };
         assert!(compute(&inv(), &device, &intent).is_ok());
     }
 
@@ -2357,7 +2396,7 @@ privileged = [
         let plan = compute(
             &real,
             &dev(&[], None, &[], &[]),
-            &Intent::InstallOrUpdate { plugins: all, packs: langs, erase_data: BTreeSet::new(), reinstall: false },
+            &Intent::InstallOrUpdate { plugins: all, packs: langs, erase_data: BTreeSet::new(), reinstall: false, declined: BTreeSet::new() },
         )
         .expect("the real inventory plans on a fresh device");
         assert_eq!(declared_in(&plan), real.reference_order);
@@ -2423,7 +2462,7 @@ privileged = [
     }
 
     fn reinstall(plugins: &[&str], packs: &[&str]) -> Intent {
-        Intent::InstallOrUpdate { plugins: set(plugins), packs: set(packs), erase_data: BTreeSet::new(), reinstall: true }
+        Intent::InstallOrUpdate { plugins: set(plugins), packs: set(packs), erase_data: BTreeSet::new(), reinstall: true, declined: BTreeSet::new() }
     }
 
     /// The fixtures were written by `git checkout` with the platform's line
@@ -2510,7 +2549,7 @@ privileged = [
     /// The ordinary re-run, as `--keep` asks for it.
     pub(crate) fn keep(device: &DeviceState) -> Plan {
         let (plugins, packs) = preselection(&inv(), device);
-        compute(&inv(), device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false })
+        compute(&inv(), device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false, declined: BTreeSet::new() })
             .expect("the re-run plans")
     }
 
@@ -2524,6 +2563,200 @@ privileged = [
             && plan.remove_trees.is_empty()
             && plan.disable_units.is_empty()
             && plan.unmount_roots.is_empty()
+    }
+
+    // --- Declined system grants --------------------------------------------
+
+    const POWER_RULE: &str = "/etc/polkit-1/rules.d/50-ritornello-power.rules";
+
+    /// `inv()` with the power rule among the core's files, as the real
+    /// inventory carries it.
+    fn inv_with_power() -> Inventory {
+        let mut inv = inv();
+        inv.core.files.push(FileEntry {
+            archive_path: POWER_RULE.trim_start_matches('/').to_string(),
+            dest: POWER_RULE.to_string(),
+            mode: "0644".to_string(),
+            owner: "root:root".to_string(),
+            privileged: true,
+            identity: Some(test_identity(POWER_RULE)),
+        });
+        inv
+    }
+
+    /// A device on which `inv_with_power()` has just been placed in full.
+    fn device_with_power_placed() -> DeviceState {
+        let mut reg = current_registry();
+        let core = reg.components.get_mut(CORE).unwrap();
+        core.privileged.push(POWER_RULE.to_string());
+        core.identity.insert(POWER_RULE.to_string(), test_identity(POWER_RULE));
+        let mut device = current_device();
+        device.registry = Some(reg);
+        device
+    }
+
+    /// The keep-everything re-run of `inv_with_power()` with `declined`.
+    fn rerun(device: &DeviceState, declined: &[Grant]) -> Plan {
+        let (plugins, packs) = preselection(&inv(), device);
+        compute(
+            &inv_with_power(),
+            device,
+            &Intent::InstallOrUpdate {
+                plugins,
+                packs,
+                erase_data: BTreeSet::new(),
+                reinstall: false,
+                declined: declined.iter().copied().collect(),
+            },
+        )
+        .expect("the re-run plans")
+    }
+
+    #[test]
+    fn a_declined_power_grant_is_neither_placed_nor_listed_as_privileged() {
+        let intent = Intent::InstallOrUpdate {
+            plugins: set(&[]),
+            packs: set(&[]),
+            erase_data: BTreeSet::new(),
+            reinstall: false,
+            declined: BTreeSet::from([Grant::Power]),
+        };
+        let plan = compute(&inv_with_power(), &dev(&[], None, &[], &[]), &intent).unwrap();
+        assert!(plan.puts.iter().all(|p| p.dest != POWER_RULE), "the rule is not placed: {:?}", plan.puts);
+        assert!(plan.puts.iter().any(|p| p.dest == "/etc/systemd/system/ritornello.service"), "the rest is");
+        let core = &plan.registry.as_ref().unwrap().components[CORE];
+        assert!(!core.privileged.iter().any(|p| p == POWER_RULE), "{core:?}");
+        assert_eq!(core.identity[POWER_RULE], "declined");
+        assert_eq!(
+            core.identity["/etc/systemd/system/ritornello.service"],
+            test_identity("/etc/systemd/system/ritornello.service"),
+            "the other files keep their identity"
+        );
+    }
+
+    /// The time rule ships in the real inventory: declining `Timezone` drops
+    /// its put and records it `declined`, while the power rule is untouched.
+    #[test]
+    fn a_declined_timezone_grant_is_neither_placed_nor_listed_as_privileged() {
+        let time_rule = Grant::Timezone.rule_path();
+        let mut inv = inv_with_power();
+        inv.core.files.push(FileEntry {
+            archive_path: time_rule.trim_start_matches('/').to_string(),
+            dest: time_rule.to_string(),
+            mode: "0644".to_string(),
+            owner: "root:root".to_string(),
+            privileged: true,
+            identity: Some(test_identity(time_rule)),
+        });
+        let intent = Intent::InstallOrUpdate {
+            plugins: set(&[]),
+            packs: set(&[]),
+            erase_data: BTreeSet::new(),
+            reinstall: false,
+            declined: BTreeSet::from([Grant::Timezone]),
+        };
+        let plan = compute(&inv, &dev(&[], None, &[], &[]), &intent).unwrap();
+        assert!(plan.puts.iter().all(|p| p.dest != time_rule), "the rule is not placed: {:?}", plan.puts);
+        assert!(plan.puts.iter().any(|p| p.dest == POWER_RULE), "the power rule is");
+        let core = &plan.registry.as_ref().unwrap().components[CORE];
+        assert!(!core.privileged.iter().any(|p| p == time_rule), "{core:?}");
+        assert_eq!(core.identity[time_rule], "declined");
+        assert_eq!(core.identity[POWER_RULE], test_identity(POWER_RULE));
+    }
+
+    #[test]
+    fn a_declined_grant_the_release_does_not_carry_records_nothing() {
+        let intent = Intent::InstallOrUpdate {
+            plugins: set(&[]),
+            packs: set(&[]),
+            erase_data: BTreeSet::new(),
+            reinstall: false,
+            declined: BTreeSet::from([Grant::Timezone]),
+        };
+        let plan = compute(&inv_with_power(), &dev(&[], None, &[], &[]), &intent).unwrap();
+        let core = &plan.registry.as_ref().unwrap().components[CORE];
+        assert!(!core.identity.contains_key(Grant::Timezone.rule_path()), "{core:?}");
+        assert!(core.privileged.iter().any(|p| p == POWER_RULE), "the power rule is still placed");
+    }
+
+    #[test]
+    fn declining_a_grant_on_a_current_device_removes_the_rule() {
+        let device = device_with_power_placed();
+        let plan = rerun(&device, &[]);
+        assert!(plan.summary.up_to_date.iter().any(|n| n == CORE), "control: nothing declined, nothing to do");
+        let plan = rerun(&device, &[Grant::Power]);
+        assert!(!plan.summary.up_to_date.iter().any(|n| n == CORE), "{:?}", plan.summary);
+        assert!(plan.remove_files.iter().any(|p| p == POWER_RULE), "{:?}", plan.remove_files);
+        assert!(plan.puts.iter().all(|p| p.dest != POWER_RULE));
+    }
+
+    #[test]
+    fn granting_again_places_the_rule() {
+        let mut device = device_with_power_placed();
+        let core = device.registry.as_mut().unwrap().components.get_mut(CORE).unwrap();
+        core.privileged.retain(|p| p != POWER_RULE);
+        core.identity.insert(POWER_RULE.to_string(), "declined".to_string());
+        let plan = rerun(&device, &[]);
+        assert!(plan.puts.iter().any(|p| p.dest == POWER_RULE), "{:?}", plan.puts);
+        let core = &plan.registry.as_ref().unwrap().components[CORE];
+        assert_eq!(core.identity[POWER_RULE], test_identity(POWER_RULE));
+        assert!(core.privileged.iter().any(|p| p == POWER_RULE));
+    }
+
+    #[test]
+    fn an_unchanged_declined_choice_keeps_the_core_current() {
+        let mut device = device_with_power_placed();
+        let core = device.registry.as_mut().unwrap().components.get_mut(CORE).unwrap();
+        core.privileged.retain(|p| p != POWER_RULE);
+        core.identity.insert(POWER_RULE.to_string(), "declined".to_string());
+        let plan = rerun(&device, &[Grant::Power]);
+        assert!(plan.summary.up_to_date.iter().any(|n| n == CORE), "{:?}", plan.summary);
+        assert!(plan.puts.iter().all(|p| p.dest != POWER_RULE));
+        assert!(plan.remove_files.is_empty(), "{:?}", plan.remove_files);
+    }
+
+    /// The summary names a grant that is new or whose state changed, and only
+    /// a grant the release carries.
+    #[test]
+    fn the_summary_names_a_grant_only_when_new_or_changed() {
+        let fresh = |declined: &[Grant]| {
+            let intent = Intent::InstallOrUpdate {
+                plugins: set(&[]),
+                packs: set(&[]),
+                erase_data: BTreeSet::new(),
+                reinstall: false,
+                declined: declined.iter().copied().collect(),
+            };
+            compute(&inv_with_power(), &dev(&[], None, &[], &[]), &intent).unwrap().summary.grants
+        };
+        // New: said, and the timezone rule is not in this release.
+        assert_eq!(fresh(&[]), [(Grant::Power, true)]);
+        assert_eq!(fresh(&[Grant::Power, Grant::Timezone]), [(Grant::Power, false)]);
+
+        let placed = device_with_power_placed();
+        assert!(rerun(&placed, &[]).summary.grants.is_empty(), "granted and still granted");
+        assert_eq!(rerun(&placed, &[Grant::Power]).summary.grants, [(Grant::Power, false)]);
+
+        let mut declined = device_with_power_placed();
+        let core = declined.registry.as_mut().unwrap().components.get_mut(CORE).unwrap();
+        core.privileged.retain(|p| p != POWER_RULE);
+        core.identity.insert(POWER_RULE.to_string(), "declined".to_string());
+        assert!(rerun(&declined, &[Grant::Power]).summary.grants.is_empty(), "declined and still declined");
+        assert_eq!(rerun(&declined, &[]).summary.grants, [(Grant::Power, true)]);
+    }
+
+    /// A registry that records the rule as placed, against a run that now
+    /// declines it, is the changed choice above; this is the same record
+    /// read with the choice left to its default (granted): the core is
+    /// placed again, since the record says "declined".
+    #[test]
+    fn a_recorded_decline_with_nothing_declined_is_a_changed_choice() {
+        let mut device = device_with_power_placed();
+        let core = device.registry.as_mut().unwrap().components.get_mut(CORE).unwrap();
+        core.privileged.retain(|p| p != POWER_RULE);
+        core.identity.insert(POWER_RULE.to_string(), "declined".to_string());
+        let plan = rerun(&device, &[]);
+        assert!(!plan.summary.up_to_date.iter().any(|n| n == CORE));
     }
 
     /// A registry written before identities existed records the core at the
@@ -2630,7 +2863,7 @@ privileged = [
         radio.archive = "ritornello-plugin-radio-0.2.0-beta.3-{arch}.tar.gz".to_string();
         let device = current_device();
         let (plugins, packs) = preselection(&bumped, &device);
-        let plan = compute(&bumped, &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false })
+        let plan = compute(&bumped, &device, &Intent::InstallOrUpdate { plugins, packs, erase_data: BTreeSet::new(), reinstall: false, declined: BTreeSet::new() })
             .unwrap();
         assert_eq!(plan.archives, set(&["ritornello-plugin-radio-0.2.0-beta.3-arm64.tar.gz"]));
         assert_eq!(dests(&plan), vec![RADIO_EXEC]);
@@ -2697,7 +2930,7 @@ privileged = [
         let mut no_pack = current_device();
         no_pack.packs.clear();
         let (plugins, _) = preselection(&inv(), &no_pack);
-        let plan = compute(&inv(), &no_pack, &Intent::InstallOrUpdate { plugins, packs: set(&["fr"]), erase_data: BTreeSet::new(), reinstall: false })
+        let plan = compute(&inv(), &no_pack, &Intent::InstallOrUpdate { plugins, packs: set(&["fr"]), erase_data: BTreeSet::new(), reinstall: false, declined: BTreeSet::new() })
             .unwrap();
         assert_eq!(plan.summary.languages_placed, vec!["ritornello-lang-fr"]);
         assert_eq!(plan.packs.len(), 1);

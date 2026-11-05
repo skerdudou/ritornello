@@ -820,6 +820,15 @@ or each week that has not already run one, so a device that was off
 exactly at that hour still gets it once it comes back, rather than
 waiting for the next cycle.
 
+The hour is counted in the **device's** time zone, not the browser's, and a
+Raspberry Pi image often ships set to UTC. When the two zones' **names**
+differ (UTC's aliases count as one zone; two zones that happen to share an
+offset today still differ), a sentence under the hour input names the device's
+zone and the browser's, and converts the configured hour into the browser's
+time, instead of letting an owner believe "3" means 3 in the morning where
+they sit. The warning only informs: the hour is saved as typed, and the zone
+is changed from the [Time card](#time-card) of the System page.
+
 An automatic install only ever touches a component the device **already
 runs**: under no setting does it introduce a plugin or a language pack the
 device does not have, and the first three never touch a third-party
@@ -1632,10 +1641,14 @@ countries actually write and cannot be malformed. The separator belongs to the
 form rather than being a third setting: `2026-12-31` with slashes is read
 nowhere.
 
-**No timezone setting**, deliberately. A display runs *on* the appliance, so its
-clock is already the right one; the web page formats in the browser, so in the
-timezone of whoever is looking — which stays right for a phone that travels. A
-third setting could only contradict one of the two.
+**No timezone setting among these preferences**, deliberately. They govern how
+a time is *written*, not which time it is. A display runs *on* the appliance, so
+its clock is already the right one; the web page formats in the browser, so in
+the timezone of whoever is looking — which stays right for a phone that
+travels. A third preference could only contradict one of the two. The device's
+own zone, the one the displays and the automatic update's hour follow, is a
+different thing: it is a property of the machine, set from the [Time
+card](#time-card) of the System page and not stored in Ritornello's settings.
 
 They serve two consumers. The **displays** draw a clock in standby: the standby
 word keeps the first line, since it says *why* nothing is playing, and the time
@@ -1680,7 +1693,11 @@ set of keys stays stable:
   "version": "0.2.0", "can_power_off": true, "can_reboot": true,
   "logind_reachable": true,
   "cpu_total_jiffies": 9880976, "cpu_idle_jiffies": 9877777,
-  "under_voltage_acknowledged": false
+  "under_voltage_acknowledged": false,
+  "timezone": "Europe/Paris", "utc_offset_seconds": 3600,
+  "device_unix_s": 1793800000,
+  "timezone_settable": true, "timedated_reachable": true,
+  "timezone_polkit_answered": true
 }
 ```
 
@@ -1721,10 +1738,51 @@ effect at the next service start (see
 
 `logind_reachable` says whether that probe got an answer **at all**, and the
 page needs it to pick which sentence to show under the two disabled buttons.
-An answered "no" means the polkit rule is missing; no answer at all means
-logind itself is not there — a masked or unloadable `systemd-logind`, which
-no polkit rule will fix. The two look identical from the buttons alone, and
-naming the wrong one costs an evening.
+An answered "no" means the polkit rule is missing — declined at install — or
+that polkitd itself is missing: logind answers "no" in both cases and does
+not say which, so the sentence names both and points to
+[installation.md](installation.md#shutdown-and-reboot-from-the-web-ui). No
+answer at all means logind itself is not there — a masked or unloadable
+`systemd-logind`, which no polkit rule will fix. The two look identical from
+the buttons alone, and naming the wrong one costs an evening.
+
+`timezone` is the device's IANA zone, read at every poll from the
+`/etc/localtime` link (or `/etc/timezone` when that is a copied file), with no
+process spawned; `null` when nothing names it. `utc_offset_seconds` is its
+offset from UTC right now, in seconds east, obtained from the C library
+(`tzset` then `localtime_r`), so it is the offset of the moment and not of the
+zone's standard time. `device_unix_s` is the device's clock when the response
+was built: the page cannot learn it from its own `Date.now()`, and a clock that
+is wrong is worth showing.
+
+`timezone_settable`, `timedated_reachable` and `timezone_polkit_answered`
+follow the pattern of the power fields, and for the same reasons: a startup
+probe, cached for the process, and facts kept apart because they call for
+different repairs. `timedated_reachable` says whether `systemd-timedated`
+answered; `timezone_settable` is true only when it did **and** polkit says
+this process may call `set-timezone` (asked of polkit directly,
+`CheckAuthorization`, because the only other way to know would be to try a
+change). `timezone_polkit_answered` says whether polkit gave a readable yes
+or no at all. Unlike logind, polkit asked directly does tell its two "no"s
+apart: an answered "no" means the rule is not in place — the permission was
+declined when Ritornello was installed — while no answer (the call failed,
+timed out, or replied in a shape the core does not read) means polkitd is
+absent, as on DietPi by default, or was too slow to start; rerunning the
+installer would fix nothing then. No answer from timedated means it is absent
+or slow to start (it is bus-activated, so the first call starts it). Each
+call waits 3 s at most.
+
+`POST /api/system/timezone` takes `{"timezone": "Europe/Paris"}`. A name that
+is not a plausible zone name is refused with `422` before anything is spawned.
+Otherwise timedated's `SetTimezone` is called, non-interactively, and awaited
+up to 5 s (no route may block): `204` on success, `502` when it refuses — with
+timedated's or polkit's own message verbatim whenever it wrote one, as for the
+power actions, or a catalogue sentence otherwise. A `502` by timeout is not
+proof that nothing changed: the call already sent is not cancelled, so the
+zone may still apply, and the next `GET /api/system` shows what is really
+set. After a success the core re-reads the zone at once (`tzset`), and the
+automatic update's schedule and the console display's standby clock follow
+without a restart.
 
 `POST /api/system/power` takes `{"action": "poweroff" | "reboot" |
 "restart-service"}`. An unknown action is refused with `422` and a
@@ -1815,6 +1873,29 @@ dialog opens, never with the page.
   KB in practice and 5 MB at the very worst, whatever a plugin prints.
 - **What stays in journald only.** Lines older than the ring, and anything
   logged before a restart: the rings live in memory.
+
+### Time card
+
+Below the metrics, above the power card, the System page shows the device's
+time: its local time, the zone's name and its offset, drawn from
+`device_unix_s` and `utc_offset_seconds` so that it is the **device's** time,
+which is what the automatic update and the displays use, whatever the
+browser's. A picker lists the zones the browser knows, and a button picks the
+browser's own zone, for the owner who is sitting in the room the device is in.
+Choosing one posts it to `/api/system/timezone`; a refusal shows its message
+beside the card.
+
+The card is greyed, with a sentence, when it cannot work: one when timedated
+does not answer, one when polkit does not answer (check that polkitd is
+installed), and one when polkit answers "no", the permission having been
+declined at install time (`timedated_reachable`, `timezone_polkit_answered`,
+`timezone_settable`, judged in that order). The same distinction as the power
+buttons, for the same reason: only the last is repaired by running the
+installer again, the others by fixing the device, and naming the wrong one
+costs an evening. The shut-down and restart buttons grey the same way when
+logind refuses, with the sentence "not allowed when Ritornello was installed,
+or polkit is missing" for an answered "no" — logind does not tell the two
+apart — and the logind sentence above for no answer at all.
 
 ### Alerts
 
