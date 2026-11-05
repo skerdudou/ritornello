@@ -37,7 +37,7 @@ if [ "$stage" = all ] || [ "$stage" = installer ]; then
   echo "== installer =="
   # The `installer` job's Linux leg, the only one a Linux machine can run:
   # its Windows and macOS legs exist in CI alone. Needs musl-gcc
-  # (`apt install musl-tools`), which `ring` compiles its C with.
+  # (`apt install musl-tools`), which `aws-lc-sys` compiles its C with.
   t=x86_64-unknown-linux-musl
   rustup target add "$t"
   cargo clippy -p ritornello-install --target "$t" --all-targets -- -D warnings

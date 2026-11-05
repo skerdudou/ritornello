@@ -68,7 +68,9 @@ in a terminal, a screen also offers the choice.
 and a Debian-like system — GNU coreutils, util-linux and systemd; the exact
 list is under [Deploying](#deploying), and a busybox-only system is not
 supported. Debian, Raspberry Pi OS and DietPi qualify as installed. Nothing
-is compiled on the device.
+is compiled on the device. The device also needs the `ca-certificates`
+package (see [Certificates for HTTPS](#certificates-for-https)): the installer
+refuses to install or update without it.
 
 **On your computer**, an `ssh` client:
 
@@ -181,6 +183,15 @@ indistinguishably from a repository that has never released anything. A tag
 pushed, a green workflow and 37 attached archives are not evidence a device
 can reach any of it. If a device says nothing is published, look first at
 whether the release is still a draft.
+
+**The first release built with reqwest 0.13 must say, in its notes, that
+the device needs `ca-certificates`** (`sudo apt install ca-certificates`):
+from that release on, the core and the plugins trust the device's own
+certificate store, and a device updated from the page without it loses every
+HTTPS request, the update check included (see [Certificates for
+HTTPS](#certificates-for-https)). `scripts/release-notes-guard.sh` does not
+catch this — it watches units, polkit rules, the updater and the mount
+helper only — so reviewing the draft is where it is checked.
 
 Six different numbers are at play here, and they answer six different
 questions. The **product number** — `vX.Y.Z`, the git tag — names the
@@ -685,7 +696,7 @@ the initial tuning tools differ.
 
 On **Raspberry Pi OS Lite**:
 
-    sudo apt install mpv cd-discid eject cifs-utils
+    sudo apt install mpv cd-discid eject cifs-utils ca-certificates
     # analog jack as default output + hardware volume at maximum
     sudo raspi-config nonint do_audio 1
     amixer set PCM 100%
@@ -702,10 +713,13 @@ Wifi: `sudo raspi-config` (System Options > Wireless LAN).
 
 `cifs-utils` provides `mount.cifs`, which the `files` source needs to mount
 a network share; it is only useful if you intend to play files from a NAS
-(see [Network shares](#network-shares)).
+(see [Network shares](#network-shares)). `ca-certificates` is usually there
+already; it is named because nothing reaches HTTPS without it, and the
+installer refuses a device that lacks it (see [Certificates for
+HTTPS](#certificates-for-https)).
 
 On **DietPi**, one package more (`sudo apt install mpv cd-discid eject
-cifs-utils polkitd`), and three differences to know about:
+cifs-utils ca-certificates polkitd`), and three differences to know about:
 
 - polkit is **absent** on a DietPi image, where it is present on most other
   Debian-based systems — hence `polkitd` in the line above — **and
@@ -731,7 +745,7 @@ cifs-utils polkitd`), and three differences to know about:
 Same packages, minus the Pi-specific steps (no `raspi-config`, the audio
 output is picked directly through `/api/audio-output`):
 
-    sudo apt install mpv cd-discid eject cifs-utils
+    sudo apt install mpv cd-discid eject cifs-utils ca-certificates
 
 Configuration is provisioned by `ritornello-install` here too (see
 [Deploying](#deploying)). `deploy/deploy.sh` works identically:
@@ -782,6 +796,35 @@ What the device needs: the installer's script runs on the device under
 `systemctl`, `useradd`/`userdel`, and `sudo` when the account is not root.
 Debian and DietPi have all of them. A busybox-only system is not
 supported.
+
+### Certificates for HTTPS
+
+The core and the plugins that talk to the outside (radio-browser, Radio
+France, MusicBrainz, the lyrics, the updates) reach it through `reqwest` over
+`rustls` — no OpenSSL on the device — with the **aws-lc** crypto provider and
+**the device's own certificate store** (`rustls-platform-verifier`): no root
+certificates are compiled into the binaries any more, so a certificate
+authority the system trusts, or stops trusting, is followed by an ordinary
+`apt upgrade`. On Debian that store is `/etc/ssl/certs/ca-certificates.crt`,
+from the `ca-certificates` package. Without it **every** HTTPS request fails,
+so `ritornello-install`'s survey looks for that file, and when it is missing
+or empty, installing, updating and repairing through `ritornello-install` are
+refused — right after the first screen, before any version or download —
+with the command to run: `sudo apt install ca-certificates`. Removing
+everything is not refused for it.
+
+**Only `ritornello-install` checks.** The core and the plugins updating
+themselves from the web page do not: a device whose bundle is removed after
+installation, or a device updated from the page to the first release that
+carries this change without ever running the installer, loses every HTTPS
+request — radio-browser searches, metadata, covers, lyrics, and the update
+check itself, so the page cannot bring a fix either. The covers fail with a
+warning in the journal (`cover HTTP client could not be built`). The repair
+is on the device: `sudo apt install ca-certificates`, after which the next
+request works (the core's cover client is not cached while it fails). The
+lyrics plugin (lrclib) builds its client once at start and exits when it
+cannot, so restart the service after installing the package:
+`sudo systemctl restart ritornello`.
 
 ### The options
 
@@ -1428,6 +1471,39 @@ development machine, with a stand-in for `busctl`:
 - polkitd picking up the new rule file, or noticing its removal, without a
   restart. It watches `rules.d`, but here the service restart that follows
   is what has been relied on.
+
+**TLS through aws-lc and the system store has never run on a Pi.** Moving to
+reqwest 0.13 (see [Certificates for HTTPS](#certificates-for-https)) was built
+and tested on a development machine only:
+
+- the armv7 binaries were cross-compiled (`cross`, the whole workspace; the
+  core and the radio plugin about 0.7 MB larger each, the same shared
+  libraries needed, no newer glibc symbol), as was the release job's
+  x86_64-unknown-linux-gnu workspace and the aarch64-unknown-linux-gnu core,
+  but **aws-lc has never run on the armv7 device**: its handshakes there,
+  their speed on a Pi 2, and its start-up cost are unmeasured;
+- every `reqwest::Client::builder().build()` now loads and parses the whole
+  system store, synchronously, before the client exists. Several are built
+  per use — each radio directory search, each MusicBrainz request, each
+  web-streaming fetch, the core's update download client (the
+  `fetch_catalogue` route included) — so that read is paid each time; its
+  cost on a Pi 2 is unmeasured, and so is
+  whether it matters for a route that must not block;
+- **rustls-platform-verifier against DietPi's certificate store** — that it
+  finds `/etc/ssl/certs/ca-certificates.crt` from the unprivileged
+  `ritornello` service (under `ProtectSystem`) and accepts radio-browser,
+  Radio France, MusicBrainz, lrclib and GitHub — has not been observed;
+- the installer's refusal of a device without `ca-certificates` is tested
+  against a fixture root only, never against a device lacking the package;
+- the installer's Windows build relies on the prebuilt NASM objects
+  `aws-lc-sys` ships (its `prebuilt-nasm` feature, on by default through
+  rustls), never built on a Windows machine by hand, and that executable has
+  not been run against a device;
+- the core and the plugins updating themselves from the page to this
+  release on a device without `ca-certificates`: nothing refuses it there
+  (only `ritornello-install` checks), and its consequence — every HTTPS
+  request failing, lrclib exiting at start — has been read from the code,
+  not observed.
 
 **Nothing else has run on a Pi.** Installing, uninstalling and reordering a
 plugin, and updating the core itself, all rewrite

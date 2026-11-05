@@ -168,6 +168,10 @@ pub enum PlanError {
     EraseNotRemoved(String),
     UnknownArch(String),
     NoSystemd,
+    /// The device has no CA bundle (`DeviceState::ca_certificates`): what
+    /// would be installed could reach no HTTPS service. Removal is not
+    /// refused for it.
+    NoCaCertificates,
     /// The device's `plugins.toml` could not be rewritten, or a plugin the
     /// inventory ships carries no block to insert.
     PluginsToml(String),
@@ -231,6 +235,12 @@ impl std::fmt::Display for PlanError {
             Self::NoSystemd => {
                 write!(f, "this device does not run systemd, which Ritornello needs: install on a Linux that runs systemd")
             }
+            Self::NoCaCertificates => write!(
+                f,
+                "this device has no CA certificates ({} is missing or empty), without which Ritornello \
+                 reaches no HTTPS service: run `sudo apt install ca-certificates` on the device, then run again",
+                crate::device::CA_BUNDLE
+            ),
             Self::PluginsToml(d) => write!(
                 f,
                 "{} cannot be rewritten ({d}): fix the file by hand, then run again",
@@ -290,6 +300,9 @@ pub fn compute(inv: &Inventory, dev: &DeviceState, intent: &Intent) -> Result<Pl
     match intent {
         Intent::RemoveAll { erase_data } => remove_all(inv, dev, *erase_data),
         Intent::InstallOrUpdate { plugins, packs, erase_data, reinstall, declined } => {
+            if !dev.ca_certificates {
+                return Err(PlanError::NoCaCertificates);
+            }
             install_or_update(inv, dev, arch, plugins, packs, erase_data, *reinstall, declined)
         }
     }
@@ -1204,6 +1217,7 @@ pub(crate) mod tests {
             packs: packs.iter().map(|p| p.to_string()).collect(),
             data_nonempty: data.iter().map(|d| d.to_string()).collect(),
             user_exists: installed,
+            ca_certificates: true,
         }
     }
 
@@ -2316,6 +2330,32 @@ privileged = [
         );
     }
 
+    /// Everything installed verifies its HTTPS peers against the system
+    /// store: with no CA bundle, an install or an update — a reinstall too —
+    /// is refused, while removing what is there still goes ahead.
+    ///
+    /// **[MUTATION]**: drop the check from `compute` — the install cases
+    /// fail; move it before the `match` — the removal case fails.
+    #[test]
+    fn a_device_without_ca_certificates_is_refused_an_install_not_a_removal() {
+        let mut fresh = dev(&[], None, &[], &[]);
+        fresh.ca_certificates = false;
+        assert_eq!(compute(&inv(), &fresh, &install(&[], &[], &[])), Err(PlanError::NoCaCertificates));
+        let mut installed = full_device();
+        installed.ca_certificates = false;
+        for reinstall in [false, true] {
+            let intent = Intent::InstallOrUpdate {
+                plugins: set(&["radio"]),
+                packs: BTreeSet::new(),
+                erase_data: BTreeSet::new(),
+                reinstall,
+                declined: BTreeSet::new(),
+            };
+            assert_eq!(compute(&inv(), &installed, &intent), Err(PlanError::NoCaCertificates), "reinstall {reinstall}");
+        }
+        assert!(compute(&inv(), &installed, &Intent::RemoveAll { erase_data: false }).is_ok());
+    }
+
     // --- 17 --------------------------------------------------------------
 
     #[test]
@@ -3129,6 +3169,14 @@ privileged = [
     #[test]
     fn no_systemd_says_what_is_needed() {
         says(PlanError::NoSystemd, &["systemd", "a Linux that runs systemd"]);
+    }
+
+    #[test]
+    fn no_ca_certificates_says_what_to_install() {
+        says(
+            PlanError::NoCaCertificates,
+            &["/etc/ssl/certs/ca-certificates.crt", "HTTPS", "`sudo apt install ca-certificates`"],
+        );
     }
 
     #[test]

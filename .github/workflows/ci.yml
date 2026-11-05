@@ -303,6 +303,14 @@ jobs:
     # upload; only `publish-installer`, on an installer tag, turns the archives into release
     # assets. Needs nothing: the crate embeds no web UI.
     runs-on: ${{ matrix.os }}
+    # No NASM on the Windows runner, and none needed: aws-lc-sys (under
+    # rustls, reqwest 0.13's default provider) assembles with NASM on x86_64
+    # Windows, but rustls's `aws_lc_rs` feature turns on aws-lc-sys's
+    # `prebuilt-nasm`, so without NASM the crate links the NASM objects it
+    # ships (its README, "Use of prebuilt NASM objects"; its own CI checks
+    # them against a fresh assembly). Those objects are third-party binaries
+    # in the installer people download; installing NASM here would make the
+    # build assemble them from source instead.
     strategy:
       fail-fast: false
       matrix:
@@ -338,7 +346,7 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - name: musl toolchain
-        # `ring`, under rustls, compiles C: it needs musl-gcc for these targets.
+        # `aws-lc-sys`, under rustls, compiles C: it needs musl-gcc for these targets.
         if: runner.os == 'Linux'
         # No apt cache here, unlike the test jobs: this leg builds the
         # installer people download.

@@ -36,7 +36,7 @@ ritornello-i18n = { path = "../ritornello-i18n" }
 # are the files plugin's, and exist once. Never the helper binary.
 ritornello-files-mount = { path = "../ritornello-files-mount" }
 libc = "0.2"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 # The plugin installs a yt-dlp no release of ours shipped: its signed list of
 # sums is checked with yt-dlp's own key (no gpgv on the device), and the
 # zipapp is unpacked here. Pure Rust, no compression format but deflate.

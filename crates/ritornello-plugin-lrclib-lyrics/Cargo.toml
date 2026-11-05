@@ -34,7 +34,8 @@ tracing-subscriber = "0.3"
 async-trait = "0.1"
 # No `json` feature: the body is read as text and parsed by `parse_record` /
 # `parse_search`, so a malformed answer is told apart from a transport error.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# `query`: `RequestBuilder::query` sits behind a feature since reqwest 0.13.
+reqwest = { version = "0.13", default-features = false, features = ["query", "rustls"] }
 # Cache file names: a stable hash of the key. `DefaultHasher` is not stable
 # across toolchains, and a renamed entry would be orphaned on disk. Same
 # version as the core's, so Cargo.lock gains no second copy.

@@ -301,7 +301,14 @@ request — the last three jobs below only on a tag:
   only): clippy, the tests of `ritornello-install` alone, a release build,
   and its archive uploaded as an artifact; `installer-ok` ("Installer (all
   targets)") is the single check that stands for the five, meant to be
-  required by branch protection;
+  required by branch protection. `aws-lc-sys` (rustls's crypto provider)
+  compiles C there, with `musl-gcc` on the Linux legs. On x86_64 Windows it
+  also needs assembly, and building there (the runner, or natively on a
+  Windows machine) needs nothing extra: without NASM installed, aws-lc-sys
+  links the prebuilt NASM objects it ships, which rustls turns on by default
+  (its `prebuilt-nasm` feature). Worth knowing for the supply chain: the
+  Windows installer therefore carries those third-party prebuilt objects,
+  unless NASM is installed and assembles them from source;
 - `publish-installer` — on an `installer-vX.Y.Z` tag only (the installer's own
   number, not the product's): refuses a tag that disagrees with
   `crates/ritornello-install/Cargo.toml`, then publishes the numbered release
