@@ -303,16 +303,14 @@ jobs:
     # upload; only `publish-installer`, on an installer tag, turns the archives into release
     # assets. Needs nothing: the crate embeds no web UI.
     runs-on: ${{ matrix.os }}
-    env:
-      # aws-lc-sys (under rustls, reqwest 0.13's default provider) assembles
-      # with NASM on x86_64 Windows, and the runner has none. Its README
-      # (0.47.0, "Use of prebuilt NASM objects"): without NASM the build fails
-      # unless "the `AWS_LC_SYS_PREBUILT_NASM` environment variable is found
-      # and has a value of "1"", which selects the NASM objects the crate
-      # ships, checked by its own CI against a fresh assembly. Cheaper than
-      # installing NASM on every run; read on x86_64 Windows only, so the
-      # other legs ignore it. A NASM present on the runner is preferred.
-      AWS_LC_SYS_PREBUILT_NASM: 1
+    # No NASM on the Windows runner, and none needed: aws-lc-sys (under
+    # rustls, reqwest 0.13's default provider) assembles with NASM on x86_64
+    # Windows, but rustls's `aws_lc_rs` feature turns on aws-lc-sys's
+    # `prebuilt-nasm`, so without NASM the crate links the NASM objects it
+    # ships (its README, "Use of prebuilt NASM objects"; its own CI checks
+    # them against a fresh assembly). Those objects are third-party binaries
+    # in the installer people download; installing NASM here would make the
+    # build assemble them from source instead.
     strategy:
       fail-fast: false
       matrix:
