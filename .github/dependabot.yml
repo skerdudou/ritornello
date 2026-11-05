@@ -47,6 +47,16 @@ updates:
       cargo-minor-and-patch:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+    ignore:
+      # `rand` is only a dev-dependency of the web-streaming plugin, where its
+      # `StdRng` is handed to `pgp` to generate the tests' signing key. `pgp`
+      # 0.21.0 (the newest release on 2026-11-05) depends on `rand ^0.8.6`, so
+      # the generator must implement `rand_core` 0.6's traits: a `rand` 0.10
+      # `StdRng` does not, and the crate stops compiling (seen on PR #126).
+      # Lift this once a `pgp` release moves to a newer `rand`, and bump the
+      # two together.
+      - dependency-name: rand
+        versions: [">= 0.9"]
 
   # -- npm --------------------------------------------------------------------
   # One `package-lock.json` at the root covers all eight manifests (the
