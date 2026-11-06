@@ -321,6 +321,37 @@ fn on_disk(w: &World) -> Option<JobsView> {
 }
 
 #[tokio::test]
+async fn clearing_forgets_the_jobs_that_are_over_and_never_one_queued_or_running() {
+    // Each job waits at its resolver for a permit: two are let through, the
+    // third is running (held there) and the fourth queued behind it.
+    let gate = Arc::new(tokio::sync::Semaphore::new(2));
+    let g = gate.clone();
+    let resolver: Resolver = Arc::new(move |_| {
+        let g = g.clone();
+        Box::pin(async move {
+            g.acquire().await.unwrap().forget();
+            Err(TargetError::NotMounted)
+        })
+    });
+    let w = world_with("", Some(resolver));
+    let ids: Vec<JobId> = (0..4).map(|_| w.jobs.enqueue(vec![1], target())).collect();
+    finished(&w, ids[1]).await;
+    until(&w, ids[2], "started", |j| j.state == JobState::Running).await;
+
+    w.jobs.clear_finished();
+    let left: Vec<JobId> = w.jobs.view().lock().unwrap().jobs.iter().map(|j| j.id).collect();
+    assert_eq!(left, [ids[2], ids[3]]);
+    let started = Instant::now();
+    while on_disk(&w).is_none_or(|v| v.jobs.len() != 2) {
+        assert!(started.elapsed() < Duration::from_secs(10), "jobs.json still holds the jobs cleared: {:?}", on_disk(&w));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // The ones kept still run to their end.
+    gate.add_permits(2);
+    assert!(finished(&w, ids[3]).await.state.is_over());
+}
+
+#[tokio::test]
 async fn an_unfinished_job_is_never_dropped_however_long_the_queue() {
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
     let g = gate.clone();

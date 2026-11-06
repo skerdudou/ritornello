@@ -531,7 +531,7 @@ async fn a_failed_entry_does_not_stop_the_job() {
     // Files: in the playlist's own folder, numbered; none for the failure.
     let folder = s.resolved.dir.join("Popular Music Videos");
     let files = files_in(&folder);
-    assert_eq!(files.len(), 12, "11 audio files and the cover: {files:?}");
+    assert_eq!(files.len(), 23, "11 audio files, each with its own picture, and the folder's cover: {files:?}");
     assert!(files.contains(&"cover.jpg".to_string()));
     assert!(files.iter().any(|f| f.starts_with("01 - ") && f.ends_with(".m4a")));
     assert!(!files.iter().any(|f| f.starts_with("02 - ")), "{files:?}");
@@ -545,8 +545,11 @@ async fn the_cover_is_the_probes_jpg_written_as_cover_jpg_in_the_playlist_folder
     let s = setup(&fixture_path("playlist.json"), "", Some(JPEG.to_vec()));
     run(&s, &playlist_entry(), &Cancel::new()).await;
     let calls = s.calls.lock().unwrap().clone();
-    assert_eq!(calls.len(), 1);
+    let probe = crate::ytdlp::parse_probe(&std::fs::read_to_string(fixture_path("playlist.json")).unwrap()).unwrap();
+    // The folder's first, then each track's own.
+    assert_eq!(calls[0], probe.thumbnail_jpg.unwrap());
     assert!(calls[0].starts_with("https://") && calls[0].contains(".jpg"), "{calls:?}");
+    assert_eq!(calls.len(), 1 + probe.entries.len(), "{calls:?}");
     assert_eq!(std::fs::read(s.resolved.dir.join("Popular Music Videos/cover.jpg")).unwrap(), JPEG);
     // No temporary file left beside it.
     assert!(!files_in(&s.resolved.dir.join("Popular Music Videos")).iter().any(|f| f.contains(".tmp.")));
@@ -717,13 +720,30 @@ async fn a_cover_that_cannot_be_embedded_goes_beside_the_file() {
 }
 
 #[tokio::test]
-async fn a_playlist_keeps_its_cover_jpg_whatever_the_cover_choice() {
-    for mode in [CoverMode::Embedded, CoverMode::Separate] {
-        let s = setup(&fixture_path("playlist.json"), "", Some(JPEG.to_vec()));
-        run_choosing(&s, &playlist_entry(), &choosing(Format::Original, mode), &Cancel::new()).await;
-        let files = files_in(&s.resolved.dir.join("Popular Music Videos"));
-        assert_eq!(files.iter().filter(|f| f.ends_with(".jpg")).collect::<Vec<_>>(), ["cover.jpg"], "{mode:?}: {files:?}");
+async fn each_track_of_a_playlist_gets_its_own_thumbnail_as_chosen_and_the_folder_its_cover() {
+    // The regression: a playlist's tracks had no picture of their own, only
+    // the folder's `cover.jpg`, whatever the operator chose.
+    let probe = crate::ytdlp::parse_probe(&std::fs::read_to_string(fixture_path("playlist.json")).unwrap()).unwrap();
+    let own: Vec<String> = probe.entries.iter().map(|v| v.thumbnail_jpg.clone().unwrap()).collect();
+    let s = setup(&fixture_path("playlist.json"), "", Some(JPEG.to_vec()));
+    run_choosing(&s, &playlist_entry(), &choosing(Format::Original, CoverMode::Separate), &Cancel::new()).await;
+    let folder = s.resolved.dir.join("Popular Music Videos");
+    let files = files_in(&folder);
+    assert!(files.contains(&"cover.jpg".to_string()), "{files:?}");
+    let tracks: Vec<&String> = files.iter().filter(|f| f.ends_with(".m4a")).collect();
+    assert_eq!(tracks.len(), probe.entries.len());
+    for t in tracks {
+        let picture = folder.join(t.replace(".m4a", ".jpg"));
+        assert_eq!(std::fs::read(&picture).unwrap(), JPEG, "{}", picture.display());
     }
+    // Each track's picture is fetched from its own entry's thumbnail, in order.
+    assert_eq!(s.calls.lock().unwrap()[1..], own[..]);
+
+    // Into the file: tried for each track (the fake's m4a takes none, so each
+    // one says its picture went beside it).
+    let s = setup(&fixture_path("playlist.json"), "", Some(JPEG.to_vec()));
+    let (_, events) = run_choosing(&s, &playlist_entry(), &choosing(Format::Original, CoverMode::Embedded), &Cancel::new()).await;
+    assert_eq!(notes(&events), vec![Note::CoverBeside; probe.entries.len()]);
 }
 
 // ---- the names typed --------------------------------------------------------

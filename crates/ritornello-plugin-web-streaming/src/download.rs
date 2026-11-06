@@ -46,10 +46,13 @@
 //! **The cover is fetched here**, from the `jpg` the probe named, with
 //! timeouts, through the network guard (`netguard.rs`: never the local
 //! network, every redirect judged again). A playlist's is written as
-//! `cover.jpg` in its folder, replacing the previous one. A single video's is
-//! the track's own, never the folder's: written into the file with `lofty`
-//! (m4a, mp3, opus, ogg) or, as the operator chose or when the container
-//! takes none (webm), beside it as `<stem>.jpg`, never over an existing one.
+//! `cover.jpg` in its folder, replacing the previous one. Each track's — a
+//! single video's, or each video's of a playlist — is its own thumbnail,
+//! never the folder's: written into the file with `lofty` (m4a, mp3, opus,
+//! ogg) or, as the operator chose or when the container takes none (webm),
+//! beside it as `<stem>.jpg`, never over an existing one. `files` reads a
+//! track's own picture before the folder's, so each track of a playlist
+//! shows its own and the folder keeps a face of its own.
 //! A missing or failed cover is never a failure of the download.
 //!
 //! **A spawn is a process group**, and cancelling or running out of time kills
@@ -295,7 +298,7 @@ impl Format {
     }
 }
 
-/// Where a single video's cover goes.
+/// Where each track's own cover goes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CoverMode {
@@ -615,8 +618,8 @@ async fn convert(ctx: &Ctx, ffmpeg: &Path, dir: &Path, stem: &str, from: &str, f
     }
 }
 
-/// A single video's cover: into the file, or beside it as `<stem>.jpg`,
-/// never over an existing one. What did not go as asked is said.
+/// A track's own cover: into the file, or beside it as `<stem>.jpg`, never
+/// over an existing one. What did not go as asked is said.
 async fn place_track_cover(ctx: &Ctx, dir: &Path, stem: &str, ext: &str, mode: CoverMode, url: Option<&str>) -> Vec<Note> {
     let Some(url) = url else { return Vec::new() };
     let mut notes = Vec::new();
@@ -861,8 +864,8 @@ async fn outputs(ctx: &Ctx, dir: &Path, stem: &str) -> Option<std::collections::
     blocking(ctx.limits.fs, move || outputs_of(&dir, &stem)).await.ok()
 }
 
-/// What follows a download that went through: the conversion asked, then a
-/// single video's cover. `Err(())` is a cancel.
+/// What follows a download that went through: the conversion asked, then the
+/// track's own cover. `Err(())` is a cancel.
 #[allow(clippy::too_many_arguments)]
 async fn finish_video(
     ctx: &Ctx,
@@ -968,9 +971,13 @@ pub async fn download_preset(
     if playlist {
         place_cover(ctx, &dir, probe.thumbnail_jpg.as_deref()).await;
     }
-    // A single video's cover is its own: never the folder's `cover.jpg`,
-    // which every other track of the folder would then show.
-    let track_cover = (!playlist).then_some(probe.thumbnail_jpg.as_deref()).flatten();
+    // Each track's cover is its own thumbnail, never the folder's
+    // `cover.jpg`: every other track of the folder would then show it. A
+    // playlist's entries carry theirs, and `plan` keeps their order, one line
+    // per entry.
+    let track_cover = |i: usize| {
+        if playlist { probe.entries.get(i).and_then(|v| v.thumbnail_jpg.as_deref()) } else { probe.thumbnail_jpg.as_deref() }
+    };
 
     for (i, p) in planned.iter().enumerate() {
         let Action::Download { stem, url } = &p.action else { continue };
@@ -1011,7 +1018,7 @@ pub async fn download_preset(
             return PresetEnd::ShareLost(why);
         }
         if state == VideoState::Done
-            && finish_video(ctx, &dir, stem, before, choices, track_cover, cancel, i, sink).await.is_err()
+            && finish_video(ctx, &dir, stem, before, choices, track_cover(i), cancel, i, sink).await.is_err()
         {
             sink(Event::Ended(i, VideoState::Cancelled));
             return PresetEnd::Cancelled;

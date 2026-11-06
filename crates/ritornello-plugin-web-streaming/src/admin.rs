@@ -88,6 +88,8 @@ enum Op {
         names: BTreeMap<String, String>,
     },
     Cancel { job: u64 },
+    /// Forgets the downloads that are over; those queued or running stay.
+    ClearJobs,
     /// `force` takes a release the rollback guard refused.
     UpdateTool {
         #[serde(default)]
@@ -450,6 +452,10 @@ impl AdminPlugin for WebStreamingAdmin {
             Op::Cancel { job } => {
                 // A job that ended a moment ago is not an error.
                 self.jobs.cancel(job);
+                Ok(())
+            }
+            Op::ClearJobs => {
+                self.jobs.clear_finished();
                 Ok(())
             }
             Op::UpdateTool { force } => {

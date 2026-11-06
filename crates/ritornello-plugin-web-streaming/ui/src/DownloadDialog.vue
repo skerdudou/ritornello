@@ -63,7 +63,13 @@ const listed = computed(() => {
   return l.names
 })
 
-const hasVideo = computed(() => props.items.some((i) => i.kind === 'video'))
+/**
+ * Two steps: where (the share and the folder), then how (format, cover,
+ * names). Browsing and choosing are apart, each with the room it needs.
+ */
+const step = ref<'where' | 'options'>('where')
+
+const hasPlaylist = computed(() => props.items.some((i) => i.kind === 'playlist'))
 
 function look(): void {
   newName.value = ''
@@ -71,7 +77,7 @@ function look(): void {
   emit('list', current.value)
 }
 
-// Opened: the last target when its share is still offered, else the first
+// Opened: on the first step, at the last target when its share is still offered, else the first
 // share. `lastTarget` only ever names a share that is in `targets` (the
 // plugin drops it otherwise), but the page does not rely on that alone. The
 // format and cover are the last ones (mp3 only while ffmpeg is there), the
@@ -80,6 +86,7 @@ watch(
   () => props.open,
   (open) => {
     if (!open) return
+    step.value = 'where'
     format.value = props.lastFormat === 'mp3' && !props.ffmpeg ? 'original' : props.lastFormat
     cover.value = props.lastCover
     names.value = Object.fromEntries(props.items.map((i) => [String(i.preset), props.defaultNames[String(i.preset)] ?? '']))
@@ -149,6 +156,7 @@ function confirm(): void {
 }
 
 const FORMATS: Format[] = ['original', 'm4a', 'mp3']
+const COVERS: CoverMode[] = ['embedded', 'separate']
 
 function formatLabel(f: Format): string {
   switch (f) {
@@ -167,70 +175,110 @@ function formatLabel(f: Format): string {
     <DialogContent class="sm:max-w-lg">
       <DialogHeader>
         <DialogTitle>{{ t('dlg_download_title') }}</DialogTitle>
-        <DialogDescription>{{ t('dlg_download_desc') }}</DialogDescription>
+        <DialogDescription data-step :data-step-name="step">
+          {{ step === 'where' ? t('dlg_step_where') : t('dlg_step_options') }}
+        </DialogDescription>
       </DialogHeader>
 
-      <div class="max-h-[70vh] space-y-3 overflow-y-auto">
-        <div class="flex flex-wrap items-center gap-2">
-          <span class="text-sm text-muted-foreground">{{ t('share_label') }}</span>
-          <Button
-            v-for="name in targets"
-            :key="name"
-            size="sm"
-            :variant="name === root ? 'default' : 'outline'"
-            :data-share="name"
-            @click="chooseShare(name)"
-          >
-            {{ name }}
-          </Button>
-        </div>
+      <!-- Step 1: where. The share, then one framed browser — the path on
+           top, the folders, and the new folder at its foot — so that what
+           is being browsed reads as one block, apart from everything else. -->
+      <div v-if="step === 'where'" class="max-h-[65vh] space-y-4 overflow-y-auto" data-step-where>
+        <section class="space-y-2">
+          <h3 class="text-sm font-medium">{{ t('share_label') }}</h3>
+          <div class="flex flex-wrap gap-2">
+            <Button
+              v-for="name in targets"
+              :key="name"
+              size="sm"
+              :variant="name === root ? 'default' : 'outline'"
+              :aria-pressed="name === root"
+              :data-share="name"
+              @click="chooseShare(name)"
+            >
+              {{ name }}
+            </Button>
+          </div>
+        </section>
 
-        <div class="flex items-center gap-2 text-sm">
-          <Button variant="ghost" size="sm" data-up :disabled="!path.length" @click="up">
-            ↑ {{ t('btn_up') }}
-          </Button>
-          <span class="min-w-0 truncate text-muted-foreground" data-where :title="targetText(current)">
+        <section class="space-y-2">
+          <h3 class="text-sm font-medium">{{ t('folders_label') }}</h3>
+          <div class="overflow-hidden rounded-md border">
+            <div class="flex items-center gap-2 border-b bg-muted/50 px-2 py-1.5 text-sm">
+              <Button
+                variant="ghost"
+                size="sm"
+                data-up
+                :disabled="!path.length"
+                :title="t('btn_up')"
+                :aria-label="t('btn_up')"
+                @click="up"
+              >
+                ↑
+              </Button>
+              <span class="min-w-0 truncate font-medium" data-where :title="targetText(current)">
+                {{ path.length ? targetText(current) : `${root} — ${t('folder_top')}` }}
+              </span>
+            </div>
+
+            <div class="max-h-56 min-h-24 overflow-y-auto p-1">
+              <p v-if="explore.error" class="p-2 text-sm text-destructive" role="alert" data-explore-error>
+                {{ faultText(t, explore.error) }}
+              </p>
+              <p v-else-if="listed === null" class="p-2 text-sm text-muted-foreground" role="status">{{ t('loading') }}</p>
+              <p v-else-if="!listed.length" class="p-2 text-sm text-muted-foreground">{{ t('no_folders') }}</p>
+              <ul v-else class="space-y-0.5">
+                <li v-for="n in listed" :key="n">
+                  <Button variant="ghost" size="sm" class="w-full justify-start" :data-dir="n" @click="descend(n)">
+                    <span aria-hidden="true">📁</span>
+                    <span class="truncate">{{ n }}</span>
+                  </Button>
+                </li>
+              </ul>
+            </div>
+
+            <div class="flex items-center gap-2 border-t p-2">
+              <Input
+                v-model="newName"
+                class="flex-1"
+                data-new-folder
+                :placeholder="t('new_folder_placeholder')"
+                @keydown.enter="create"
+              />
+              <Button variant="secondary" data-create-folder :disabled="!newName.trim() || explore.busy" @click="create">
+                {{ t('btn_new_folder') }}
+              </Button>
+            </div>
+          </div>
+          <!-- Always shown, one line: a folder with a `$` is not offered, and
+               the operator who made one by hand elsewhere would look for it
+               here. -->
+          <p class="text-xs text-muted-foreground" data-dollar-note>{{ t('dollar_note') }}</p>
+        </section>
+      </div>
+
+      <!-- Step 2: how. The destination stays in sight, one click from being
+           changed; each choice has its label above its buttons, which share
+           the width equally instead of wrapping one by one. -->
+      <div v-else class="max-h-[65vh] space-y-4 overflow-y-auto" data-step-options>
+        <div class="flex items-center gap-2 rounded-md border bg-muted/50 px-3 py-2 text-sm">
+          <span class="text-muted-foreground">{{ t('destination_label') }}</span>
+          <span class="min-w-0 flex-1 truncate font-medium" data-destination :title="targetText(current)">
             {{ path.length ? targetText(current) : `${root} — ${t('folder_top')}` }}
           </span>
+          <Button variant="ghost" size="sm" data-change-target @click="step = 'where'">{{ t('btn_change') }}</Button>
         </div>
 
-        <p v-if="explore.error" class="text-sm text-destructive" role="alert" data-explore-error>
-          {{ faultText(t, explore.error) }}
-        </p>
-        <p v-else-if="listed === null" class="text-sm text-muted-foreground" role="status">{{ t('loading') }}</p>
-        <p v-else-if="!listed.length" class="text-sm text-muted-foreground">{{ t('no_folders') }}</p>
-        <ul v-else class="max-h-56 space-y-1 overflow-y-auto">
-          <li v-for="n in listed" :key="n">
-            <Button variant="ghost" size="sm" class="w-full justify-start" :data-dir="n" @click="descend(n)">
-              {{ n }}
-            </Button>
-          </li>
-        </ul>
-        <!-- Always shown, one line: a folder with a `$` is not offered, and the
-             operator who made one by hand elsewhere would look for it here. -->
-        <p class="text-xs text-muted-foreground" data-dollar-note>{{ t('dollar_note') }}</p>
-
-        <div class="flex items-center gap-2">
-          <Input
-            v-model="newName"
-            class="flex-1"
-            data-new-folder
-            :placeholder="t('new_folder_placeholder')"
-            @keydown.enter="create"
-          />
-          <Button variant="secondary" data-create-folder :disabled="!newName.trim() || explore.busy" @click="create">
-            {{ t('btn_new_folder') }}
-          </Button>
-        </div>
-
-        <div class="space-y-1">
-          <div class="flex flex-wrap items-center gap-2">
-            <span class="text-sm text-muted-foreground">{{ t('format_label') }}</span>
+        <section class="space-y-2">
+          <h3 class="text-sm font-medium">{{ t('format_label') }}</h3>
+          <div class="grid grid-cols-3 gap-2">
             <Button
               v-for="f in FORMATS"
               :key="f"
               size="sm"
+              class="w-full"
               :variant="f === format ? 'default' : 'outline'"
+              :aria-pressed="f === format"
               :data-format="f"
               :disabled="f === 'mp3' && !ffmpeg"
               @click="format = f"
@@ -242,32 +290,33 @@ function formatLabel(f: Format): string {
           <p v-if="!ffmpeg" class="text-xs text-muted-foreground" data-mp3-unavailable>
             {{ t('format_mp3_unavailable', { command: ffmpegHint ?? '' }) }}
           </p>
-        </div>
+        </section>
 
-        <div v-if="hasVideo" class="flex flex-wrap items-center gap-2" data-cover-choice>
-          <span class="text-sm text-muted-foreground">{{ t('cover_label') }}</span>
-          <Button
-            size="sm"
-            :variant="cover === 'embedded' ? 'default' : 'outline'"
-            data-cover="embedded"
-            @click="cover = 'embedded'"
-          >
-            {{ t('cover_embedded') }}
-          </Button>
-          <Button
-            size="sm"
-            :variant="cover === 'separate' ? 'default' : 'outline'"
-            data-cover="separate"
-            @click="cover = 'separate'"
-          >
-            {{ t('cover_separate') }}
-          </Button>
-        </div>
+        <section class="space-y-2" data-cover-choice>
+          <h3 class="text-sm font-medium">{{ t('cover_label') }}</h3>
+          <div class="grid grid-cols-2 gap-2">
+            <Button
+              v-for="c in COVERS"
+              :key="c"
+              size="sm"
+              class="w-full"
+              :variant="cover === c ? 'default' : 'outline'"
+              :aria-pressed="cover === c"
+              :data-cover="c"
+              @click="cover = c"
+            >
+              {{ c === 'embedded' ? t('cover_embedded') : t('cover_separate') }}
+            </Button>
+          </div>
+          <p class="text-xs text-muted-foreground" data-cover-help>
+            {{ hasPlaylist ? t('cover_help_playlist') : t('cover_help') }}
+          </p>
+        </section>
 
-        <div v-if="items.length" class="space-y-2">
-          <span class="text-sm text-muted-foreground">{{ t('names_label') }}</span>
+        <section v-if="items.length" class="space-y-2">
+          <h3 class="text-sm font-medium">{{ t('names_label') }}</h3>
           <label v-for="i in items" :key="i.preset" class="block space-y-1 text-sm">
-            <span class="block truncate">{{ i.title }}</span>
+            <span class="block truncate text-muted-foreground">{{ i.title }}</span>
             <Input
               v-model="names[String(i.preset)]"
               :data-name="i.preset"
@@ -275,14 +324,20 @@ function formatLabel(f: Format): string {
               :title="i.kind === 'video' ? t('name_video_hint') : t('name_playlist_hint')"
             />
           </label>
-        </div>
+        </section>
+      </div>
 
-        <div class="flex justify-end gap-2">
+      <div class="flex justify-end gap-2">
+        <template v-if="step === 'where'">
           <Button variant="ghost" data-cancel @click="emit('update:open', false)">{{ t('btn_cancel') }}</Button>
+          <Button data-next :disabled="!root" @click="step = 'options'">{{ t('btn_next') }}</Button>
+        </template>
+        <template v-else>
+          <Button variant="ghost" data-back @click="step = 'where'">{{ t('btn_back') }}</Button>
           <Button data-download-here :disabled="!root" @click="confirm">
             {{ t('btn_download_here') }}
           </Button>
-        </div>
+        </template>
       </div>
     </DialogContent>
   </Dialog>

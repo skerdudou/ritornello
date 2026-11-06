@@ -189,6 +189,7 @@ describe('WebStreamingAdmin', () => {
     expect(s.putsOf('list_dirs')).toEqual([{ op: 'list_dirs', target: { root: 'nas', path: 'rock' } }])
     expect(inDialog('[data-share="nas"]')).not.toBeNull()
     expect(inDialog('[data-share="other"]')).not.toBeNull()
+    await clickDialog('[data-next]')
     await clickDialog('[data-download-here]')
 
     expect(s.putsOf('download')).toEqual([
@@ -286,6 +287,7 @@ describe('WebStreamingAdmin', () => {
     await w.find('[data-entry-select]').setValue(true)
     await w.find('[data-download]').trigger('click')
     await flushPromises()
+    await clickDialog('[data-next]')
     // The last format is the one chosen: its help says so.
     expect(inDialog('[data-format-help]')!.textContent).toContain(CATALOG.format_m4a_help)
     expect((inDialog('[data-format="mp3"]') as HTMLButtonElement).disabled).toBe(false)
@@ -301,25 +303,72 @@ describe('WebStreamingAdmin', () => {
     await w.find('[data-entry-select]').setValue(true)
     await w.find('[data-download]').trigger('click')
     await flushPromises()
+    await clickDialog('[data-next]')
     expect((inDialog('[data-format="mp3"]') as HTMLButtonElement).disabled).toBe(true)
     expect(inDialog('[data-mp3-unavailable]')!.textContent).toContain('sudo apt install ffmpeg')
     await clickDialog('[data-download-here]')
     expect(s.putsOf('download')[0]).toMatchObject({ format: 'original' })
   })
 
-  it('asks where a video\'s cover goes only when a video is selected', async () => {
-    const { w } = await mountAdmin({ entries: [list(1), video(2)], targets: ['nas'] })
+  it('asks where each track\'s cover goes, for a playlist too, and says what the folder gets', async () => {
+    // The regression: a playlist alone was not asked, its tracks got no
+    // picture of their own.
+    const { w, s } = await mountAdmin({ entries: [list(1), video(2)], targets: ['nas'], last_cover: 'separate' })
     await w.findAll('[data-entry-select]')[0]!.setValue(true)
     await w.find('[data-download]').trigger('click')
     await flushPromises()
-    expect(inDialog('[data-cover-choice]'), 'a playlist keeps its cover.jpg').toBeNull()
+    await clickDialog('[data-next]')
+    expect(inDialog('[data-cover-help]')!.textContent).toContain(CATALOG.cover_help_playlist)
+    await clickDialog('[data-cover="embedded"]')
+    expect(inDialog('[data-cover="embedded"]')!.getAttribute('aria-pressed')).toBe('true')
+    await clickDialog('[data-download-here]')
+    expect(s.putsOf('download')[0]).toMatchObject({ presets: [1], cover: 'embedded' })
     cleanup()
     const again = await mountAdmin({ entries: [list(1), video(2)], targets: ['nas'] })
     await again.w.findAll('[data-entry-select]')[1]!.setValue(true)
     await again.w.find('[data-download]').trigger('click')
     await flushPromises()
-    expect(inDialog('[data-cover="embedded"]')).not.toBeNull()
-    expect(inDialog('[data-cover="separate"]')).not.toBeNull()
+    await clickDialog('[data-next]')
+    expect(inDialog('[data-cover-help]')!.textContent).toContain(CATALOG.cover_help)
+    expect(inDialog('[data-cover-help]')!.textContent).not.toContain('cover.jpg')
+  })
+
+  it('separates where from how: two steps, the destination in sight, nothing lost going back', async () => {
+    const { w, s } = await mountAdmin({
+      entries: [video(1)],
+      targets: ['nas', 'other'],
+      last_target: { root: 'nas', path: 'rock' },
+    })
+    await w.find('[data-entry-select]').setValue(true)
+    await w.find('[data-download]').trigger('click')
+    await flushPromises()
+    // Step 1: the browser, no option, no download yet.
+    expect(inDialog('[data-step-where]')).not.toBeNull()
+    expect(inDialog('[data-format="m4a"]')).toBeNull()
+    expect(inDialog('[data-download-here]')).toBeNull()
+    expect(inDialog('[data-step]')!.textContent).toContain(CATALOG.dlg_step_where)
+
+    await clickDialog('[data-next]')
+    expect(inDialog('[data-step-where]')).toBeNull()
+    expect(inDialog('[data-destination]')!.textContent).toContain('nas/rock')
+    await clickDialog('[data-format="m4a"]')
+    // Back to the folders, another share, and forward again: the format stays.
+    await clickDialog('[data-change-target]')
+    await clickDialog('[data-share="other"]')
+    await clickDialog('[data-next]')
+    expect(inDialog('[data-destination]')!.textContent).toContain('other')
+    expect(inDialog('[data-format="m4a"]')!.getAttribute('aria-pressed')).toBe('true')
+    await clickDialog('[data-back]')
+    expect(inDialog('[data-step-where]')).not.toBeNull()
+    await clickDialog('[data-next]')
+    await clickDialog('[data-download-here]')
+    expect(s.putsOf('download')[0]).toMatchObject({ target: { root: 'other', path: '' }, format: 'm4a' })
+
+    // Opened again: on the first step.
+    await w.find('[data-entry-select]').setValue(true)
+    await w.find('[data-download]').trigger('click')
+    await flushPromises()
+    expect(inDialog('[data-step-where]')).not.toBeNull()
   })
 
   it('prefills each name with the plugin\'s and sends what was typed', async () => {
@@ -333,6 +382,7 @@ describe('WebStreamingAdmin', () => {
     await w.findAll('[data-entry-select]')[1]!.setValue(true)
     await w.find('[data-download]').trigger('click')
     await flushPromises()
+    await clickDialog('[data-next]')
     expect((inDialog('[data-name="1"]') as HTMLInputElement).value).toBe('Me at the zoo_')
     expect((inDialog('[data-name="2"]') as HTMLInputElement).placeholder).toBe(CATALOG.name_playlist_hint)
     await typeDialog('[data-name="1"]', 'Zoo, first video')
@@ -402,7 +452,9 @@ describe('WebStreamingAdmin', () => {
     expect(rows[2]).toContain('unavailable')
     expect(rows[5]).toContain('Preset 9')
     expect(rows[5]).toContain('no such preset')
-    expect(rows[3]).toContain('42%')
+    // The space is there: a lone leading space in a `<template>` once
+    // vanished at compile time, and "running42%" was shown.
+    expect(rows[3]).toContain(`${CATALOG.state_running} 42%`)
     expect(rows[4]).toContain('cancelled')
     expect(w.find('[data-job]').text()).toContain('Download 7 to nas/rock')
     await w.find('[data-job-cancel]').trigger('click')
@@ -415,6 +467,34 @@ describe('WebStreamingAdmin', () => {
     })
     expect(w.find('[data-job-cancel]').exists()).toBe(false)
     expect(w.find('[data-job]').text()).toContain('this share is not mounted')
+  })
+
+  it('clears the downloads that are over, and offers it only when there is one', async () => {
+    const at = { root: 'nas', path: '' }
+    const { w, s } = await mountAdmin({
+      jobs: [{ id: 1, presets: [1], target: at, state: 'running', rows: [] }],
+    })
+    expect(w.find('[data-jobs-clear]').exists(), 'nothing over: nothing to clear').toBe(false)
+    s.data.jobs = [
+      { id: 1, presets: [1], target: at, state: 'running', rows: [] },
+      { id: 2, presets: [1], target: at, state: 'done', rows: [] },
+    ]
+    await w.find('[data-save]').trigger('click') // any send reads again
+    await flushPromises()
+    s.onPut = (p) => {
+      if (p.op === 'clear_jobs') s.data.jobs = s.data.jobs.filter((j) => j.state === 'running')
+    }
+    await w.find('[data-jobs-clear]').trigger('click')
+    await flushPromises()
+    expect(s.putsOf('clear_jobs')).toEqual([{ op: 'clear_jobs' }])
+    expect(w.findAll('[data-job]')).toHaveLength(1)
+    expect(w.find('[data-jobs-clear]').exists()).toBe(false)
+  })
+
+  it('shows the downloads right under the presets, where a download is started', async () => {
+    const { w } = await mountAdmin({ entries: [video(1)] })
+    const titles = w.findAll('[data-slot="card-title"]').map((c) => c.text())
+    expect(titles.slice(0, 2)).toEqual([CATALOG.entries_title, CATALOG.jobs_title])
   })
 
   // ---- polling --------------------------------------------------------------
