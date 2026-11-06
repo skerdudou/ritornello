@@ -28,8 +28,9 @@ mod ssh;
 #[cfg(all(test, unix))]
 mod test_exec;
 mod ui;
+mod wizard;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use std::process::ExitCode;
 
@@ -165,10 +166,10 @@ fn read_releases(args: &Args) -> anyhow::Result<Option<source::GitHub>> {
     Ok(Some(github))
 }
 
-/// The source, with its version: `--from-dir`, or a GitHub release — the
-/// one `--version` names, the one the version screen picks when `ask`, or
-/// the default. `github` is what `read_releases` read.
-fn open_source(args: &Args, github: Option<source::GitHub>, ask: bool) -> anyhow::Result<Box<dyn Source>> {
+/// The source: `--from-dir`, or a GitHub release — the one `--version`
+/// names, or the default; the version screen (`wizard`) may select another.
+/// `github` is what `read_releases` read.
+fn open_source(args: &Args, github: Option<source::GitHub>) -> anyhow::Result<Box<dyn Source>> {
     if let Some(dir) = &args.from_dir {
         anyhow::ensure!(
             args.version.is_none(),
@@ -176,38 +177,7 @@ fn open_source(args: &Args, github: Option<source::GitHub>, ask: bool) -> anyhow
         );
         return Ok(Box::new(source::LocalDir::new(dir.clone())));
     }
-    let mut github = github.expect("`read_releases` reads the list whenever --from-dir is absent");
-    if ask && args.version.is_none() {
-        let default = github.tag().to_string();
-        let tag = ui::ask_version(github.releases(), &default)?;
-        github.select(&tag)?;
-    }
-    Ok(Box::new(github))
-}
-
-/// Steps 5 to 7, or the total removal's one question.
-///
-/// `declined_by_args` is `--grants` when it was given: it answers the
-/// permissions question, which is then not asked.
-fn ask_intent(
-    inv: &Inventory,
-    dev: &DeviceState,
-    action: Action,
-    declined_by_args: Option<BTreeSet<grants::Grant>>,
-) -> anyhow::Result<Intent> {
-    if action == Action::RemoveAll {
-        return Ok(Intent::RemoveAll { erase_data: ui::ask_erase_all()? });
-    }
-    let (installed_plugins, installed_packs) = plan::preselection(inv, dev);
-    let plugins = ui::ask_plugins(&ui::plugin_choices(inv, dev), &installed_plugins)?;
-    let packs = ui::ask_packs(&ui::pack_choices(inv, &installed_packs), &installed_packs)?;
-    let declined = match declined_by_args {
-        Some(declined) => declined,
-        None => ui::ask_grants(&grants::recorded_declined(dev.registry.as_ref()))?,
-    };
-    let candidates = ui::data_choices(&cli::removed_by(inv, dev, &plugins), dev);
-    let erase_data = if candidates.is_empty() { BTreeSet::new() } else { ui::ask_erase(&candidates)? };
-    Ok(Intent::InstallOrUpdate { plugins, packs, erase_data, reinstall: action == Action::Repair, declined })
+    Ok(Box::new(github.expect("`read_releases` reads the list whenever --from-dir is absent")))
 }
 
 /// Asks for the sudo password and proves it, three tries at most. Every
@@ -273,50 +243,51 @@ fn run(args: &Args) -> anyhow::Result<()> {
         );
     }
 
-    // 3. What to do, on a device that has Ritornello, when the arguments
-    // do not say.
-    // `--reinstall` has already said which: the repair.
+    let device = Device { target: &target, control: &control, host: &host, sudo: dev.sudo, terminal };
+    let mut source = open_source(args, github)?;
     let interactive = terminal && !args.names_an_intent();
-    let action = if args.reinstall {
-        Action::Repair
-    } else if interactive && ui::offers_remove_all(&dev) {
-        ui::ask_action()?
-    } else {
-        Action::InstallOrUpdate
-    };
-    check_ca_certificates(&dev, action, args.remove_all)?;
-
-    // 4 and 5. The source, its version, its inventory. A total removal
-    // does not ask for a version: it removes what the registry and the
-    // newest inventory know.
-    let mut source = open_source(args, github, interactive && action != Action::RemoveAll)?;
-    eprintln!("Reading the inventory of {}...", source.label());
-    let inv = Inventory::parse(&source.inventory()?)?;
-
-    // 6. What the operator wants.
-    let intent = match cli::intent_from_args(args, &dev, &inv)? {
-        Some(intent) => intent,
-        None if terminal => ask_intent(&inv, &dev, action, cli::declined_from_args(args)?)?,
-        None => bail!(Missing::Intent),
-    };
-
-    // 7. The plan: a refusal is said in one sentence, and nothing is sent.
-    let plan = plan::compute(&inv, &dev, &intent).map_err(|e| anyhow!("{e} (nothing was sent to the device)"))?;
-
-    // 8 to 11.
-    let source_label = source.label();
-    let outcome = {
-        let mut live = Live {
-            target: &target,
-            control: &control,
-            host: &host,
-            sudo: dev.sudo,
-            terminal,
-            source: source.as_mut(),
-            product: &inv.product,
-            source_label: &source_label,
+    let (plan, outcome) = if interactive {
+        // 3 to 6 on the screens (`wizard`), Esc going back one, and 7 to
+        // 11 below; Esc at the confirmation returns to the last question.
+        // A total removal does not ask for a version: it removes what the
+        // registry and the newest inventory know. `--reinstall` has already
+        // said which action: the repair.
+        let action = if args.reinstall {
+            Some(Action::Repair)
+        } else if ui::offers_remove_all(&dev) {
+            None
+        } else {
+            Some(Action::InstallOrUpdate)
         };
-        carry_out(&plan, args.yes, &mut live)?
+        if let Some(action) = action {
+            check_ca_certificates(&dev, action, false)?;
+        }
+        let initial = source.versions().map(|(_, tag)| tag.to_string());
+        let ask_version = args.version.is_none() && initial.is_some();
+        let mut wizard = wizard::Wizard::new(&dev, action, ask_version, cli::declined_from_args(args)?);
+        eprintln!("{}", ui::BACK_HINT);
+        loop {
+            let intent =
+                wizard.ask(&mut wizard::Terminal { source: source.as_mut(), initial: initial.as_deref() })?;
+            let plan = compute(wizard.inventory(), &dev, &intent)?;
+            let outcome = device.carry_out(&plan, args.yes, wizard.can_go_back(), source.as_mut(), wizard.inventory())?;
+            if outcome != Outcome::Back {
+                break (plan, outcome);
+            }
+            wizard.back_from_confirmation();
+        }
+    } else {
+        // 3. The action, from the arguments alone.
+        let action = if args.reinstall { Action::Repair } else { Action::InstallOrUpdate };
+        check_ca_certificates(&dev, action, args.remove_all)?;
+        // 4 to 6. The inventory of the source's version, and what the
+        // arguments want.
+        eprintln!("Reading the inventory of {}...", source.label());
+        let inv = Inventory::parse(&source.inventory()?)?;
+        let Some(intent) = cli::intent_from_args(args, &dev, &inv)? else { bail!(Missing::Intent) };
+        let plan = compute(&inv, &dev, &intent)?;
+        let outcome = device.carry_out(&plan, args.yes, false, source.as_mut(), &inv)?;
+        (plan, outcome)
     };
     // Ends the shared ssh connection now rather than at the end of `main`.
     // Off Unix there is no shared connection and `ControlDir` has no `Drop`,
@@ -327,7 +298,7 @@ fn run(args: &Args) -> anyhow::Result<()> {
 
     // 12. The report.
     match outcome {
-        Outcome::Declined => {}
+        Outcome::Declined | Outcome::Back => {}
         Outcome::UpToDate => println!("The web interface: {}", web_address(&host)),
         Outcome::Applied => {
             eprintln!("Done on {host}:");
@@ -350,7 +321,40 @@ enum Outcome {
     UpToDate,
     /// The operator said no at the confirmation.
     Declined,
+    /// Esc at the confirmation, with a question to return to: nothing was
+    /// fetched or sent, and the questions resume at the last one.
+    Back,
     Applied,
+}
+
+/// 7. The plan: a refusal is said in one sentence, and nothing is sent.
+fn compute(inv: &Inventory, dev: &DeviceState, intent: &Intent) -> anyhow::Result<plan::Plan> {
+    plan::compute(inv, dev, intent).map_err(|e| anyhow!("{e} (nothing was sent to the device)"))
+}
+
+/// The device the run acts on, as steps 8 to 11 need it.
+struct Device<'a> {
+    target: &'a ssh::Target,
+    control: &'a ssh::ControlDir,
+    host: &'a str,
+    sudo: Sudo,
+    terminal: bool,
+}
+
+impl Device<'_> {
+    /// Steps 8 to 11 against the real terminal, release and device.
+    fn carry_out(
+        &self,
+        plan: &plan::Plan,
+        yes: bool,
+        can_go_back: bool,
+        source: &mut dyn Source,
+        inv: &Inventory,
+    ) -> anyhow::Result<Outcome> {
+        let source_label = source.label();
+        let mut live = Live { device: self, source, product: &inv.product, source_label: &source_label };
+        carry_out(plan, yes, can_go_back, &mut live)
+    }
 }
 
 /// What steps 8 to 11 do to the world, one method each, so that
@@ -361,7 +365,8 @@ trait Steps {
     fn say_up_to_date(&mut self, plan: &plan::Plan);
     /// Whether the device can be asked to apply anything (`check_sudo`).
     fn check_can_apply(&mut self) -> anyhow::Result<()>;
-    fn confirm(&mut self) -> anyhow::Result<bool>;
+    /// `None` is Esc; `back` says whether there is a question to return to.
+    fn confirm(&mut self, back: bool) -> anyhow::Result<Option<bool>>;
     fn sudo_password(&mut self) -> anyhow::Result<Option<String>>;
     fn archive(&mut self, name: &str) -> anyhow::Result<Vec<u8>>;
     fn apply(&mut self, bundle: &[u8], password: Option<&str>) -> anyhow::Result<()>;
@@ -374,7 +379,11 @@ trait Steps {
 /// already up to date is not asked for a password, sends no download
 /// request, and its radio is not stopped for a run that would change
 /// nothing.
-fn carry_out(plan: &plan::Plan, yes: bool, steps: &mut impl Steps) -> anyhow::Result<Outcome> {
+///
+/// Esc at the confirmation returns `Outcome::Back` when `can_go_back`, before
+/// any password, download or apply; without a question to return to, the
+/// confirmation is asked again.
+fn carry_out(plan: &plan::Plan, yes: bool, can_go_back: bool, steps: &mut impl Steps) -> anyhow::Result<Outcome> {
     if plan.nothing_to_do {
         steps.say_up_to_date(plan);
         return Ok(Outcome::UpToDate);
@@ -383,9 +392,18 @@ fn carry_out(plan: &plan::Plan, yes: bool, steps: &mut impl Steps) -> anyhow::Re
 
     // 8. The summary, and its confirmation.
     steps.show_summary(plan);
-    if !yes && !steps.confirm()? {
-        eprintln!("Nothing was changed.");
-        return Ok(Outcome::Declined);
+    if !yes {
+        loop {
+            match steps.confirm(can_go_back)? {
+                Some(true) => break,
+                Some(false) => {
+                    eprintln!("Nothing was changed.");
+                    return Ok(Outcome::Declined);
+                }
+                None if can_go_back => return Ok(Outcome::Back),
+                None => {}
+            }
+        }
     }
 
     // 9. The sudo password, the last question.
@@ -408,11 +426,7 @@ fn carry_out(plan: &plan::Plan, yes: bool, steps: &mut impl Steps) -> anyhow::Re
 
 /// The real steps: the terminal, the release, the device.
 struct Live<'a> {
-    target: &'a ssh::Target,
-    control: &'a ssh::ControlDir,
-    host: &'a str,
-    sudo: Sudo,
-    terminal: bool,
+    device: &'a Device<'a>,
     source: &'a mut dyn Source,
     product: &'a str,
     source_label: &'a str,
@@ -420,27 +434,28 @@ struct Live<'a> {
 
 impl Steps for Live<'_> {
     fn show_summary(&mut self, plan: &plan::Plan) {
-        ui::show_summary(plan, self.product, self.source_label, self.host);
+        ui::show_summary(plan, self.product, self.source_label, self.device.host);
     }
 
     fn say_up_to_date(&mut self, plan: &plan::Plan) {
-        eprintln!("{}", ui::up_to_date_line(self.host, self.product, self.source_label));
+        eprintln!("{}", ui::up_to_date_line(self.device.host, self.product, self.source_label));
         for line in ui::summary_lines(plan) {
             eprintln!("{line}");
         }
     }
 
     fn check_can_apply(&mut self) -> anyhow::Result<()> {
-        check_sudo(self.sudo, self.terminal)
+        check_sudo(self.device.sudo, self.device.terminal)
     }
 
-    fn confirm(&mut self) -> anyhow::Result<bool> {
-        ui::confirm()
+    fn confirm(&mut self, back: bool) -> anyhow::Result<Option<bool>> {
+        ui::confirm(back)
     }
 
     fn sudo_password(&mut self) -> anyhow::Result<Option<String>> {
-        match self.sudo {
-            Sudo::Password => Ok(Some(sudo_password(self.target, self.control, self.host)?)),
+        let d = self.device;
+        match d.sudo {
+            Sudo::Password => Ok(Some(sudo_password(d.target, d.control, d.host)?)),
             Sudo::NotNeeded | Sudo::NoPassword | Sudo::Absent => Ok(None),
         }
     }
@@ -450,13 +465,16 @@ impl Steps for Live<'_> {
     }
 
     fn apply(&mut self, bundle: &[u8], password: Option<&str>) -> anyhow::Result<()> {
-        eprintln!("Applying on {}...", self.host);
-        ssh::apply(self.target, self.control, self.sudo, password, bundle)
+        let d = self.device;
+        eprintln!("Applying on {}...", d.host);
+        ssh::apply(d.target, d.control, d.sudo, password, bundle)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     #[test]
@@ -516,6 +534,9 @@ mod tests {
         calls: Vec<String>,
         /// What `check_can_apply` answers: `check_sudo` for this device.
         sudo: Option<(Sudo, bool)>,
+        /// What the confirmation answers, in order; `Some(true)` once these
+        /// run out.
+        confirmations: Vec<Option<bool>>,
     }
 
     impl Steps for Recorder {
@@ -532,9 +553,9 @@ mod tests {
                 None => Ok(()),
             }
         }
-        fn confirm(&mut self) -> anyhow::Result<bool> {
-            self.calls.push("confirm".into());
-            Ok(true)
+        fn confirm(&mut self, back: bool) -> anyhow::Result<Option<bool>> {
+            self.calls.push(if back { "confirm or back" } else { "confirm" }.into());
+            Ok(if self.confirmations.is_empty() { Some(true) } else { self.confirmations.remove(0) })
         }
         fn sudo_password(&mut self) -> anyhow::Result<Option<String>> {
             self.calls.push("sudo".into());
@@ -583,14 +604,14 @@ mod tests {
 
         let plan = plan::compute(&inv(), &device, &keep).unwrap();
         let mut steps = Recorder::default();
-        assert_eq!(carry_out(&plan, false, &mut steps).unwrap(), Outcome::UpToDate);
+        assert_eq!(carry_out(&plan, false, false, &mut steps).unwrap(), Outcome::UpToDate);
         assert_eq!(steps.calls, ["up to date"]);
 
         let mut moved = device.clone();
         moved.registry.as_mut().unwrap().components.get_mut("radio").unwrap().version = "0.2.0-beta.1".into();
         let plan = plan::compute(&inv(), &moved, &keep).unwrap();
         let mut steps = Recorder::default();
-        assert_eq!(carry_out(&plan, false, &mut steps).unwrap(), Outcome::Applied);
+        assert_eq!(carry_out(&plan, false, false, &mut steps).unwrap(), Outcome::Applied);
         assert_eq!(
             steps.calls,
             ["check", "summary", "confirm", "sudo", "fetch ritornello-plugin-radio-0.2.0-beta.2-arm64.tar.gz", "apply"]
@@ -611,7 +632,7 @@ mod tests {
         let up_to_date = p::keep(&p::current_device());
         assert!(up_to_date.nothing_to_do);
         let mut steps = Recorder { sudo: Some((Sudo::Password, false)), ..Recorder::default() };
-        assert_eq!(carry_out(&up_to_date, true, &mut steps).unwrap(), Outcome::UpToDate);
+        assert_eq!(carry_out(&up_to_date, true, false, &mut steps).unwrap(), Outcome::UpToDate);
         assert_eq!(steps.calls, ["up to date"]);
 
         let mut behind = p::current_device();
@@ -619,7 +640,7 @@ mod tests {
         let plan = p::keep(&behind);
         for sudo in [Sudo::Password, Sudo::Absent] {
             let mut steps = Recorder { sudo: Some((sudo, false)), ..Recorder::default() };
-            let err = carry_out(&plan, true, &mut steps).unwrap_err();
+            let err = carry_out(&plan, true, false, &mut steps).unwrap_err();
             assert_eq!(steps.calls, ["check"], "{sudo:?}: {err}");
         }
         let err = check_sudo(Sudo::Password, false).unwrap_err();
@@ -628,6 +649,28 @@ mod tests {
         // needs none.
         assert!(check_sudo(Sudo::Password, true).is_ok());
         assert!(check_sudo(Sudo::NoPassword, false).is_ok() && check_sudo(Sudo::NotNeeded, false).is_ok());
+    }
+
+    /// Esc at the confirmation goes back to the questions before anything
+    /// is asked, fetched or applied; with no question to return to, it is
+    /// asked again rather than taken for a "yes" or a "no".
+    ///
+    /// **[MUTATION]**: drop the `None if can_go_back` arm, or let `None`
+    /// break out of the loop — this test fails.
+    #[test]
+    fn esc_at_the_confirmation_goes_back_before_anything_is_sent() {
+        use crate::plan::tests as p;
+        let mut behind = p::current_device();
+        behind.registry.as_mut().unwrap().components.get_mut("radio").unwrap().version = "0.2.0-beta.1".into();
+        let plan = p::keep(&behind);
+
+        let mut steps = Recorder { confirmations: vec![None], ..Recorder::default() };
+        assert_eq!(carry_out(&plan, false, true, &mut steps).unwrap(), Outcome::Back);
+        assert_eq!(steps.calls, ["check", "summary", "confirm or back"]);
+
+        let mut steps = Recorder { confirmations: vec![None, Some(false)], ..Recorder::default() };
+        assert_eq!(carry_out(&plan, false, false, &mut steps).unwrap(), Outcome::Declined);
+        assert_eq!(steps.calls, ["check", "summary", "confirm", "confirm"]);
     }
 
     /// A device without a CA bundle is refused an install, an update or a

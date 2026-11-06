@@ -103,8 +103,10 @@ pub fn summary_lines(plan: &Plan) -> Vec<String> {
     section("languages removed", &summary.languages_removed);
     section("left as they are (third-party)", &summary.kept_third_party);
     section("already up to date", &summary.up_to_date);
-    for (grant, allowed) in &summary.grants {
-        lines.push(format!("  {}: {}", if *allowed { "allowed" } else { "not allowed" }, grant.effect()));
+    for g in &summary.grants {
+        let state = if g.allowed { "allowed" } else { "not allowed" };
+        let unchanged = if g.changed { "" } else { " (unchanged)" };
+        lines.push(format!("  {state}{unchanged}: {}", g.grant.effect()));
     }
     if plan.remove_trees.iter().any(|t| t == DATA_TREE) {
         lines.push(format!("  ALL DATA ERASED: the whole of {DATA_TREE}, every setting and every plugin's data"));
@@ -168,15 +170,25 @@ pub fn offers_remove_all(dev: &DeviceState) -> bool {
     dev.core_present || !dev.declared.is_empty() || dev.registry.is_some() || !dev.packs.is_empty() || dev.user_exists
 }
 
-/// Step 3, on a device that has something of Ritornello's.
-pub fn ask_action() -> anyhow::Result<Action> {
+/// Said once, before the first question of an interactive run.
+///
+/// Every screen from here to the confirmation answers `None` when the
+/// operator presses Esc (or `q`, which `dialoguer` reads the same way): the
+/// run then asks the previous question again, its answer kept (`wizard`).
+/// Enter after a checklist went on before the operator meant to, and only
+/// the confirmation, much later, could undo it — by starting over.
+pub const BACK_HINT: &str = "Esc goes back to the previous question; every answer is kept.";
+
+/// Step 3, on a device that has something of Ritornello's. `None`: back.
+pub fn ask_action(default: Action) -> anyhow::Result<Option<Action>> {
+    let at = ACTIONS.iter().position(|(_, a)| *a == default).unwrap_or(0);
     let i = Select::new()
         .with_prompt("Ritornello is, or was, on this device")
         .items(ACTIONS.map(|(label, _)| label))
-        .default(0)
-        .interact()
+        .default(at)
+        .interact_opt()
         .context("asking what to do")?;
-    Ok(ACTIONS[i].1)
+    Ok(i.map(|i| ACTIONS[i].1))
 }
 
 /// Step 3's choices, in the order shown. "Repair" places everything again:
@@ -189,7 +201,8 @@ const ACTIONS: [(&str, Action); 3] = [
 ];
 
 /// Step 4: the recent releases, newest first, `default` preselected.
-pub fn ask_version(releases: &[Release], default: &str) -> anyhow::Result<String> {
+/// `None`: back.
+pub fn ask_version(releases: &[Release], default: &str) -> anyhow::Result<Option<String>> {
     let mut recent: Vec<&Release> = releases.iter().collect();
     recent.sort_by(|a, b| b.published_at.cmp(&a.published_at).then_with(|| b.tag.cmp(&a.tag)));
     recent.truncate(15);
@@ -205,70 +218,66 @@ pub fn ask_version(releases: &[Release], default: &str) -> anyhow::Result<String
         .with_prompt("Version")
         .items(&labels)
         .default(at)
-        .interact()
+        .interact_opt()
         .context("asking for the version")?;
-    Ok(recent[i].tag.clone())
+    Ok(i.map(|i| recent[i].tag.clone()))
 }
 
-fn checklist(prompt: &str, choices: &[Choice], checked: &BTreeSet<String>) -> anyhow::Result<BTreeSet<String>> {
-    if choices.is_empty() {
-        return Ok(BTreeSet::new());
-    }
+/// A checklist; `None`: back. Never called with no choice: `wizard` skips
+/// a screen that would offer nothing, both ways.
+fn checklist(
+    prompt: &str,
+    choices: &[Choice],
+    checked: &BTreeSet<String>,
+) -> anyhow::Result<Option<BTreeSet<String>>> {
     let labels: Vec<&str> = choices.iter().map(|c| c.label.as_str()).collect();
     let defaults: Vec<bool> = choices.iter().map(|c| checked.contains(&c.name)).collect();
     let picked = MultiSelect::new()
         .with_prompt(prompt)
         .items(&labels)
         .defaults(&defaults)
-        .interact()
+        .interact_opt()
         .with_context(|| format!("asking for the {}", prompt.to_lowercase()))?;
-    Ok(picked.into_iter().map(|i| choices[i].name.clone()).collect())
+    Ok(picked.map(|picked| picked.into_iter().map(|i| choices[i].name.clone()).collect()))
 }
 
 /// Step 5: installed means checked; a fresh device, nothing.
-pub fn ask_plugins(choices: &[Choice], checked: &BTreeSet<String>) -> anyhow::Result<BTreeSet<String>> {
+pub fn ask_plugins(choices: &[Choice], checked: &BTreeSet<String>) -> anyhow::Result<Option<BTreeSet<String>>> {
     checklist("Plugins (space to check, enter to go on)", choices, checked)
 }
 
 /// Step 6, the same rule.
-pub fn ask_packs(choices: &[Choice], checked: &BTreeSet<String>) -> anyhow::Result<BTreeSet<String>> {
+pub fn ask_packs(choices: &[Choice], checked: &BTreeSet<String>) -> anyhow::Result<Option<BTreeSet<String>>> {
     checklist("Languages (space to check, enter to go on)", choices, checked)
 }
 
 /// The system permissions: every one checked unless it is in `declined`
-/// (the device's recorded choice). Returns the **declined** ones, which are
-/// the lines left unchecked.
-pub fn ask_grants(declined: &BTreeSet<Grant>) -> anyhow::Result<BTreeSet<Grant>> {
+/// (the device's recorded choice, or the answer given before). Returns the
+/// **declined** ones, which are the lines left unchecked; `None`: back.
+pub fn ask_grants(declined: &BTreeSet<Grant>) -> anyhow::Result<Option<BTreeSet<Grant>>> {
     let labels: Vec<&str> = Grant::ALL.iter().map(|g| g.label()).collect();
     let defaults: Vec<bool> = Grant::ALL.iter().map(|g| !declined.contains(g)).collect();
     let picked = MultiSelect::new()
         .with_prompt("System permissions (space to check, enter to go on)")
         .items(&labels)
         .defaults(&defaults)
-        .interact()
+        .interact_opt()
         .context("asking for the system permissions")?;
-    Ok(Grant::ALL.iter().enumerate().filter(|(i, _)| !picked.contains(i)).map(|(_, g)| *g).collect())
+    Ok(picked.map(|picked| {
+        Grant::ALL.iter().enumerate().filter(|(i, _)| !picked.contains(i)).map(|(_, g)| *g).collect()
+    }))
 }
 
-/// Step 7: one question per unchecked plugin that has data. Only called
-/// with at least one; the answer is what to erase.
-pub fn ask_erase(candidates: &[String]) -> anyhow::Result<BTreeSet<String>> {
-    let mut erase = BTreeSet::new();
-    for name in candidates {
-        let yes = explicit(format!("Also erase the data of {name}?"))
-            .interact()
-            .context("asking about a plugin's data")?;
-        if yes {
-            erase.insert(name.clone());
-        }
-    }
-    Ok(erase)
+/// Step 7: one question per unchecked plugin that has data, asked one at a
+/// time by `wizard`. `Some(true)`: erase it; `None`: back.
+pub fn ask_erase(name: &str) -> anyhow::Result<Option<bool>> {
+    explicit(format!("Also erase the data of {name}?")).interact_opt().context("asking about a plugin's data")
 }
 
-/// The one question of a total removal (spec §8).
-pub fn ask_erase_all() -> anyhow::Result<bool> {
+/// The one question of a total removal (spec §8). `None`: back.
+pub fn ask_erase_all() -> anyhow::Result<Option<bool>> {
     explicit("Also erase the data (/var/lib/ritornello) and the ritornello account?")
-        .interact()
+        .interact_opt()
         .context("asking about the data")
 }
 
@@ -290,8 +299,12 @@ pub fn up_to_date_line(host: &str, product: &str, source: &str) -> String {
 /// ignored and only `y` or `n` answers (`explicit`). A default of "no" made
 /// Enter after the summary end the run, and a window opened by a double
 /// click closed before anyone read why.
-pub fn confirm() -> anyhow::Result<bool> {
-    explicit("Go ahead?").interact().context("asking for confirmation")
+///
+/// `None` is Esc: back to the last question when `back` (there was one),
+/// and the prompt says so; without one, the caller asks again.
+pub fn confirm(back: bool) -> anyhow::Result<Option<bool>> {
+    let prompt = if back { "Go ahead? (Esc: back to the questions)" } else { "Go ahead?" };
+    explicit(prompt).interact_opt().context("asking for confirmation")
 }
 
 /// A yes-or-no question with no default: `dialoguer` then ignores Enter until
@@ -471,15 +484,30 @@ mod tests {
         assert!(offers_remove_all(&d), "the account");
     }
 
+    /// Every grant is said, and one that does not change says so rather
+    /// than being left out.
     #[test]
-    fn the_summary_says_each_grant_that_changed_or_is_new() {
+    fn the_summary_says_each_grant_and_whether_it_changes() {
         use crate::grants::Grant;
-        let summary =
-            Summary { grants: vec![(Grant::Power, true), (Grant::Timezone, false)], ..Summary::default() };
+        use crate::plan::GrantLine;
+        let line = |grant, allowed, changed| GrantLine { grant, allowed, changed };
+        let summary = Summary {
+            grants: vec![line(Grant::Power, true, false), line(Grant::Timezone, true, true)],
+            ..Summary::default()
+        };
         let plan = Plan { summary, ..Plan::default() };
         assert_eq!(
             summary_lines(&plan),
-            ["  allowed: power off / restart", "  not allowed: change the time zone"]
+            ["  allowed (unchanged): power off / restart", "  allowed: change the time zone"]
+        );
+        let summary = Summary {
+            grants: vec![line(Grant::Power, false, true), line(Grant::Timezone, false, false)],
+            ..Summary::default()
+        };
+        let plan = Plan { summary, ..Plan::default() };
+        assert_eq!(
+            summary_lines(&plan),
+            ["  not allowed: power off / restart", "  not allowed (unchanged): change the time zone"]
         );
     }
 }
