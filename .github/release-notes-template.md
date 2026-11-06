@@ -1,50 +1,43 @@
-**Action required** — make sure the device has **`ca-certificates`**, then
-run **ritornello-install 0.4.0** once, from a workstation: the page will not
-update the core by itself.
+**Action required** — only on a device that is not yet on beta.11 *through
+ritornello-install 0.4.0 or newer*: make sure it has **`ca-certificates`**,
+then run **ritornello-install** once, from a workstation. A device already
+there needs nothing by hand: it updates from the page.
 
-**1. `ca-certificates` is now required.** From this release on, the core and
-the plugins check HTTPS certificates against the device's own certificate
-store (`/etc/ssl/certs`) instead of a list compiled into them. Without the
-`ca-certificates` package every HTTPS request fails: radio search, Radio
-France, MusicBrainz covers, lyrics, and the update check itself. Most images
-already have it; check, and install it if needed, **before** anything else:
+**Ritornello 0.2.0 — the end of the beta.** This is the first finished
+release: every component moves from its beta number to `0.2.0` (the root
+mount helper `files-mount` 1.0.3 and the privileged updater 1.0.0 keep their
+own numbers, unchanged). A device set to finished releases only now has
+something to install, and a device that offered prereleases can untick
+"Offer prereleases" and stay on finished releases from here on.
 
-```sh
-dpkg -s ca-certificates >/dev/null 2>&1 || sudo apt install ca-certificates
-```
+**Coming from a beta before beta.11** — the two points beta.11 introduced
+still apply:
 
-ritornello-install 0.4.0 refuses to install or update a device without it.
-An update from the page does not check.
+1. **`ca-certificates` is required.** The core and the plugins check HTTPS
+   certificates against the device's own store (`/etc/ssl/certs`). Without
+   the package every HTTPS request fails, the update check included:
 
-**2. A new polkit rule, and the installer now asks.** This release ships
-`53-ritornello-time.rules`, which lets Ritornello change the device's time
-zone from the System page. Only ritornello-install places a polkit rule, so
-the page refuses to update the core until it has run, and says so. Use
-**ritornello-install 0.4.0** (the README's download link): it now asks which
-system permissions to grant —
-*power off or restart the system* and *change the time zone* — each one
-placing its polkit rule only when granted. The page is not authenticated:
-whatever it may do, anyone on your network may do, so untick what you do not
-want. On a device already installed, both are granted unless you say
-otherwise:
+   ```sh
+   dpkg -s ca-certificates >/dev/null 2>&1 || sudo apt install ca-certificates
+   ```
 
-```sh
-ritornello-install --host account@host --version v0.2.0-beta.11 --keep
-# or, to decline one or both:
-ritornello-install --host account@host --version v0.2.0-beta.11 --keep --grants power
-ritornello-install --host account@host --version v0.2.0-beta.11 --keep --grants none
-```
+2. **A polkit rule only the installer places** (`53-ritornello-time.rules`,
+   the time zone from the System page): the page refuses to update the core
+   until ritornello-install has run, and says so. The installer asks which
+   system permissions to grant (*power off or restart*, *change the time
+   zone*); on a device already installed both are granted unless you say
+   otherwise:
 
-Declining a permission removes its rule; running the installer again
-changes your mind. A declined permission never blocks the page's own
-updates.
+   ```sh
+   ritornello-install --host account@host --version v0.2.0 --keep
+   # or, to decline one or both:
+   ritornello-install --host account@host --version v0.2.0 --keep --grants power
+   ritornello-install --host account@host --version v0.2.0 --keep --grants none
+   ```
 
-An older installer (0.3.x) still installs this release, but grants both
-permissions without asking and does not check `ca-certificates`.
-
-The plugins and the language packs update from the page as usual. No
-systemd unit or privileged updater changed since beta.10. This is not a wire
-break: no contract moved, and the bootstrap `PROTOCOL_VERSION` did not move.
+No systemd unit, polkit rule, privileged updater or mount helper changed
+since beta.11. This is not a wire break: no contract moved, and the bootstrap
+`PROTOCOL_VERSION` did not move.
 <!-- The opening block above is this release's answer to "is there anything
      to do by hand?", and it is rewritten at every release rather than left
      to rot. When the next one needs nothing, the whole block above becomes
@@ -78,31 +71,25 @@ break: no contract moved, and the bootstrap `PROTOCOL_VERSION` did not move.
      together. A rollback of the core leaves every plugin refused until the
      core is reinstalled. -->
 
-## Behaviour changes
+## Behaviour changes since beta.11
 
-**The device's time, and its time zone, on the System page.** A new
-**Time** card shows the device's clock and time zone, lets you pick another
-zone, and offers "use my browser's zone" when the two differ. The change
-applies at once: the automatic update schedule and the standby clock on the
-HDMI screen follow it without a restart.
+**Web streaming: the cover of what plays.** A video played from a preset
+now shows its cover in the player: the site's own thumbnail, the same one a
+download keeps. The plugin fetches it itself, through the same guard as a
+download (never the local network), and hands the core a file. A playlist's
+videos each show their own; a single video's thumbnail is looked up once,
+the first time it plays, then kept.
 
-**The update hour says which clock it means.** The automatic update hour
-is counted in the **device's** time zone. When the device and your browser
-are on different zones, the Updates card now says so under the hour, with
-what that hour is for you ("03:00 on the device is 04:00 for you"). A device
-left on UTC was the reason an update set for 3 am ran at 4 am.
+**Web streaming: downloading, in two steps.** The download dialog first asks
+*where* (the share, then one framed folder browser with the new folder at its
+foot), then *how* (format, cover, names), with the destination still shown
+and a way back. The cover choice now applies to **each track**, playlists
+included: every track of a downloaded playlist gets its own thumbnail,
+inside the file or beside it, and the folder keeps its `cover.jpg`.
 
-**Greyed buttons say why.** Shut down, Restart and the time zone controls
-stay visible when they cannot work, and one sentence says why: not allowed
-when Ritornello was installed, polkit did not answer, or the system service
-is unreachable.
-
-**HTTPS trusts the device's certificate store** (see the action above). The
-core and the plugins that talk HTTPS (radio, Radio France, NRJ, Oüi FM,
-MusicBrainz, lyrics, web streaming) now use the device's certificates, so a
-certificate authority Debian removes is removed here too, and they trust
-exactly what mpv and yt-dlp already trust on the device. The core and
-plugins are about 0.7 MB larger each on armv7.
+**Web streaming: the downloads list.** It sits right under the presets,
+where a download is started, and **Clear finished** forgets the downloads
+that are over. A running line reads "running 42%" again, not "running42%".
 
 ## Install
 
