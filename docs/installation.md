@@ -699,6 +699,12 @@ A failed `publish-installer` is re-run with "Re-run failed jobs", never
 re-tagged: both release steps are safe to run again over what a previous
 attempt left.
 
+**Only the newest numbered release is kept**, with the fixed `installer`.
+Once `installer-vX.Y.Z` is published, the older `installer-v…` releases are
+deleted (git tags kept): no device fetches the installer, the README links the
+fixed release, and the installer tells a person that a newer one exists by
+reading the numbered tags, which needs the newest one only.
+
 Nothing in the README changes when the installer's number does. The device's
 update logic and the product's baseline queries ignore every release tagged
 `installer` or `installer-v…` (`scripts/release-tags.sh newest-product`,

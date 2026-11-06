@@ -89,7 +89,8 @@ on purpose (`ritornello-install --version`); a device's own rollback restores
 what it holds and downloads nothing. Keep the git tag
 (`gh release delete <tag>`, without `--cleanup-tag`). The fixed release tagged
 `installer` is apart: its assets are replaced by each installer release, since
-no device ever fetches the installer.
+no device ever fetches the installer; of the numbered `installer-v…` releases
+only the newest is kept.
 
 **The security boundary.** The core runs unprivileged. A small root binary
 (`crates/ritornello-updater`) can form **exactly two** path shapes —
