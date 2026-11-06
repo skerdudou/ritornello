@@ -898,6 +898,16 @@ versions its own registry and the web page last recorded, for what they are.
 Every yes-or-no question waits for an explicit `y` or `n`: Enter alone answers
 none of them.
 
+From the first question after the survey to the confirmation, **Esc** (or
+`q`) goes back to the previous question, and every answer given is kept:
+the question asked again shows it, and so does each one after it. Esc at
+"Go ahead?" returns to the last question; nothing has been sent by then. A
+question that is not shown — the version with `--version`, the permissions
+with `--grants`, a checklist with nothing to offer — is skipped both ways.
+Going back stops at the first question after the survey: the address
+belongs to another run. Changing the version reads that version's inventory
+again.
+
 What to do with an installation that is already there has three answers:
 "Install or update", "Repair (reinstall everything)" — the same as
 `--reinstall` — and "Remove everything".
@@ -908,6 +918,10 @@ the time zone. On a device that already has an installation the boxes start
 as the registry recorded them: a permission recorded as declined starts
 unchecked, any other starts checked. Without `--grants`, a run that does not
 ask keeps the recorded choices.
+
+The summary says every permission the release carries, allowed or not, and
+marks "(unchanged)" one whose state the device already recorded: a summary
+that named only the permission that changed read as a refusal of the other.
 
 The summary names what is installed, updated and removed, and what is
 **already up to date** and left exactly as it is. When everything is — no
@@ -1845,6 +1859,11 @@ proven on hardware. In particular:
   against a device from either; in particular the Windows path, where ssh
   runs one connection per step and the terminal screens draw on the
   Windows console, has never been seen working end to end;
+- going back with Esc has only been driven through scripted screens
+  (`wizard.rs`'s tests): that `dialoguer` reads the key as "back" on the
+  Windows console and on a unix terminal, and how the question asked again
+  is redrawn under the answer it replaces, are read from its source, not
+  watched;
 - the installer's own publication channel has never run: the
   `publish-installer` job (the numbered release, the fixed release `installer`,
   the moved tag, the replaced assets) runs only on an `installer-v*` tag, and

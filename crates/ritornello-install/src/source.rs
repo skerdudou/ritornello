@@ -331,6 +331,16 @@ pub trait Source {
     fn inventory(&mut self) -> anyhow::Result<String>;
     /// One archive's bytes, verified.
     fn archive(&mut self, name: &str) -> anyhow::Result<Vec<u8>>;
+    /// The releases the version screen offers, and the tag acted on now;
+    /// `None` for a source that has a single version (a local directory).
+    fn versions(&self) -> Option<(&[Release], &str)> {
+        None
+    }
+    /// Acts on another version from `versions`: the version screen's
+    /// answer, which going back may change again.
+    fn select(&mut self, tag: &str) -> anyhow::Result<()> {
+        anyhow::bail!("{} has a single version, {tag} cannot be chosen", self.label())
+    }
 }
 
 /// Whether `name` is safe to join onto a directory and read: a single path
@@ -607,6 +617,14 @@ impl<F: Fetch> GitHub<F> {
 impl<F: Fetch> Source for GitHub<F> {
     fn label(&self) -> String {
         format!("GitHub release {}", self.chosen().tag)
+    }
+
+    fn versions(&self) -> Option<(&[Release], &str)> {
+        Some((self.releases(), self.tag()))
+    }
+
+    fn select(&mut self, tag: &str) -> anyhow::Result<()> {
+        GitHub::select(self, tag)
     }
 
     /// `inventory.json` is always taken from the chosen release itself, and
