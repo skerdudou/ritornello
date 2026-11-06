@@ -319,7 +319,12 @@ longer any component's home once every archive it carries, language packs
 and `files-mount` included, has been republished in a later published
 release. Then, to keep the list short:
 
-- a **prerelease** may be deleted at once;
+- a **prerelease** may be deleted at once, and **every prerelease is deleted
+  once a finished release is published**: measured against the previous
+  finished release, it republishes everything its prereleases shipped, so
+  none of them is anyone's home any more. A component dropped or renamed
+  along the way loses its last home with them; that is accepted, since what
+  replaced it ships in the finished release;
 - a **finished release** is kept while it is one of the three newest
   finished releases, home or not, so that a previous stable version can still
   be installed on purpose.
@@ -693,6 +698,14 @@ release. Its releases are made apart:
 A failed `publish-installer` is re-run with "Re-run failed jobs", never
 re-tagged: both release steps are safe to run again over what a previous
 attempt left.
+
+**The three newest numbered releases are kept**, with the fixed `installer`,
+as for the product's finished releases: once `installer-vX.Y.Z` is published,
+older `installer-v…` releases beyond the third are deleted (git tags kept).
+No device fetches the installer and the README links the fixed release; the
+installer tells a person that a newer one exists by reading the numbered tags,
+which needs the newest one at least, and the two before it let a previous
+installer still be taken on purpose.
 
 Nothing in the README changes when the installer's number does. The device's
 update logic and the product's baseline queries ignore every release tagged
