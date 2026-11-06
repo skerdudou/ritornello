@@ -22,21 +22,29 @@
 //!   old cache.
 //! - A preset that cannot play (not cached, nothing playable, bad link...) is
 //!   refused without moving anything, and next/prev step over it.
+//! - **The cover** of each video that starts (a preset, or mpv's move in its
+//!   list) is the site's thumbnail, the one a download takes, fetched by the
+//!   plugin through the download's own guard and handed to the core as a
+//!   file (`playcover.rs` says why never as an address). It is looked for in
+//!   the background and announced by a notification, only if that video still
+//!   plays when it arrives.
 
 use anyhow::Result;
 use ritornello_plugin_sdk::{Notification, SourceOutcome, SourcePlugin};
+use ritornello_plugin_web_streaming::download::CoverFetch;
 use ritornello_plugin_web_streaming::entries::{write_atomically, Entries, ListCache};
 use ritornello_plugin_web_streaming::entries::Entry;
 use ritornello_plugin_web_streaming::link::{parse_link, Link};
+use ritornello_plugin_web_streaming::playcover::CoverCache;
 use ritornello_plugin_web_streaming::playfail::PlaybackFailure;
 use ritornello_plugin_web_streaming::state;
 use ritornello_plugin_web_streaming::ytdlp::{Kind, Video, Ytdlp};
-use ritornello_proto::{Preset, SourceAction, Text};
+use ritornello_proto::{CoverRef, Preset, SourceAction, Text};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::RwLock as AsyncRwLock;
+use tokio::sync::{mpsc, RwLock as AsyncRwLock};
 
 /// How long a background refresh may take before the tool is killed: one
 /// probe's, the JavaScript fallback included.
@@ -171,6 +179,26 @@ pub struct WebStreamingSource {
     /// have no admin half: `poll_notification` then waits forever, since
     /// `None` returned from it is terminal for the SDK.
     saved_rx: Option<tokio::sync::watch::Receiver<()>>,
+    /// The pictures of the videos played, on disk.
+    covers: Arc<CoverCache>,
+    /// How a picture is fetched: the download's own (`Limits::fetch_cover`),
+    /// replaced in tests.
+    fetch: CoverFetch,
+    /// The identity of the video playing now: a cover found for another one
+    /// (mpv moved on, or Stop) is not announced.
+    current: Option<String>,
+    /// The videos whose cover is being looked for: one search at a time each.
+    covering: InFlight,
+    /// The covers found, from their background search to `poll_notification`.
+    cover_tx: mpsc::UnboundedSender<(String, PathBuf)>,
+    cover_rx: mpsc::UnboundedReceiver<(String, PathBuf)>,
+}
+
+/// What `poll_notification` woke up for.
+enum Wake {
+    Cover(String, PathBuf),
+    Saved,
+    SaverGone,
 }
 
 impl WebStreamingSource {
@@ -184,7 +212,87 @@ impl WebStreamingSource {
         // Built before anything else can hold the lock; a contended one only
         // leaves the armed preset unfollowed until it is played or armed.
         let followed = entries.try_read().ok().and_then(|e| e.by_preset(preset).map(key_of));
-        Self { data, entries, tool, preset, followed, playing: None, refreshing: InFlight::default(), saved_rx }
+        let covers = Arc::new(CoverCache::new(&data));
+        let (cover_tx, cover_rx) = mpsc::unbounded_channel();
+        // Under test, nothing reaches the network unless a test says what a
+        // fetch answers: a fake tool answering a capture would otherwise
+        // send its real thumbnail address out.
+        #[cfg(not(test))]
+        let fetch = ritornello_plugin_web_streaming::download::Limits::default().fetch_cover;
+        #[cfg(test)]
+        let fetch: CoverFetch = Arc::new(|_| Box::pin(async { None }));
+        Self {
+            data,
+            entries,
+            tool,
+            preset,
+            followed,
+            playing: None,
+            refreshing: InFlight::default(),
+            saved_rx,
+            covers,
+            fetch,
+            current: None,
+            covering: InFlight::default(),
+            cover_tx,
+            cover_rx,
+        }
+    }
+
+    /// The video `identity` starts playing: its cover is looked for in the
+    /// background — on disk, else at `known` (its thumbnail in the cached
+    /// list), else by probing its page `page` — and arrives through
+    /// `poll_notification`. Never delays what plays.
+    ///
+    /// Only a single video is probed (`page`): a list's videos have their
+    /// thumbnail in the cached list or none, since running the tool again at
+    /// each track, beside mpv's own, would load a Pi for a picture.
+    fn look_for_cover(&mut self, identity: String, known: Option<String>, page: Option<String>) {
+        self.current = Some(identity.clone());
+        let (covers, fetch, tx, data) = (self.covers.clone(), self.fetch.clone(), self.cover_tx.clone(), self.data.clone());
+        spawn_single_flight(&self.covering, &identity.clone(), async move {
+            let lookup = || async move {
+                let page = page?;
+                match Ytdlp::new(&data).probe(&page, REFRESH_DEADLINE).await {
+                    Ok(p) => p.thumbnail_jpg,
+                    Err(e) => {
+                        tracing::info!("no cover for {page}: {e:?}");
+                        None
+                    }
+                }
+            };
+            if let Some(path) = covers.fill(&identity, known, lookup, &fetch).await {
+                let _ = tx.send((identity, path));
+            }
+        });
+    }
+
+    /// After the admin half saved the table: see `poll_notification`.
+    async fn after_save(&mut self) -> Notification {
+        let snapshot = self.entries.read().await.clone();
+        let mut notice = Notification::new().preset_count(snapshot.preset_count()).presets(snapshot.presets());
+        let Some(key) = self.followed.clone() else {
+            // Nothing was played or armed from the table: nothing to set
+            // straight.
+            return notice;
+        };
+        match snapshot.entry.iter().find(|e| key_of(e) == key).map(|e| (e.preset, e.title.clone())) {
+            Some((p, name)) => {
+                self.set_preset(p);
+                notice = notice.preset(p).preset_name(name);
+            }
+            None if self.is_playing() => {}
+            None => {
+                self.followed = snapshot.by_preset(self.preset).map(key_of);
+                notice = match (self.armed_identity(&snapshot), snapshot.by_preset(self.preset)) {
+                    (Some(identity), Some(entry)) => {
+                        notice.armed(identity).preset(self.preset).preset_name(entry.title.clone())
+                    }
+                    _ => notice.plays_nothing(),
+                };
+            }
+        }
+        notice
     }
 
     /// A refusal: nothing was launched, so what plays carries on. Ephemeral,
@@ -295,6 +403,7 @@ impl WebStreamingSource {
                 self.set_preset(n);
                 self.followed = Some(key);
                 self.playing = Some(Playing { list: None, since: now() });
+                self.look_for_cover(identity.clone(), None, Some(url.clone()));
                 SourceOutcome::new(SourceAction::play(for_mpv(&url)).finite().ytdl_path(bin))
                     .plays_at(video_identity(&identity), url)
                     .preset(n)
@@ -323,6 +432,7 @@ impl WebStreamingSource {
                 self.followed = Some(key);
                 self.playing = Some(Playing { list: Some(videos), since: now() });
                 self.start_refresh(&list);
+                self.look_for_cover(first.identity(), first.thumbnail_jpg.clone(), None);
                 outcome
             }
         }
@@ -453,6 +563,7 @@ impl SourcePlugin for WebStreamingSource {
 
     async fn deactivate(&mut self) -> SourceOutcome {
         self.playing = None;
+        self.current = None;
         SourceOutcome::new(SourceAction::Stop).plays_nothing()
     }
 
@@ -464,6 +575,7 @@ impl SourcePlugin for WebStreamingSource {
     /// once (the next Stop starts from a new playback, or from none).
     async fn stop(&mut self) -> SourceOutcome {
         let since = self.playing.take().map(|p| p.since);
+        self.current = None;
         let outcome = self.armed_outcome().await;
         match since.and_then(|since| PlaybackFailure::load(&self.data).filter(|f| f.time >= since)) {
             Some(failure) => outcome.status_text(keyed(failure.key())),
@@ -500,12 +612,11 @@ impl SourcePlugin for WebStreamingSource {
             }
             _ => None,
         };
-        match video.and_then(|(i, v)| Some((i, v, v.play_url()?))) {
-            Some((i, v, url)) => SourceOutcome::new(SourceAction::Noop)
-                .plays_at(video_identity(&v.identity()), url)
-                .status_text(list_title(v, i)),
-            None => SourceOutcome::new(SourceAction::Noop),
-        }
+        let Some((i, v, url)) = video.and_then(|(i, v)| Some((i, v.clone(), v.play_url()?))) else {
+            return SourceOutcome::new(SourceAction::Noop);
+        };
+        self.look_for_cover(v.identity(), v.thumbnail_jpg.clone(), None);
+        SourceOutcome::new(SourceAction::Noop).plays_at(video_identity(&v.identity()), url).status_text(list_title(&v, i))
     }
 
     async fn list_presets(&mut self) -> Vec<Preset> {
@@ -525,40 +636,46 @@ impl SourcePlugin for WebStreamingSource {
     ///   rather than one that now names another preset.
     /// - Gone while stopped: re-armed from the number, as Play would start
     ///   it — whatever now sits there, or nothing.
+    ///
+    /// And the **cover** of the video playing, once found, if it still plays.
+    ///
+    /// The SDK cancels this future whenever a request arrives: both waits are
+    /// cancel-safe (`mpsc::recv`, `watch::changed`), and a cover taken from
+    /// the channel is announced or dropped without another suspension.
     async fn poll_notification(&mut self) -> Option<Notification> {
-        let Some(rx) = &mut self.saved_rx else { return std::future::pending().await };
-        match rx.changed().await {
-            Ok(()) => {
-                rx.borrow_and_update();
-                let snapshot = self.entries.read().await.clone();
-                let mut notice =
-                    Notification::new().preset_count(snapshot.preset_count()).presets(snapshot.presets());
-                let Some(key) = self.followed.clone() else {
-                    // Nothing was played or armed from the table: nothing to
-                    // set straight.
-                    return Some(notice);
-                };
-                match snapshot.entry.iter().find(|e| key_of(e) == key).map(|e| (e.preset, e.title.clone())) {
-                    Some((p, name)) => {
-                        self.set_preset(p);
-                        notice = notice.preset(p).preset_name(name);
-                    }
-                    None if self.is_playing() => {}
-                    None => {
-                        self.followed = snapshot.by_preset(self.preset).map(key_of);
-                        notice = match (self.armed_identity(&snapshot), snapshot.by_preset(self.preset)) {
-                            (Some(identity), Some(entry)) => {
-                                notice.armed(identity).preset(self.preset).preset_name(entry.title.clone())
+        loop {
+            let wake = {
+                let (covers, saved) = (&mut self.cover_rx, &mut self.saved_rx);
+                let saved = async {
+                    match saved {
+                        Some(rx) => match rx.changed().await {
+                            Ok(()) => {
+                                rx.borrow_and_update();
+                                Wake::Saved
                             }
-                            _ => notice.plays_nothing(),
-                        };
+                            Err(_) => Wake::SaverGone,
+                        },
+                        None => std::future::pending().await,
+                    }
+                };
+                tokio::select! {
+                    biased;
+                    Some((identity, path)) = covers.recv() => Wake::Cover(identity, path),
+                    w = saved => w,
+                }
+            };
+            match wake {
+                Wake::Cover(identity, path) => {
+                    if self.current.as_deref() == Some(identity.as_str()) {
+                        let path = path.to_string_lossy().into_owned();
+                        return Some(Notification::new().cover(CoverRef::Path { path }));
                     }
                 }
-                Some(notice)
+                Wake::Saved => return Some(self.after_save().await),
+                // The sender is gone: not a reason to end notifications,
+                // which would be terminal. Covers still come.
+                Wake::SaverGone => self.saved_rx = None,
             }
-            // The sender is gone: not a reason to end notifications, which
-            // would be terminal.
-            Err(_) => std::future::pending().await,
         }
     }
 }

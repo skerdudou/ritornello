@@ -6,6 +6,7 @@ pub mod entries;
 pub mod jobs;
 pub mod link;
 pub mod netguard;
+pub mod playcover;
 pub mod playfail;
 pub mod reason;
 pub mod settings;

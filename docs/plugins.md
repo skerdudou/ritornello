@@ -2538,6 +2538,21 @@ chains, and why the expiry of stream URLs does not matter.
   `PlayerPrev`) and the position comes back through `player_track`; on a
   single video, or when stopped, they move to the adjacent preset as the
   radio does.
+- **The cover is the site's thumbnail**, the very one a download takes
+  (`largest_jpg` of the probe), for each video that starts: a preset, or
+  each move of mpv in its list. A playlist's videos carry theirs in the
+  cached list; a single video's preset keeps none, so its page is probed
+  once, in the background, the first time it plays (a list's videos are
+  never probed for a picture: a run of the tool at each track, beside mpv's
+  own, would load a Pi). **The plugin fetches it**, with the download's own
+  function and guard (https, size cap, timeouts, never the local network,
+  every redirect judged again), keeps it as `covers/<hash>.jpg` in its data
+  directory (500 at most, the oldest go first; played again, nothing is
+  fetched) and declares it to the core by **path** (`CoverRef::Path`), in a
+  notification sent only if that video still plays. Never as an address:
+  the core would then fetch it itself, with a client that judges an
+  address's shape but not where its name resolves, and the same thumbnail
+  would cross two different guards whether it is downloaded or played.
 
 ### yt-dlp, managed by the plugin
 
