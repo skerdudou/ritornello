@@ -2,8 +2,18 @@
 import { Button } from '@ritornello/ui'
 import { faultText, noteText, rowTitle, stateText, targetText, type Job, type T } from './data'
 
-defineProps<{ t: T; jobs: Job[] }>()
+const props = defineProps<{ t: T; jobs: Job[] }>()
 defineEmits<{ cancel: [id: number] }>()
+
+/**
+ * A row's state, and its percentage while it runs. One string: a space left
+ * alone at the head of a `<template v-if>` is a whitespace-only text node,
+ * which Vue's compiler drops, and "running42%" was shown.
+ */
+function rowState(r: Job['rows'][number]): string {
+  const state = stateText(props.t, r.state)
+  return r.state === 'running' && r.percent !== undefined ? `${state} ${Math.round(r.percent)}%` : state
+}
 
 /** Newest first: what the operator just asked for is on top. */
 function newestFirst(jobs: Job[]): Job[] {
@@ -32,9 +42,7 @@ function newestFirst(jobs: Job[]): Job[] {
       <ul v-if="j.rows.length" class="space-y-0.5 pl-4">
         <li v-for="(r, i) in j.rows" :key="i" class="flex flex-wrap gap-x-2" data-job-row>
           <span class="min-w-0 flex-1 truncate" data-job-row-title>{{ rowTitle(t, j.rows, i) }}</span>
-          <span class="text-muted-foreground">
-            {{ stateText(t, r.state) }}<template v-if="r.state === 'running' && r.percent !== undefined"> {{ Math.round(r.percent) }}%</template>
-          </span>
+          <span class="text-muted-foreground" data-job-row-state>{{ rowState(r) }}</span>
           <span v-if="r.detail" :class="r.state === 'failed' ? 'text-destructive' : 'text-muted-foreground'">
             {{ faultText(t, r.detail) }}
           </span>

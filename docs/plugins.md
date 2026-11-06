@@ -2821,9 +2821,11 @@ a folder of a share, in the format chosen in the dialog:
 - **The cover.** The plugin picks a `jpg` from the thumbnails the probe
   listed and fetches it itself through the guard (timeouts, a size cap, no
   redirect to anywhere local). A playlist's is written as `cover.jpg` in its
-  folder. A single video's is **the track's own**, never the folder's (a
-  `cover.jpg` beside one video became the cover of every other track of the
-  folder): as chosen in the dialog, either **inside the file**, written with
+  folder. Each track's — a single video's, and each video's of a playlist,
+  from its own entry's thumbnails — is **the track's own**, never the
+  folder's (a `cover.jpg` beside one video became the cover of every other
+  track of the folder; and a playlist's tracks once had no picture of their
+  own at all, whatever was chosen): as chosen in the dialog, either **inside the file**, written with
   `lofty` (m4a `covr`, mp3 ID3v2 APIC, opus and ogg METADATA_BLOCK_PICTURE;
   a webm, YouTube's usual original, takes none, and the picture then goes
   beside it, which the row says), or **beside it** as `<name>.jpg`, which
@@ -2832,7 +2834,9 @@ a folder of a share, in the format chosen in the dialog:
   offered, or a failed fetch, is never a failure of the download.
 - **Jobs.** One at a time, one video at a time so one failure never stops a
   playlist; progress read from `--newline --progress-template`; cancellable;
-  the last twenty are kept in `jobs.json`. The share is resolved when the job
+  the last twenty are kept in `jobs.json`, and the page's "Clear finished"
+  (`clear_jobs`) forgets every job that is over, never one queued or
+  running. The share is resolved when the job
   *starts*, and judged again (declared, mounted `rw`, the folder confined)
   after each video that fails: if it no longer holds, that video says why in
   the share's words, the rest of its playlist is skipped with that reason,
@@ -2848,11 +2852,14 @@ this is the owner's decision, for private use.
 ### The page
 
 Served by the core like the other plugins' pages. It holds: the preset list
-(add, preview of the probed lines, reorder, save); the **capabilities** panel
-and the yt-dlp panel (version, channel, "Check for an update", "Install
-anyway", the last failure); the download dialog (share, folder, create a
-folder, which the dialog enters once the plugin has made it; format; where
-a single video's cover goes; the names); and the list of jobs. **No admin operation waits for yt-dlp, the
+(add, preview of the probed lines, reorder, save); right under it the list
+of jobs, where a download started from the presets is followed; the
+**capabilities** panel and the yt-dlp panel (version, channel, "Check for an
+update", "Install anyway", the last failure); and the download dialog, in
+two steps: **where** (share, then one framed browser of its folders, with
+the folder to create at its foot, which the dialog enters once the plugin
+has made it), then **how**, the destination still shown with a way back
+(format; where each track's cover goes; the names). **No admin operation waits for yt-dlp, the
 network, a share or a job**: the admin protocol gives `GetData` 5 seconds and
 `SetData` 30, so every slow thing is started, a progress record is kept, and
 the page polls it.

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import {
-  api, Card, CardContent, CardHeader, CardTitle, createT, move, Skeleton, useSkeleton, type Catalog,
+  api, Button, Card, CardAction, CardContent, CardHeader, CardTitle, createT, move, Skeleton, useSkeleton, type Catalog,
 } from '@ritornello/ui'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import AddLinks from './AddLinks.vue'
@@ -261,6 +261,14 @@ async function cancel(job: number): Promise<void> {
   if (err) message.value = err
 }
 
+/** Whether any download is over: only those are cleared. */
+const anyOver = computed(() => (data.value?.jobs ?? []).some((j) => j.state !== 'queued' && j.state !== 'running'))
+
+async function clearJobs(): Promise<void> {
+  const err = await send({ op: 'clear_jobs' })
+  if (err) message.value = err
+}
+
 // ---- yt-dlp -----------------------------------------------------------------
 
 async function updateTool(force: boolean): Promise<void> {
@@ -310,6 +318,22 @@ async function recheck(): Promise<void> {
         </CardContent>
       </Card>
 
+      <!-- Right under the presets: a download is started there, and its
+           progress is read here without scrolling past the other cards. -->
+      <Card data-jobs-card>
+        <CardHeader>
+          <CardTitle>{{ t('jobs_title') }}</CardTitle>
+          <CardAction v-if="anyOver">
+            <Button variant="outline" size="sm" data-jobs-clear :disabled="loadFailed" @click="clearJobs">
+              {{ t('btn_clear_jobs') }}
+            </Button>
+          </CardAction>
+        </CardHeader>
+        <CardContent>
+          <JobList :t="t" :jobs="data.jobs" @cancel="cancel" />
+        </CardContent>
+      </Card>
+
       <Card>
         <CardHeader>
           <CardTitle>{{ t('add_title') }}</CardTitle>
@@ -324,15 +348,6 @@ async function recheck(): Promise<void> {
             @probe="probe"
             @add="add"
           />
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>{{ t('jobs_title') }}</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <JobList :t="t" :jobs="data.jobs" @cancel="cancel" />
         </CardContent>
       </Card>
 

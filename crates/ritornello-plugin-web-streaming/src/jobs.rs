@@ -240,6 +240,17 @@ impl Jobs {
         id
     }
 
+    /// Forgets every job that is over, and keeps those queued or running: the
+    /// operator's purge. Written off the caller's thread, like an enqueue.
+    pub fn clear_finished(&self) {
+        {
+            let mut view = self.inner.view.lock().unwrap_or_else(|p| p.into_inner());
+            view.jobs.retain(|j| !j.state.is_over());
+        }
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || inner.persist());
+    }
+
     /// Cancels a queued job, or kills the running one's whole process group.
     /// False when the job is unknown or already over.
     pub fn cancel(&self, id: JobId) -> bool {
