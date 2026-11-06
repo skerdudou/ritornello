@@ -78,7 +78,10 @@ time lives only in the release where it last changed, and that is where a
 device installs and repairs it from. A release is no longer anyone's home
 once every archive it carries has been republished in a later published
 release (check the language packs and `files-mount` too, not only the
-plugins). A **prerelease** may then be deleted at once. A **finished
+plugins). A **prerelease** may then be deleted at once, and once a finished
+release is published **every prerelease is deleted**: it republishes all they
+shipped (a component dropped or renamed meanwhile loses its last home, which
+is accepted). A **finished
 release** is kept longer: the three newest finished releases stay even when
 no longer anyone's home, so a previous stable version can still be installed
 on purpose. Deleting a release only costs installing that exact old version

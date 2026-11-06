@@ -319,7 +319,12 @@ longer any component's home once every archive it carries, language packs
 and `files-mount` included, has been republished in a later published
 release. Then, to keep the list short:
 
-- a **prerelease** may be deleted at once;
+- a **prerelease** may be deleted at once, and **every prerelease is deleted
+  once a finished release is published**: measured against the previous
+  finished release, it republishes everything its prereleases shipped, so
+  none of them is anyone's home any more. A component dropped or renamed
+  along the way loses its last home with them; that is accepted, since what
+  replaced it ships in the finished release;
 - a **finished release** is kept while it is one of the three newest
   finished releases, home or not, so that a previous stable version can still
   be installed on purpose.
