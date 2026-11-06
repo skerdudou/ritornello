@@ -354,14 +354,21 @@ fn fixtures() -> PathBuf {
 /// each run in `bin/calls`.
 fn install_counting_tool(data: &Path) {
     let body = format!(
-        "echo run >> \"$(dirname \"$0\")/calls\"\nsleep 0.4\ncat '{}'",
+        "echo \"$4\" >> \"$(dirname \"$0\")/calls\"\nsleep 0.4\ncat '{}'",
         fixtures().join("playlist.json").display()
     );
     install_tool(data, &body);
 }
 
+/// The refreshes of a playlist the tool ran. Counted by the address probed
+/// (`-J --flat-playlist -- <url>`): a single video's page is also probed
+/// once, for its cover, and is not a refresh.
 fn calls(data: &Path) -> usize {
-    std::fs::read_to_string(data.join("bin/calls")).map(|s| s.lines().count()).unwrap_or(0)
+    probes_of(data, "playlist?list=")
+}
+
+fn probes_of(data: &Path, part: &str) -> usize {
+    std::fs::read_to_string(data.join("bin/calls")).map(|s| s.lines().filter(|l| l.contains(part)).count()).unwrap_or(0)
 }
 
 /// Waits for every background refresh to finish.
@@ -433,6 +440,14 @@ async fn stepping_over_a_playlist_that_is_not_cached_fetches_it() {
     f.source.next().await;
     settle(&f.source).await;
     assert_eq!(calls(f.dir.path()), 1);
+    // The video played first was probed once, for its cover, and only it.
+    for _ in 0..100 {
+        if f.source.covering.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(probes_of(f.dir.path(), "watch?v="), 1);
 }
 
 #[tokio::test]
@@ -1083,4 +1098,107 @@ async fn a_failed_list_entry_that_mpv_moved_past_is_not_said() {
     std::thread::sleep(std::time::Duration::from_millis(20));
     f.source.player_track(1).await;
     assert_eq!(f.source.stop().await.status_text, None);
+}
+
+// ---- the cover of what plays ------------------------------------------------
+
+const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 7];
+
+/// A fetch that answers `JPEG` for every address and records them; an address
+/// containing `held` waits for `gate` first.
+fn fetch_held(calls: Arc<Mutex<Vec<String>>>, held: &'static str, gate: Arc<tokio::sync::Semaphore>) -> CoverFetch {
+    Arc::new(move |url: String| {
+        calls.lock().unwrap().push(url.clone());
+        let gate = gate.clone();
+        Box::pin(async move {
+            if url.contains(held) {
+                gate.acquire().await.unwrap().forget();
+            }
+            Some(JPEG.to_vec())
+        })
+    })
+}
+
+fn with_thumb(mut v: Video, url: &str) -> Video {
+    v.thumbnail_jpg = Some(url.into());
+    v
+}
+
+/// The next notification, or `None` when none comes within a while.
+async fn next_notice(f: &mut Fixture) -> Option<Notification> {
+    tokio::time::timeout(Duration::from_millis(500), f.source.poll_notification()).await.ok().flatten()
+}
+
+fn announced_path(n: &Notification) -> PathBuf {
+    match &n.cover {
+        Some(CoverRef::Path { path }) => PathBuf::from(path),
+        other => panic!("expected a cover by path, got {other:?}"),
+    }
+}
+
+/// The regression: a played video never had a cover, only a downloaded one.
+/// A single video's page is probed (its preset keeps no thumbnail), and the
+/// picture, fetched by the plugin, is handed over as a file: never as an
+/// address for the core to fetch outside the plugin's guard.
+#[tokio::test]
+async fn a_single_video_shows_its_sites_thumbnail_fetched_by_the_plugin() {
+    let mut f = Fixture::new(vec![video_entry(1)]);
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    install_tool(f.dir.path(), &format!("cat '{}'", fixtures.join("video.json").display()));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    f.source.fetch = fetch_held(calls.clone(), "never", Arc::new(tokio::sync::Semaphore::new(0)));
+    f.source.select(1).await;
+    let n = next_notice(&mut f).await.expect("a cover is announced");
+    let path = announced_path(&n);
+    assert_eq!(std::fs::read(&path).unwrap(), JPEG);
+    assert!(path.starts_with(f.dir.path().join("covers")), "{}", path.display());
+    let probe = ritornello_plugin_web_streaming::ytdlp::parse_probe(&std::fs::read_to_string(fixtures.join("video.json")).unwrap()).unwrap();
+    assert_eq!(*calls.lock().unwrap(), [probe.thumbnail_jpg.unwrap()], "the very thumbnail a download takes");
+    assert!(n.identity.is_none() && n.status_text.is_none(), "nothing else moves");
+
+    // Played again: from disk, neither probed nor fetched again.
+    install_tool(f.dir.path(), "exit 1");
+    f.source.stop().await;
+    f.source.select(1).await;
+    assert_eq!(announced_path(&next_notice(&mut f).await.unwrap()), path);
+    assert_eq!(calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn each_video_of_a_list_shows_its_own_thumbnail_and_a_late_one_is_dropped() {
+    let mut f = Fixture::new(vec![list_entry(2)]);
+    f.cache(
+        "PLx",
+        &[
+            with_thumb(vid("aaaaaaaaaaa", "A", true), "https://i.ytimg.com/vi/aaaaaaaaaaa/a.jpg"),
+            with_thumb(vid("bbbbbbbbbbb", "B", true), "https://i.ytimg.com/vi/bbbbbbbbbbb/b.jpg"),
+        ],
+    );
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    f.source.fetch = fetch_held(calls.clone(), "/a.jpg", gate.clone());
+    f.source.select(2).await;
+    // mpv moves on before A's picture arrives: B's is announced, A's never.
+    f.source.player_track(1).await;
+    let n = next_notice(&mut f).await.expect("B's cover");
+    assert_eq!(announced_path(&n), f.source.covers.path_for(&vid("bbbbbbbbbbb", "B", true).identity()));
+    gate.add_permits(1);
+    assert!(next_notice(&mut f).await.is_none(), "A no longer plays");
+    assert_eq!(
+        *calls.lock().unwrap(),
+        ["https://i.ytimg.com/vi/aaaaaaaaaaa/a.jpg", "https://i.ytimg.com/vi/bbbbbbbbbbb/b.jpg"],
+        "each from its own entry, no probe",
+    );
+}
+
+#[tokio::test]
+async fn a_cover_that_arrives_after_stop_is_not_announced() {
+    let mut f = Fixture::new(vec![list_entry(2)]);
+    f.cache("PLx", &[with_thumb(vid("aaaaaaaaaaa", "A", true), "https://i.ytimg.com/vi/aaaaaaaaaaa/a.jpg")]);
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    f.source.fetch = fetch_held(Arc::new(Mutex::new(Vec::new())), "/a.jpg", gate.clone());
+    f.source.select(2).await;
+    f.source.stop().await;
+    gate.add_permits(1);
+    assert!(next_notice(&mut f).await.is_none());
 }
