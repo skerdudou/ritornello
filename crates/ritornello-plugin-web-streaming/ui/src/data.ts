@@ -70,6 +70,30 @@ export interface Choices {
   cover: CoverMode
   /** The name of each preset's file (a video) or folder (a playlist), by its number. */
   names: Record<string, string>
+  /** The part kept of a single video, by its number; absent, the whole. */
+  trims: Record<string, Trim>
+}
+
+/** The part of a video kept, in whole seconds; a bound left out is its start or its end. */
+export interface Trim {
+  start?: number
+  end?: number
+}
+
+/**
+ * A time as typed: seconds (`95`), `m:ss` (`1:35`) or `h:mm:ss`
+ * (`1:01:35`). Empty is `null`, no bound; anything else that does not read
+ * as a time is `undefined`. Past the first part, minutes and seconds stay
+ * under 60: `1:75` is a typo, not 2:15.
+ */
+export function parseClock(text: string): number | null | undefined {
+  const typed = text.trim()
+  if (!typed) return null
+  const parts = typed.split(':')
+  if (parts.length > 3 || parts.some((p) => !/^\d+$/.test(p))) return undefined
+  const [first, ...rest] = parts.map(Number)
+  if (rest.some((n) => n >= 60)) return undefined
+  return rest.reduce((total, n) => total * 60 + n, first!)
 }
 
 export interface JobRow {
@@ -228,6 +252,12 @@ export function faultText(t: T, fault: Fault): string {
       return t('fault_no_media')
     case 'live_stream':
       return t('fault_live_stream')
+    case 'no_ffmpeg':
+      return t('fault_no_ffmpeg')
+    case 'trim_playlist':
+      return t('fault_trim_playlist')
+    case 'trim_outside':
+      return t('fault_trim_outside')
     case 'local_network':
       return t('fault_local_network', { detail })
     case 'tool_missing':
@@ -289,6 +319,8 @@ export function noteText(t: T, note: Fault): string {
       return t('note_converted_name_taken')
     case 'conversion_failed':
       return t('note_conversion_failed', { detail: note.detail ?? '' })
+    case 'trim_failed':
+      return t('note_trim_failed', { detail: note.detail ?? '' })
     case 'cover_beside':
       return t('note_cover_beside')
     case 'cover_name_taken':

@@ -24,6 +24,9 @@ pub const NO_PLAYLIST: &str = "the preset has no playlist";
 pub const NO_VIDEO: &str = "the preset has no video";
 pub const BAD_ADDRESS: &str = "the preset's address is unreadable";
 pub const LIVE_STREAM: &str = "a live stream is not downloaded";
+pub const NO_FFMPEG: &str = "ffmpeg is not installed";
+pub const TRIM_PLAYLIST: &str = "a playlist is not cut";
+pub const TRIM_OUTSIDE: &str = "the part to keep is outside the video";
 /// What yt-dlp's failure is written with when it printed nothing: this, then
 /// the system's own account of how it ended ("exit status: 3").
 pub const EXIT_PREFIX: &str = "yt-dlp stopped: ";
@@ -75,6 +78,9 @@ pub fn coded(message: &str) -> Coded {
         NO_VIDEO => return known("preset_no_video"),
         BAD_ADDRESS => return known("bad_entry"),
         LIVE_STREAM => return known("live_stream"),
+        NO_FFMPEG => return known("no_ffmpeg"),
+        TRIM_PLAYLIST => return known("trim_playlist"),
+        TRIM_OUTSIDE => return known("trim_outside"),
         SILENT => return known("failed_silent"),
         _ => {}
     }
@@ -151,7 +157,7 @@ mod tests {
     fn every_constant_has_a_code() {
         for m in [
             UNAVAILABLE, INVALID_ID, NOT_INSTALLED, TOOL_TIMEOUT, TIMED_OUT, INTERRUPTED, JOB_LOST, NO_SUCH_PRESET,
-            NO_PLAYLIST, NO_VIDEO, BAD_ADDRESS, LIVE_STREAM, SILENT,
+            NO_PLAYLIST, NO_VIDEO, BAD_ADDRESS, LIVE_STREAM, SILENT, NO_FFMPEG, TRIM_PLAYLIST, TRIM_OUTSIDE,
         ] {
             assert_ne!(coded(m).code, "failed", "{m}");
             assert!(coded(m).detail.is_none());

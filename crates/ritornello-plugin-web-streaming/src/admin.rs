@@ -33,7 +33,7 @@ use ritornello_plugin_web_streaming::reason;
 use ritornello_files_mount::mounts::read_proc_mounts;
 use ritornello_plugin_sdk::AdminPlugin;
 use ritornello_plugin_web_streaming::entries::{Entries, Entry, ListCache};
-use ritornello_plugin_web_streaming::download::{CoverMode, Format, default_name};
+use ritornello_plugin_web_streaming::download::{CoverMode, Format, Trim, default_name};
 use ritornello_plugin_web_streaming::jobs::{JobOptions, Jobs};
 use ritornello_plugin_web_streaming::link::parse_link;
 use ritornello_plugin_web_streaming::settings::Channel;
@@ -86,6 +86,10 @@ enum Op {
         /// key would not be read back from that buffer).
         #[serde(default)]
         names: BTreeMap<String, String>,
+        /// The part kept per preset, keyed the same way; a single video's
+        /// only.
+        #[serde(default)]
+        trims: BTreeMap<String, Trim>,
     },
     Cancel { job: u64 },
     /// Forgets the downloads that are over; those queued or running stay.
@@ -169,6 +173,15 @@ fn keyed(key: &str) -> Text {
 
 fn keyed_with(key: &str, param: &str, value: impl ToString) -> Text {
     Text::Keyed { key: key.into(), params: HashMap::from([(param.to_string(), value.to_string())]) }
+}
+
+/// A map the page keys by preset number as a string (see `Op::Download`),
+/// keyed by the number.
+fn by_preset<V>(map: BTreeMap<String, V>) -> Result<BTreeMap<u8, V>, Text> {
+    map.into_iter()
+        .map(|(preset, value)| preset.parse::<u8>().map(|p| (p, value)))
+        .collect::<Result<_, _>>()
+        .map_err(|e| keyed_with("bad_request", "detail", e))
 }
 
 impl WebStreamingAdmin {
@@ -285,7 +298,7 @@ impl WebStreamingAdmin {
         Ok(())
     }
 
-    fn download(&self, presets: Vec<u8>, target: Target, options: JobOptions) -> Result<(), Text> {
+    fn download(&self, presets: Vec<u8>, target: Target, mut options: JobOptions, playlists: &[u8]) -> Result<(), Text> {
         if presets.is_empty() {
             return Err(keyed("nothing_selected"));
         }
@@ -299,6 +312,20 @@ impl WebStreamingAdmin {
         // had to be kept.)
         if options.format == Format::Mp3 && self.tool.capabilities().ffmpeg_path.is_none() {
             return Err(keyed("ffmpeg_missing"));
+        }
+        // A cut that keeps everything is none; one of a preset not asked
+        // for is dropped. What is left must be a single video's, keep
+        // something, and find ffmpeg: never a whole download that ends up
+        // not cut, nor an empty file.
+        options.trims.retain(|preset, trim| presets.contains(preset) && !trim.is_whole());
+        if let Some(preset) = options.trims.keys().find(|p| playlists.contains(p)) {
+            return Err(keyed_with("trim_playlist", "preset", preset));
+        }
+        if let Some((preset, _)) = options.trims.iter().find(|(_, t)| t.is_empty()) {
+            return Err(keyed_with("trim_empty", "preset", preset));
+        }
+        if !options.trims.is_empty() && self.tool.capabilities().ffmpeg_path.is_none() {
+            return Err(keyed("trim_needs_ffmpeg"));
         }
         let (format, cover) = (options.format, options.cover);
         self.jobs.enqueue_with(presets, target.clone(), options);
@@ -441,13 +468,15 @@ impl AdminPlugin for WebStreamingAdmin {
                 explore::create_dir(&self.shared, &self.env, target, name);
                 Ok(())
             }
-            Op::Download { presets, target, format, cover, names } => {
-                let names = names
-                    .into_iter()
-                    .map(|(preset, name)| preset.parse::<u8>().map(|p| (p, name)))
-                    .collect::<Result<BTreeMap<u8, String>, _>>()
-                    .map_err(|e| keyed_with("bad_request", "detail", e))?;
-                self.download(presets, target, JobOptions { format, cover, names })
+            Op::Download { presets, target, format, cover, names, trims } => {
+                let names = by_preset(names)?;
+                let trims = by_preset(trims)?;
+                // What each preset is, as saved: a cut is a single video's.
+                let playlists: Vec<u8> = {
+                    let entries = self.entries.read().await;
+                    entries.entry.iter().filter(|e| e.kind == Kind::Playlist).map(|e| e.preset).collect()
+                };
+                self.download(presets, target, JobOptions { format, cover, names, trims }, &playlists)
             }
             Op::Cancel { job } => {
                 // A job that ended a moment ago is not an error.

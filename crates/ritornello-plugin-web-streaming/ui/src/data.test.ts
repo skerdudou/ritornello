@@ -3,8 +3,8 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
-  emptyData, faultText, playFailureText, runtimeErrorText, stateText, targetText, updateErrorText, videoCount,
-  workInProgress,
+  emptyData, faultText, parseClock, playFailureText, runtimeErrorText, stateText, targetText, updateErrorText,
+  videoCount, workInProgress,
 } from './data'
 import { CATALOG, state } from './harness'
 
@@ -18,7 +18,7 @@ describe('faultText', () => {
       'unknown_root', 'not_writable', 'not_mounted', 'escapes', 'unresponsive', 'io', 'wrong_kind',
       'unavailable', 'invalid_id', 'timed_out', 'interrupted', 'job_lost', 'no_such_preset',
       'preset_no_playlist', 'preset_no_video', 'bad_entry', 'failed_silent', 'exited', 'local_network',
-      'unreadable_output',
+      'unreadable_output', 'no_ffmpeg', 'trim_playlist', 'trim_outside',
     ]) {
       const text = faultText(t, { code, detail: 'the detail' })
       expect(text, code).not.toMatch(/^fault_/)
@@ -33,6 +33,24 @@ describe('faultText', () => {
   it('shows what the tool said for a code it does not know, rather than nothing', () => {
     expect(faultText(t, { code: 'brand_new', detail: 'ERROR: x' })).toBe('yt-dlp: ERROR: x')
     expect(faultText(t, { code: 'brand_new' })).toBe('yt-dlp: brand_new')
+  })
+})
+
+describe('parseClock', () => {
+  it('reads seconds, m:ss and h:mm:ss, and empty as no bound', () => {
+    expect(parseClock('')).toBeNull()
+    expect(parseClock('  ')).toBeNull()
+    expect(parseClock('95')).toBe(95)
+    expect(parseClock('1:35')).toBe(95)
+    expect(parseClock(' 01:35 ')).toBe(95)
+    expect(parseClock('1:01:35')).toBe(3695)
+    expect(parseClock('0:00')).toBe(0)
+  })
+
+  it('refuses what is not a time rather than guessing', () => {
+    for (const typo of ['1:75', '1:60:00', '1:2:3:4', '1.5', '-3', 'abc', '1:', ':30', '1::30']) {
+      expect(parseClock(typo), typo).toBeUndefined()
+    }
   })
 })
 

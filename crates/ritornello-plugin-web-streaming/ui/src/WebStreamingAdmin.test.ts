@@ -195,7 +195,7 @@ describe('WebStreamingAdmin', () => {
     expect(s.putsOf('download')).toEqual([
       {
         op: 'download', presets: [1, 3], target: { root: 'nas', path: 'rock' },
-        format: 'original', cover: 'separate', names: { 1: 'Video 1', 3: 'Video 3' },
+        format: 'original', cover: 'separate', names: { 1: 'Video 1', 3: 'Video 3' }, trims: {},
       },
     ])
   })
@@ -388,6 +388,78 @@ describe('WebStreamingAdmin', () => {
     await typeDialog('[data-name="1"]', 'Zoo, first video')
     await clickDialog('[data-download-here]')
     expect(s.putsOf('download')[0]).toMatchObject({ names: { 1: 'Zoo, first video', 2: 'List 2' } })
+  })
+
+  /** The dialog opened on its options for the presets given, all ticked. */
+  async function optionsFor(over: Parameters<typeof mountAdmin>[0]) {
+    const mounted = await mountAdmin({ targets: ['nas'], ...over })
+    for (const box of mounted.w.findAll('[data-entry-select]')) await box.setValue(true)
+    await mounted.w.find('[data-download]').trigger('click')
+    await flushPromises()
+    await clickDialog('[data-next]')
+    return mounted
+  }
+
+  it('offers a cut for a single video only and sends the part typed', async () => {
+    const { s } = await optionsFor({ entries: [video(1), list(2), video(3)] })
+    expect(inDialog('[data-trim="1"]')).not.toBeNull()
+    expect(inDialog('[data-trim="2"]'), 'a playlist is never cut').toBeNull()
+    expect(inDialog('[data-trim-help]')!.textContent).toBe(CATALOG.trim_help)
+    await typeDialog('[data-trim-start="1"]', '1:23')
+    await typeDialog('[data-trim-end="1"]', '5:00')
+    // Video 3 is left whole: a start of 0 alone is no cut.
+    await typeDialog('[data-trim-start="3"]', '0:00')
+    await clickDialog('[data-download-here]')
+    expect(s.putsOf('download')[0]!.trims).toEqual({ 1: { start: 83, end: 300 } })
+  })
+
+  it('sends one bound alone, the start or the end', async () => {
+    const { s } = await optionsFor({ entries: [video(1), video(2)] })
+    await typeDialog('[data-trim-start="1"]', '90')
+    await typeDialog('[data-trim-end="2"]', '1:00:00')
+    await clickDialog('[data-download-here]')
+    expect(s.putsOf('download')[0]!.trims).toEqual({ 1: { start: 90 }, 2: { end: 3600 } })
+  })
+
+  it('says what is wrong with a time and does not download until it is right', async () => {
+    const { s } = await optionsFor({ entries: [video(1)] })
+    const button = () => inDialog('[data-download-here]') as HTMLButtonElement
+    await typeDialog('[data-trim-start="1"]', '1:75')
+    expect(inDialog('[data-trim-error="1"]')!.textContent!.trim()).toBe(CATALOG.trim_invalid)
+    expect(button().disabled).toBe(true)
+    await typeDialog('[data-trim-start="1"]', '2:00')
+    await typeDialog('[data-trim-end="1"]', '1:00')
+    expect(inDialog('[data-trim-error="1"]')!.textContent!.trim()).toBe(CATALOG.trim_order)
+    expect(button().disabled).toBe(true)
+    await clickDialog('[data-download-here]')
+    expect(s.putsOf('download')).toHaveLength(0)
+    await typeDialog('[data-trim-end="1"]', '')
+    expect(inDialog('[data-trim-error="1"]')).toBeNull()
+    expect(button().disabled).toBe(false)
+  })
+
+  it('does not offer a cut without ffmpeg, and says the command', async () => {
+    const caps = { ...state().capabilities, ffmpeg: null, ffmpeg_hint: 'sudo apt install ffmpeg' }
+    const { s } = await optionsFor({ entries: [video(1)], capabilities: caps })
+    expect((inDialog('[data-trim-start="1"]') as HTMLInputElement).disabled).toBe(true)
+    expect((inDialog('[data-trim-end="1"]') as HTMLInputElement).disabled).toBe(true)
+    expect(inDialog('[data-trim-unavailable]')!.textContent).toContain('sudo apt install ffmpeg')
+    expect(inDialog('[data-trim-help]')).toBeNull()
+    await clickDialog('[data-download-here]')
+    expect(s.putsOf('download')[0]!.trims).toEqual({})
+  })
+
+  it('opens again with every video whole', async () => {
+    const { w, s } = await optionsFor({ entries: [video(1)] })
+    await typeDialog('[data-trim-start="1"]', '10')
+    await clickDialog('[data-download-here]')
+    await w.find('[data-entry-select]').setValue(true)
+    await w.find('[data-download]').trigger('click')
+    await flushPromises()
+    await clickDialog('[data-next]')
+    expect((inDialog('[data-trim-start="1"]') as HTMLInputElement).value).toBe('')
+    await clickDialog('[data-download-here]')
+    expect(s.putsOf('download')[1]!.trims).toEqual({})
   })
 
   it('says why a share cannot be listed, in the catalog\'s words', async () => {

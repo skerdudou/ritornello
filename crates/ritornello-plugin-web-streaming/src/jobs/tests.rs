@@ -267,6 +267,7 @@ async fn the_view_round_trips_through_json_with_rows_of_every_state() {
                 format: Format::Mp3,
                 cover: CoverMode::Embedded,
                 names: [(1, "Mine".to_string())].into(),
+                trims: [(1, crate::download::Trim { start: Some(83), end: None })].into(),
             },
         }],
     };
