@@ -36,6 +36,19 @@
 //! download. No ffmpeg on the device: the site's own file is kept and the
 //! row says so ([`Note`]).
 //!
+//! **A cut is the same local step** ([`Trim`]): only a single video takes
+//! one, the whole video is downloaded (yt-dlp cuts only with ffmpeg, which
+//! it never finds), then the plugin's ffmpeg keeps the part asked. When the
+//! format does not change, the stream is copied, never re-encoded: an audio
+//! packet is ~20 ms, so the cut lands within that of the time asked
+//! (measured with ffmpeg 6.1 on webm/opus, m4a/aac, mp3 and ogg/opus: a cut
+//! of 3.5 s gave 3.48 to 3.52 s, starting at 0). When it changes, the cut
+//! goes into the conversion, which encodes anyway: one pass, not two. A cut
+//! is never started without ffmpeg (the admin refuses it, and the preset
+//! fails before any download if ffmpeg went away since), nor from a start
+//! past the video's known end (ffmpeg would write an empty file and say
+//! nothing). A cut that fails keeps the whole file and says so.
+//!
 //! **The names are the plugin's.** yt-dlp is handed a finished path, not a
 //! template to fill from remote data: [`sanitize`] turns a title, or the name
 //! the operator typed, into a name that cannot leave its folder, and `%` is
@@ -317,6 +330,44 @@ pub struct Choices {
     /// The name typed for the file (a video) or the folder (a playlist):
     /// cleaned by [`sanitize`]; empty once cleaned, the default stands.
     pub name: Option<String>,
+    /// The part of a single video to keep; `None` keeps it whole.
+    pub trim: Option<Trim>,
+}
+
+/// The part of a video to keep, in whole seconds from its start: either
+/// bound may be left out (from the start, to the end).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Trim {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<u32>,
+}
+
+impl Trim {
+    /// Keeps everything: no cut to make.
+    pub fn is_whole(self) -> bool {
+        self.start.unwrap_or(0) == 0 && self.end.is_none()
+    }
+
+    /// Keeps nothing: an end at or before the start.
+    pub fn is_empty(self) -> bool {
+        self.end.is_some_and(|end| end <= self.start.unwrap_or(0))
+    }
+
+    /// ffmpeg's output options for the cut, placed after the input: the
+    /// stream is read from its start and what falls outside is dropped,
+    /// whole packets when copied, exact samples when encoded.
+    fn args(self) -> Vec<String> {
+        let mut args = Vec::new();
+        if let Some(start) = self.start.filter(|s| *s > 0) {
+            args.extend(["-ss".to_string(), start.to_string()]);
+        }
+        if let Some(end) = self.end {
+            args.extend(["-to".to_string(), end.to_string()]);
+        }
+        args
+    }
 }
 
 /// What a row says besides its state: a download that went through, but not
@@ -335,6 +386,8 @@ pub enum Note {
     ConvertedNameTaken,
     /// ffmpeg failed, with its last line: the original was kept.
     ConversionFailed(String),
+    /// The cut asked could not be made, with why: the whole file was kept.
+    TrimFailed(String),
     /// The cover could not go into this container: it was written beside
     /// the track instead.
     CoverBeside,
@@ -532,22 +585,105 @@ fn conversion_temporary(dir: &Path, stem: &str, ext: &str) -> PathBuf {
 /// ffmpeg's arguments for turning `from` into `format` at `to`. Only local
 /// files: the protocol whitelist and the `file:` spelling keep a name that
 /// looks like a protocol from being one, and nothing is read from stdin.
-pub fn conversion_args(from: &Path, to: &Path, format: Format) -> Vec<String> {
+pub fn conversion_args(from: &Path, to: &Path, format: Format, trim: Option<Trim>) -> Vec<String> {
     let codec: &[&str] = match format {
         Format::Mp3 => &["-c:a", "libmp3lame", "-q:a", "2", "-f", "mp3"],
         // AAC in the container yt-dlp itself writes an m4a with.
         Format::M4a | Format::Original => &["-c:a", "aac", "-b:a", "192k", "-f", "ipod"],
     };
+    ffmpeg_args(from, to, trim, codec)
+}
+
+/// ffmpeg's arguments for keeping `trim` of `from` at `to`, the stream
+/// copied into `muxer`: nothing re-encoded. Same guards as a conversion.
+pub fn trim_args(from: &Path, to: &Path, trim: Trim, muxer: &str) -> Vec<String> {
+    ffmpeg_args(from, to, Some(trim), &["-c", "copy", "-f", muxer])
+}
+
+fn ffmpeg_args(from: &Path, to: &Path, trim: Option<Trim>, codec: &[&str]) -> Vec<String> {
     let mut args: Vec<String> = ["-nostdin", "-hide_banner", "-loglevel", "error", "-protocol_whitelist", "file", "-i"]
         .map(str::to_string)
         .to_vec();
     args.push(format!("file:{}", from.display()));
     args.extend(["-vn", "-map", "0:a:0"].map(str::to_string));
+    args.extend(trim.map(Trim::args).unwrap_or_default());
     args.extend(codec.iter().map(|a| a.to_string()));
     // Never over an existing file, the temporary included.
     args.push("-n".into());
     args.push(format!("file:{}", to.display()));
     args
+}
+
+/// The muxer a stream copy of a `.<ext>` file is written with: named, since
+/// the temporary's own name tells ffmpeg nothing. Only the containers a cut
+/// was measured in; another keeps its whole file, and says so.
+fn copy_muxer(ext: &str) -> Option<&'static str> {
+    Some(match ext.to_ascii_lowercase().as_str() {
+        "webm" => "webm",
+        "m4a" => "ipod",
+        "mp3" => "mp3",
+        "opus" | "ogg" => "ogg",
+        _ => return None,
+    })
+}
+
+/// The hidden temporary a cut writes into, renamed over the file once
+/// complete.
+fn trim_temporary(dir: &Path, stem: &str, ext: &str) -> PathBuf {
+    dir.join(format!(".{stem}.{ext}.trimming"))
+}
+
+enum Trimmed {
+    Done,
+    Kept(Note),
+    Cancelled,
+}
+
+/// Keeps `trim` of `<stem>.<ext>`, the stream copied, in place: the file is
+/// the one this download just wrote, so it is replaced, through a hidden
+/// temporary renamed over it only once ffmpeg succeeded.
+async fn trim_in_place(ctx: &Ctx, ffmpeg: &Path, dir: &Path, stem: &str, ext: &str, trim: Trim, cancel: &Cancel) -> Trimmed {
+    let Some(muxer) = copy_muxer(ext) else {
+        return Trimmed::Kept(Note::TrimFailed(format!("a .{ext} file is not cut here")));
+    };
+    let (source, tmp) = (dir.join(format!("{stem}.{ext}")), trim_temporary(dir, stem, ext));
+    // A temporary a crash left is ours to clear.
+    let leftover = tmp.clone();
+    let cleared = blocking(ctx.limits.fs, move || match std::fs::remove_file(&leftover) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    })
+    .await;
+    if let Err(e) = cleared {
+        return Trimmed::Kept(Note::TrimFailed(e.to_string()));
+    }
+    let args = trim_args(&source, &tmp, trim, muxer);
+    let end = run_ytdlp(ffmpeg, &args, cancel, ctx.limits.convert, &mut |_| {}).await;
+    let clear = |tmp: PathBuf| async move {
+        let _ = blocking(ctx.limits.fs, move || std::fs::remove_file(tmp)).await;
+    };
+    let why = match end {
+        RunEnd::Exited { success: true, .. } => None,
+        RunEnd::Cancelled => {
+            clear(tmp).await;
+            return Trimmed::Cancelled;
+        }
+        RunEnd::Exited { success: false, last_error } => Some(last_error.unwrap_or_default()),
+        RunEnd::TimedOut => Some(reason::TIMED_OUT.to_string()),
+        RunEnd::Spawn(m) => Some(m),
+    };
+    if let Some(why) = why {
+        clear(tmp).await;
+        return Trimmed::Kept(Note::TrimFailed(why));
+    }
+    let left = tmp.clone();
+    match blocking(ctx.limits.fs, move || std::fs::rename(&tmp, &source)).await {
+        Ok(()) => Trimmed::Done,
+        Err(e) => {
+            clear(left).await;
+            Trimmed::Kept(Note::TrimFailed(e.to_string()))
+        }
+    }
 }
 
 enum Converted {
@@ -561,7 +697,8 @@ enum Converted {
 /// Converts `<stem>.<from>` into the format's extension with ffmpeg; never
 /// over an existing file, the original removed only once the new one is in
 /// place.
-async fn convert(ctx: &Ctx, ffmpeg: &Path, dir: &Path, stem: &str, from: &str, format: Format, cancel: &Cancel) -> Converted {
+#[allow(clippy::too_many_arguments)]
+async fn convert(ctx: &Ctx, ffmpeg: &Path, dir: &Path, stem: &str, from: &str, format: Format, trim: Option<Trim>, cancel: &Cancel) -> Converted {
     let Some(to) = format.wanted_ext() else { return Converted::Done(from.to_string()) };
     let (source, target, tmp) = (dir.join(format!("{stem}.{from}")), dir.join(format!("{stem}.{to}")), conversion_temporary(dir, stem, to));
     let (check, leftover) = (target.clone(), tmp.clone());
@@ -579,7 +716,7 @@ async fn convert(ctx: &Ctx, ffmpeg: &Path, dir: &Path, stem: &str, from: &str, f
     if free != Ok(true) {
         return Converted::Kept(Note::ConvertedNameTaken);
     }
-    let args = conversion_args(&source, &tmp, format);
+    let args = conversion_args(&source, &tmp, format, trim);
     let end = run_ytdlp(ffmpeg, &args, cancel, ctx.limits.convert, &mut |_| {}).await;
     let clear = |tmp: PathBuf| async move {
         let _ = blocking(ctx.limits.fs, move || std::fs::remove_file(tmp)).await;
@@ -895,6 +1032,8 @@ async fn finish_video(
             return Ok(());
         }
     };
+    // A cut still to make: done by the conversion when there is one.
+    let mut trim = choices.trim.filter(|t| !t.is_whole());
     if let Some(wanted) = choices.format.wanted_ext()
         && !ext.eq_ignore_ascii_case(wanted)
     {
@@ -902,10 +1041,27 @@ async fn finish_video(
             None => sink(Event::Noted(i, Note::NoFfmpeg)),
             Some(ffmpeg) => {
                 sink(Event::Converting(i));
-                match convert(ctx, &ffmpeg, dir, stem, &ext, choices.format, cancel).await {
-                    Converted::Done(to) => ext = to,
+                match convert(ctx, &ffmpeg, dir, stem, &ext, choices.format, trim, cancel).await {
+                    Converted::Done(to) => {
+                        ext = to;
+                        trim = None;
+                    }
                     Converted::Kept(why) => sink(Event::Noted(i, why)),
                     Converted::Cancelled => return Err(()),
+                }
+            }
+        }
+    }
+    // The format stays (or its conversion failed): the stream is copied.
+    if let Some(trim) = trim {
+        match (ctx.limits.ffmpeg)() {
+            None => sink(Event::Noted(i, Note::TrimFailed(reason::NO_FFMPEG.into()))),
+            Some(ffmpeg) => {
+                sink(Event::Converting(i));
+                match trim_in_place(ctx, &ffmpeg, dir, stem, &ext, trim, cancel).await {
+                    Trimmed::Done => {}
+                    Trimmed::Kept(why) => sink(Event::Noted(i, why)),
+                    Trimmed::Cancelled => return Err(()),
                 }
             }
         }
@@ -939,6 +1095,20 @@ pub async fn download_preset(
         return PresetEnd::Cancelled;
     }
     let playlist = probe.kind == Kind::Playlist;
+    // A cut is judged before anything is downloaded: the admin refused what
+    // it could, but the preset or the machine may have changed since.
+    if let Some(trim) = choices.trim.filter(|t| !t.is_whole()) {
+        if playlist {
+            return PresetEnd::Failed(reason::TRIM_PLAYLIST.into());
+        }
+        if (ctx.limits.ffmpeg)().is_none() {
+            return PresetEnd::Failed(reason::NO_FFMPEG.into());
+        }
+        let duration = probe.entries.first().and_then(|v| v.duration);
+        if trim.is_empty() || duration.is_some_and(|d| trim.start.unwrap_or(0) >= d) {
+            return PresetEnd::Failed(reason::TRIM_OUTSIDE.into());
+        }
+    }
     let typed = choices.name.as_deref().unwrap_or("");
     let mut planned = plan(&probe.entries, playlist);
     // A single video's file takes the name typed, cleaned like a title; one

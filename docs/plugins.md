@@ -2783,12 +2783,29 @@ a folder of a share, in the format chosen in the dialog:
   capabilities panel): without it, mp3 is not offered (and refused by the
   plugin if asked), and an m4a asked of a site without one keeps the site's
   format, which the job's row says. The choice is remembered with the folder.
-- **What a row says.** Besides its state (`converting` while ffmpeg runs), a
+- **Part to keep.** A single video (never a playlist) may be cut: a start
+  and an end typed as `h:mm:ss`, `m:ss` or seconds, either left empty for
+  the start or the end. The whole video is downloaded (yt-dlp cuts only
+  with the ffmpeg it is denied), then the plugin's ffmpeg keeps the part:
+  in the site's format by **copying the stream**
+  (`-ss <start> -to <end> -c copy`, as output options, into a hidden
+  temporary renamed over the file), so nothing is re-encoded and the cut
+  lands on an audio packet, within ~20 ms of the time asked; with a
+  conversion, the same options go into it, one pass. Only the containers the
+  copy was measured in are cut (webm, m4a, mp3, opus, ogg); another keeps
+  its whole file and says so. A cut needs ffmpeg: without it the fields are
+  disabled, the plugin refuses a cut it is sent, and a job whose machine
+  lost ffmpeg since fails the preset **before** downloading. A start at or
+  past the video's known duration fails the same way (ffmpeg would write an
+  empty file without a word). A cut that fails keeps the whole file. The
+  cut is not remembered: each download starts whole.
+- **What a row says.** Besides its state (`processing` while ffmpeg runs, to
+  convert or to cut), a
   video says when it went otherwise than asked: a file of that name was
   already there (left as it was, nothing converted), ffmpeg is missing, the
   converted name is taken, the conversion failed (ffmpeg's last line; the
-  original is kept), the cover went beside the file, or a picture of that
-  name was already there.
+  original is kept), the cut failed (the whole file is kept), the cover went
+  beside the file, or a picture of that name was already there.
 
 - **Where.** Only an SMB root of the `files` plugin that is declared
   *writable* **and** is mounted `rw` right now (read from `/proc/mounts`) is

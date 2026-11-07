@@ -679,6 +679,60 @@ async fn mp3_is_taken_once_ffmpeg_is_found() {
     w.op(json!({ "op": "download", "presets": [1], "target": { "root": "nas", "path": "" }, "format": "mp3" })).await.unwrap();
 }
 
+/// A world whose machine probe found an ffmpeg (a script that only says its
+/// version).
+async fn world_with_ffmpeg(tool_body: &str) -> (World, tempfile::TempDir) {
+    let sys = tempfile::tempdir().unwrap();
+    let ffmpeg = sys.path().join("ffmpeg");
+    std::fs::write(&ffmpeg, "#!/bin/sh\necho 'ffmpeg version 7.1.1-1+b1 Copyright (c) 2000-2025 the FFmpeg developers'\n").unwrap();
+    std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut w = world_searching(tool_body, Duration::from_secs(30), "arm", vec![sys.path().into()]).await;
+    w.op(json!({ "op": "reprobe" })).await.unwrap();
+    w.until("probed", |d| d["capabilities"]["ffmpeg"] != Value::Null).await;
+    (w, sys)
+}
+
+#[tokio::test]
+async fn a_cut_is_refused_without_ffmpeg_and_nothing_is_queued() {
+    let mut w = world("exit 1").await;
+    w.op(json!({ "op": "reprobe" })).await.unwrap();
+    w.until("probed", |d| d["capabilities"]["ffmpeg_hint"] != Value::Null).await;
+    w.entries.write().await.entry = vec![entry(1, VIDEO, Kind::Video)];
+    let target = json!({ "root": "nas", "path": "" });
+    let cut = json!({ "op": "download", "presets": [1], "target": target, "trims": { "1": { "start": 10, "end": 70 } } });
+    assert_eq!(key_of(w.op(cut).await), "trim_needs_ffmpeg");
+    assert!(w.admin.get_data().await["jobs"].as_array().unwrap().is_empty(), "nothing was queued");
+    // A "cut" that keeps everything is none, and needs nothing.
+    w.op(json!({ "op": "download", "presets": [1], "target": target, "trims": { "1": { "start": 0 } } })).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_cut_is_a_single_video_s_and_must_keep_something() {
+    let (mut w, _sys) = world_with_ffmpeg("exit 1").await;
+    w.entries.write().await.entry = vec![entry(1, VIDEO, Kind::Video), entry(2, LIST, Kind::Playlist)];
+    let target = json!({ "root": "nas", "path": "" });
+    let refused = |trims: Value| json!({ "op": "download", "presets": [1, 2], "target": target, "trims": trims });
+    let r = w.op(refused(json!({ "2": { "end": 60 } }))).await;
+    assert_eq!(key_of(r.clone()), "trim_playlist");
+    assert_eq!(r.unwrap_err(), keyed_with("trim_playlist", "preset", 2));
+    for empty in [json!({ "start": 60, "end": 60 }), json!({ "start": 61, "end": 60 }), json!({ "end": 0 })] {
+        assert_eq!(key_of(w.op(refused(json!({ "1": empty }))).await), "trim_empty", "{empty}");
+    }
+    assert!(w.admin.get_data().await["jobs"].as_array().unwrap().is_empty(), "nothing was queued");
+    // Kept with the job, a whole "cut" and one of a preset not asked for
+    // dropped (the playlist's included: it is not downloaded here).
+    w.op(json!({
+        "op": "download", "presets": [1], "target": target,
+        "trims": { "1": { "start": 83, "end": 300 }, "2": { "end": 5 } },
+    }))
+    .await
+    .unwrap();
+    w.op(json!({ "op": "download", "presets": [1], "target": target, "trims": { "1": { "start": 0 } } })).await.unwrap();
+    let d = w.until("two jobs", |d| d["jobs"].as_array().unwrap().len() == 2).await;
+    assert_eq!(d["jobs"][0]["options"]["trims"], json!({ "1": { "start": 83, "end": 300 } }));
+    assert_eq!(d["jobs"][1]["options"].get("trims"), None);
+}
+
 #[tokio::test]
 async fn the_choices_go_with_the_job_and_the_format_and_cover_are_remembered() {
     let mut w = world(&answering()).await;

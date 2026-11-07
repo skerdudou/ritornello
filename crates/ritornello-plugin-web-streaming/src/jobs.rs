@@ -19,7 +19,7 @@ use ritornello_files_mount::roots::Roots;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock as AsyncRwLock, mpsc};
 
-use crate::download::{Action, Cancel, Choices, CoverMode, Ctx, Event, Format, Note, PresetEnd, VideoState, download_preset};
+use crate::download::{Action, Cancel, Choices, CoverMode, Ctx, Event, Format, Note, PresetEnd, Trim, VideoState, download_preset};
 use crate::entries::{Entries, write_atomically};
 use crate::reason;
 use crate::targets::{Resolved, Target, TargetError, resolve_parts};
@@ -71,11 +71,19 @@ pub struct JobOptions {
     /// The name typed per preset: a video's file, a playlist's folder.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub names: std::collections::BTreeMap<u8, String>,
+    /// The part kept per preset, a single video's only.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub trims: std::collections::BTreeMap<u8, Trim>,
 }
 
 impl JobOptions {
     fn for_preset(&self, preset: u8) -> Choices {
-        Choices { format: self.format, cover: self.cover, name: self.names.get(&preset).cloned() }
+        Choices {
+            format: self.format,
+            cover: self.cover,
+            name: self.names.get(&preset).cloned(),
+            trim: self.trims.get(&preset).copied(),
+        }
     }
 }
 

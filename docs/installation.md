@@ -2126,6 +2126,12 @@ there. In particular:
   (DASH, which yt-dlp would have repaired with the ffmpeg it is denied) is
   kept as it comes; that it plays and takes an embedded cover has not been
   checked;
+- a **cut** (the part of a single video kept) was made by a real ffmpeg
+  (6.1.1) on a workstation only, on tones it generated: 2 to 5 s of 10 s
+  kept 2.9 to 3.1 s in opus, m4a and mp3 copied, and in a webm converted to
+  mp3. Debian's ffmpeg on the device, a real YouTube download, and how long
+  a copy of a long mix takes on a Pi 2 are not checked; nor has the dialog's
+  row of fields been looked at on a phone;
 - **covers written into the file** were read back with `lofty` on
   workstation files (mp3, m4a, opus); that the core shows them for a
   downloaded track, and that `files` shows a track's own `<name>.jpg` on the

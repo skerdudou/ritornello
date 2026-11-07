@@ -4,7 +4,8 @@ import {
 } from '@ritornello/ui'
 import { computed, ref, watch } from 'vue'
 import {
-  faultText, targetText, type Choices, type CoverMode, type Explore, type Format, type Kind, type T, type Target,
+  faultText, parseClock, targetText, type Choices, type CoverMode, type Explore, type Format, type Kind, type T,
+  type Target, type Trim,
 } from './data'
 
 /** A preset about to be downloaded, as the dialog names it. */
@@ -28,7 +29,7 @@ const props = defineProps<{
   defaultNames: Record<string, string>
   lastFormat: Format
   lastCover: CoverMode
-  /** ffmpeg's version, null without it: mp3 is then not offered. */
+  /** ffmpeg's version, null without it: mp3 and cutting are then not offered. */
   ffmpeg: string | null
   /** The command that installs ffmpeg. */
   ffmpegHint: string | null
@@ -47,6 +48,8 @@ const newName = ref('')
 const format = ref<Format>('original')
 const cover = ref<CoverMode>('separate')
 const names = ref<Record<string, string>>({})
+/** The times typed for each single video's cut, as typed. */
+const cuts = ref<Record<string, { start: string; end: string }>>({})
 
 /**
  * A folder asked for and not yet confirmed: the dialog enters it once the
@@ -70,6 +73,31 @@ const listed = computed(() => {
 const step = ref<'where' | 'options'>('where')
 
 const hasPlaylist = computed(() => props.items.some((i) => i.kind === 'playlist'))
+const videos = computed(() => props.items.filter((i) => i.kind === 'video'))
+
+/**
+ * Each video's cut, read: the part kept, `null` for the whole, or what is
+ * wrong with what was typed. Without ffmpeg nothing typed counts: the
+ * fields are disabled, and the plugin would refuse a cut anyway.
+ */
+const cutOf = computed(() => {
+  const read: Record<string, Trim | null | 'invalid' | 'order'> = {}
+  for (const i of videos.value) {
+    const typed = cuts.value[String(i.preset)] ?? { start: '', end: '' }
+    const start = parseClock(typed.start)
+    const end = parseClock(typed.end)
+    let cut: Trim | null | 'invalid' | 'order'
+    if (!props.ffmpeg) cut = null
+    else if (start === undefined || end === undefined) cut = 'invalid'
+    else if (end !== null && end <= (start ?? 0)) cut = 'order'
+    else if (!start && end === null) cut = null
+    else cut = { ...(start ? { start } : {}), ...(end !== null ? { end } : {}) }
+    read[String(i.preset)] = cut
+  }
+  return read
+})
+
+const cutsValid = computed(() => Object.values(cutOf.value).every((c) => c !== 'invalid' && c !== 'order'))
 
 function look(): void {
   newName.value = ''
@@ -90,6 +118,8 @@ watch(
     format.value = props.lastFormat === 'mp3' && !props.ffmpeg ? 'original' : props.lastFormat
     cover.value = props.lastCover
     names.value = Object.fromEntries(props.items.map((i) => [String(i.preset), props.defaultNames[String(i.preset)] ?? '']))
+    // A cut is one video's, never remembered: each download starts whole.
+    cuts.value = Object.fromEntries(props.items.map((i) => [String(i.preset), { start: '', end: '' }]))
     if (!props.targets.length) return
     const last = props.lastTarget
     if (last && props.targets.includes(last.root)) {
@@ -152,7 +182,11 @@ function create(): void {
 function confirm(): void {
   const chosen: Record<string, string> = {}
   for (const i of props.items) chosen[String(i.preset)] = names.value[String(i.preset)] ?? ''
-  emit('confirm', current.value, { format: format.value, cover: cover.value, names: chosen })
+  const trims: Record<string, Trim> = {}
+  for (const [preset, cut] of Object.entries(cutOf.value)) {
+    if (cut && typeof cut === 'object') trims[preset] = cut
+  }
+  emit('confirm', current.value, { format: format.value, cover: cover.value, names: chosen, trims })
 }
 
 const FORMATS: Format[] = ['original', 'm4a', 'mp3']
@@ -315,15 +349,54 @@ function formatLabel(f: Format): string {
 
         <section v-if="items.length" class="space-y-2">
           <h3 class="text-sm font-medium">{{ t('names_label') }}</h3>
-          <label v-for="i in items" :key="i.preset" class="block space-y-1 text-sm">
-            <span class="block truncate text-muted-foreground">{{ i.title }}</span>
-            <Input
-              v-model="names[String(i.preset)]"
-              :data-name="i.preset"
-              :placeholder="i.kind === 'video' ? t('name_video_hint') : t('name_playlist_hint')"
-              :title="i.kind === 'video' ? t('name_video_hint') : t('name_playlist_hint')"
-            />
-          </label>
+          <div v-for="i in items" :key="i.preset" class="space-y-1 text-sm">
+            <label class="block space-y-1">
+              <span class="block truncate text-muted-foreground">{{ i.title }}</span>
+              <Input
+                v-model="names[String(i.preset)]"
+                :data-name="i.preset"
+                :placeholder="i.kind === 'video' ? t('name_video_hint') : t('name_playlist_hint')"
+                :title="i.kind === 'video' ? t('name_video_hint') : t('name_playlist_hint')"
+              />
+            </label>
+            <!-- A single video only: a playlist is never cut. -->
+            <div v-if="i.kind === 'video' && cuts[String(i.preset)]" class="flex items-center gap-2" :data-trim="i.preset">
+              <span class="shrink-0 text-muted-foreground">{{ t('trim_from') }}</span>
+              <Input
+                v-model="cuts[String(i.preset)]!.start"
+                class="w-24"
+                inputmode="numeric"
+                :data-trim-start="i.preset"
+                :disabled="!ffmpeg"
+                :placeholder="t('trim_start_placeholder')"
+                :aria-label="`${t('trim_from')} (${i.title})`"
+              />
+              <span class="shrink-0 text-muted-foreground">{{ t('trim_to') }}</span>
+              <Input
+                v-model="cuts[String(i.preset)]!.end"
+                class="w-24"
+                inputmode="numeric"
+                :data-trim-end="i.preset"
+                :disabled="!ffmpeg"
+                :placeholder="t('trim_end_placeholder')"
+                :aria-label="`${t('trim_to')} (${i.title})`"
+              />
+            </div>
+            <p
+              v-if="cutOf[String(i.preset)] === 'invalid' || cutOf[String(i.preset)] === 'order'"
+              class="text-xs text-destructive"
+              role="alert"
+              :data-trim-error="i.preset"
+            >
+              {{ cutOf[String(i.preset)] === 'invalid' ? t('trim_invalid') : t('trim_order') }}
+            </p>
+          </div>
+          <template v-if="videos.length">
+            <p v-if="ffmpeg" class="text-xs text-muted-foreground" data-trim-help>{{ t('trim_help') }}</p>
+            <p v-else class="text-xs text-muted-foreground" data-trim-unavailable>
+              {{ t('trim_unavailable', { command: ffmpegHint ?? '' }) }}
+            </p>
+          </template>
         </section>
       </div>
 
@@ -334,7 +407,7 @@ function formatLabel(f: Format): string {
         </template>
         <template v-else>
           <Button variant="ghost" data-back @click="step = 'where'">{{ t('btn_back') }}</Button>
-          <Button data-download-here :disabled="!root" @click="confirm">
+          <Button data-download-here :disabled="!root || !cutsValid" @click="confirm">
             {{ t('btn_download_here') }}
           </Button>
         </template>
