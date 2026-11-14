@@ -283,7 +283,7 @@ documents above.
 
 ## Status and contributing
 
-Ritornello is at **0.2.x**: it runs every day in one living room and the
+Ritornello is at **0.3.x**: it runs every day in one living room and the
 feature set above is real, but the plugin protocol and the configuration
 files may still change before a 1.0. CI builds the UI, runs clippy with
 warnings denied, the Rust test suite and the Playwright end-to-end
