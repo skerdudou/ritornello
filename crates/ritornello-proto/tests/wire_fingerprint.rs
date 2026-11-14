@@ -88,6 +88,9 @@ fn command_label(c: &Command) -> &'static str {
         Command::CycleRepeat => "CycleRepeat",
         Command::SetRandom(_) => "SetRandom",
         Command::SetRepeat(_) => "SetRepeat",
+        Command::SetSleepTimer { .. } => "SetSleepTimer",
+        Command::ExtendSleepTimer(_) => "ExtendSleepTimer",
+        Command::CancelSleepTimer => "CancelSleepTimer",
     }
 }
 
@@ -238,6 +241,22 @@ fn repeat_label(r: &Repeat) -> &'static str {
     }
 }
 
+fn sleep_mode_label(m: &SleepMode) -> &'static str {
+    match m {
+        SleepMode::Immediate => "Immediate",
+        SleepMode::Fade => "Fade",
+        SleepMode::EndOfTrack => "EndOfTrack",
+    }
+}
+
+fn sleep_phase_label(p: &SleepPhase) -> &'static str {
+    match p {
+        SleepPhase::Armed => "Armed",
+        SleepPhase::WaitingEndOfTrack => "WaitingEndOfTrack",
+        SleepPhase::Fading => "Fading",
+    }
+}
+
 /// Appends one `name = json` line per sample.
 struct Lines(Vec<String>);
 
@@ -307,6 +326,12 @@ fn state_full() -> PlayerState {
         random: true,
         repeat: Repeat::One,
         clock: Clock { date: DateFormat::YearMonthDay, twelve_hour: true },
+        sleep_timer: Some(SleepTimerState {
+            ends_at_unix_s: 1_800_000_000,
+            mode: SleepMode::EndOfTrack,
+            phase: SleepPhase::WaitingEndOfTrack,
+        }),
+        next_alarm: Some(NextAlarm { weekday: Weekday::Friday, hour: 7, minute: 30 }),
         track: track_full(),
     }
 }
@@ -317,6 +342,26 @@ fn state_full() -> PlayerState {
 fn add_repeat(l: &mut Lines) {
     for r in [Repeat::Off, Repeat::All, Repeat::One] {
         l.add(&format!("Repeat::{}", repeat_label(&r)), &r);
+    }
+}
+
+fn add_sleep_and_alarm(l: &mut Lines) {
+    for p in [SleepPhase::Armed, SleepPhase::WaitingEndOfTrack, SleepPhase::Fading] {
+        l.add(
+            &format!("SleepTimerState::{}", sleep_phase_label(&p)),
+            &SleepTimerState { ends_at_unix_s: 1_800_000_000, mode: SleepMode::Fade, phase: p },
+        );
+    }
+    for d in [
+        Weekday::Sunday,
+        Weekday::Monday,
+        Weekday::Tuesday,
+        Weekday::Wednesday,
+        Weekday::Thursday,
+        Weekday::Friday,
+        Weekday::Saturday,
+    ] {
+        l.add(&format!("NextAlarm::{d:?}"), &NextAlarm { weekday: d, hour: 6, minute: 5 });
     }
 }
 
@@ -514,6 +559,7 @@ fn display_section() -> Vec<String> {
     add_links(&mut l);
     add_repeat(&mut l);
     add_preset(&mut l);
+    add_sleep_and_alarm(&mut l);
     l.add("Track::full", &track_full());
     l.add("Track::default", &Track::default());
     l.add("PlayerState::default", &PlayerState::default());
@@ -574,6 +620,9 @@ fn input_section() -> Vec<String> {
         Command::CycleRepeat,
         Command::SetRandom(true),
         Command::SetRepeat(Repeat::All),
+        Command::SetSleepTimer { minutes: 30, mode: SleepMode::Fade },
+        Command::ExtendSleepTimer(15),
+        Command::CancelSleepTimer,
     ];
     for c in &commands {
         l.add(&format!("Command::{}", command_label(c)), c);
@@ -581,6 +630,9 @@ fn input_section() -> Vec<String> {
     l.add("InputMessage", &InputMessage::from(Command::Next));
     l.add("InputMessage::held", &InputMessage { cmd: Command::VolumeUp, held: true });
     add_repeat(&mut l);
+    for m in [SleepMode::Immediate, SleepMode::Fade, SleepMode::EndOfTrack] {
+        l.add(&format!("SleepMode::{}", sleep_mode_label(&m)), &m);
+    }
     l.0
 }
 

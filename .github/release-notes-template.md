@@ -1,43 +1,15 @@
-**Action required** — only on a device that is not yet on beta.11 *through
-ritornello-install 0.4.0 or newer*: make sure it has **`ca-certificates`**,
-then run **ritornello-install** once, from a workstation. A device already
-there needs nothing by hand: it updates from the page.
+**Nothing to do** — replace the binaries. A device on 0.2.0 updates from the
+page once "Offer prereleases" is ticked.
 
-**Ritornello 0.2.0 — the end of the beta.** This is the first finished
-release: every component moves from its beta number to `0.2.0` (the root
-mount helper `files-mount` 1.0.3 and the privileged updater 1.0.0 keep their
-own numbers, unchanged). A device set to finished releases only now has
-something to install, and a device that offered prereleases can untick
-"Offer prereleases" and stay on finished releases from here on.
-
-**Coming from a beta before beta.11** — the two points beta.11 introduced
-still apply:
-
-1. **`ca-certificates` is required.** The core and the plugins check HTTPS
-   certificates against the device's own store (`/etc/ssl/certs`). Without
-   the package every HTTPS request fails, the update check included:
-
-   ```sh
-   dpkg -s ca-certificates >/dev/null 2>&1 || sudo apt install ca-certificates
-   ```
-
-2. **A polkit rule only the installer places** (`53-ritornello-time.rules`,
-   the time zone from the System page): the page refuses to update the core
-   until ritornello-install has run, and says so. The installer asks which
-   system permissions to grant (*power off or restart*, *change the time
-   zone*); on a device already installed both are granted unless you say
-   otherwise:
-
-   ```sh
-   ritornello-install --host account@host --version v0.2.0 --keep
-   # or, to decline one or both:
-   ritornello-install --host account@host --version v0.2.0 --keep --grants power
-   ritornello-install --host account@host --version v0.2.0 --keep --grants none
-   ```
+**Ritornello 0.3.0-beta.1 — sleep timer and alarms.** The first beta of the
+0.3 generation. It is a prerelease: only a device that ticked "Offer
+prereleases" is offered it.
 
 No systemd unit, polkit rule, privileged updater or mount helper changed
-since beta.11. This is not a wire break: no contract moved, and the bootstrap
-`PROTOCOL_VERSION` did not move.
+since v0.2.0: the root mount helper `files-mount` 1.0.3, the privileged
+updater 1.0.0 and the installer 0.5.0 keep their numbers. This is not a wire
+break: two contracts gained a **minor** (display 1.2 → 1.3, input 1.0 → 1.1),
+no contract major moved, and the bootstrap `PROTOCOL_VERSION` did not move.
 <!-- The opening block above is this release's answer to "is there anything
      to do by hand?", and it is rewritten at every release rather than left
      to rot. When the next one needs nothing, the whole block above becomes
@@ -71,25 +43,56 @@ since beta.11. This is not a wire break: no contract moved, and the bootstrap
      together. A rollback of the core leaves every plugin refused until the
      core is reinstalled. -->
 
-## Behaviour changes since beta.11
+## Behaviour changes since 0.2.0
 
-**Web streaming: the cover of what plays.** A video played from a preset
-now shows its cover in the player: the site's own thumbnail, the same one a
-download keeps. The plugin fetches it itself, through the same guard as a
-download (never the local network), and hands the core a file. A playlist's
-videos each show their own; a single video's thumbnail is looked up once,
-the first time it plays, then kept.
+**Sleep timer.** A key beside the standby key, in the Player card's header.
+Its menu starts a countdown of 15, 30, 45, 60 or 90 minutes, then puts the
+device in standby exactly as the Power key does. Three ways to end:
 
-**Web streaming: downloading, in two steps.** The download dialog first asks
-*where* (the share, then one framed folder browser with the new folder at its
-foot), then *how* (format, cover, names), with the destination still shown
-and a way back. The cover choice now applies to **each track**, playlists
-included: every track of a downloaded playlist gets its own thumbnail,
-inside the file or beside it, and the folder keeps its `cover.jpg`.
+- **Immediate** — standby at the deadline;
+- **Fade** — the volume goes down to zero over 10 s, then standby; the next
+  listening starts at the level it left, never at zero;
+- **End of track** — keeps playing until the current track ends (5 minutes
+  at most), then fades.
 
-**Web streaming: the downloads list.** It sits right under the presets,
-where a download is started, and **Clear finished** forgets the downloads
-that are over. A running line reads "running 42%" again, not "running42%".
+While a timer runs the key shows the time left, and the menu offers
+**+15 min** and **Cancel**. The menu remembers the last mode chosen. The key
+is disabled in standby. Scripts can use the same three commands:
+`SetSleepTimer`, `ExtendSleepTimer`, `CancelSleepTimer`.
+
+**Alarms.** A new card on the config page, phone-style: one line per alarm,
+with a switch to turn it on or off. Each alarm has a time, its days (at least
+one; Monday first), what it plays (resume, or a named source), a volume, and
+optionally "turn off after" N minutes, which arms an ordinary sleep timer when
+it rings ("wake me at 7, turn off at 8"). An alarm takes the device out of
+standby and starts playing; it does nothing if something already plays. An
+alarm missed during an update's restart is caught up.
+
+**Console.** The text console shows the time left on a running sleep timer,
+and the next alarm under the standby clock.
+
+**Web streaming: keep part of a single video.** The download dialog accepts a
+start and an end (`h:mm:ss`, `m:ss` or seconds) for a single video; the plugin
+keeps that part without re-encoding. It needs ffmpeg on the device: without
+it the fields are disabled.
+
+**Languages.** French, German, Spanish and Italian cover the new texts.
+
+**Before trying it: a rollback to a core without alarms forgets them.** The
+0.2.0 core does not know the alarms and rewrites its state without them on
+its first write: coming back to this beta does not bring them back. Note your
+alarms before rolling back.
+
+The sleep timer and the alarms **have never run on the Pi** — the fade's
+sound on a real output, the end-of-track detection on stations whose title
+never changes, the alarm catch-up after a real update or a rollback, and
+alarms before the clock is set by the network are all tested, not observed.
+The full list is in docs/installation.md, "What has not been verified".
+
+This release carries, each as `0.3.0-beta.1`: `ritornello-core`,
+`ritornello-plugin-console`, `ritornello-plugin-web-streaming` and the
+language packs fr, de, es, it. Every other plugin stays on its 0.2.0 archive,
+in the v0.2.0 release.
 
 ## Install
 

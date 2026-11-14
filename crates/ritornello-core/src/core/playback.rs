@@ -103,6 +103,10 @@ impl<P: Player> Core<P> {
             // whatever it had opened, so the sound did not follow.
             Event::TrackChanged(n) => {
                 if !self.standby {
+                    // Judged before the request, whose answer may move the
+                    // reference again (a `PlayerChapter`) or start new
+                    // content (a `Play`).
+                    self.sleep_on_track_changed(n);
                     match self.active_request(SourceReq::PlayerTrack(n)).await {
                         Ok(Some(action)) => {
                             if let Err(e) = self.apply(action).await {
@@ -180,6 +184,20 @@ impl<P: Player> Core<P> {
                     }
                     Ok(None) => {}
                     Err(e) => tracing::debug!("stop notification to source: {e}"),
+                }
+                // The end of the content is the sleep timer's "end of track"
+                // too. When the Source's answer played another pass, there
+                // is something to fade; when nothing plays any more, there
+                // is not: standby at once.
+                if ending && self.waiting_end_of_track() {
+                    if self.playback {
+                        self.sleep_on_boundary();
+                    } else {
+                        if let Err(e) = self.enter_standby().await {
+                            tracing::warn!("sleep timer standby at the end of the content: {e}");
+                        }
+                        self.publish_state();
+                    }
                 }
             }
         }

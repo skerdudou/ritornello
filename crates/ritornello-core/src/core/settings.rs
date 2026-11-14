@@ -200,6 +200,9 @@ impl<P: Player> Core<P> {
             update_last_run_day: self.update_last_run_day,
             update_sources: self.update_sources.clone(),
             pack_preferences: self.pack_preferences.clone(),
+            last_alarm_minute: self.last_alarm_minute,
+            last_alarm_local: self.last_alarm_local,
+            sleep_timer: self.persisted_sleep(),
         };
         if let Err(e) = state::save(&self.state_path, &st) {
             tracing::warn!("persistence failed: {e}");
@@ -235,6 +238,9 @@ mod tests {
             update_last_run_day: None,
             update_sources: Vec::new(),
             pack_preferences: Vec::new(),
+            last_alarm_minute: None,
+            last_alarm_local: None,
+            sleep_timer: None,
         };
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
@@ -522,7 +528,7 @@ mod tests {
         core.start_in_standby().await.unwrap();
         assert!(on_disk());
         // Default setting: "on", and no install marker to override it.
-        core.startup(crate::update::StartupOverride::AsConfigured).await.unwrap();
+        core.startup(crate::update::StartupOverride::AsConfigured, crate::update::now_unix_s()).await.unwrap();
         assert!(!on_disk());
     }
 

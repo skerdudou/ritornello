@@ -544,6 +544,9 @@ impl<P: Player> Core<P> {
                 // confirms it (a sleeping share, a file gone) must not be
                 // read as "the list ran out".
                 self.played_since_play = false;
+                // New content: its first track notification sets the
+                // reference, it does not end a track (`track_ref`).
+                self.track_ref = None;
                 // A track that is about to sound is no longer armed. The
                 // Source normally says so itself by re-declaring the identity
                 // (`set_identity_state` then flips the flag), but nothing
@@ -607,7 +610,13 @@ impl<P: Player> Core<P> {
             }
             SourceAction::PlayerNext => self.player.next().await?,
             SourceAction::PlayerPrev => self.player.prev().await?,
-            SourceAction::PlayerChapter(n) => self.player.set_chapter(n).await?,
+            SourceAction::PlayerChapter(n) => {
+                self.player.set_chapter(n).await?;
+                // A seek the Source owed (a resumed track, a random first
+                // pick): the notification it causes is that seek's
+                // confirmation, not the end of a track.
+                self.track_ref = Some(n);
+            }
         }
         Ok(())
     }

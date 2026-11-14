@@ -53,7 +53,7 @@ PlayRequest::Switch = "switch"
 PlayRequest::WakeAndSwitch = "wake_and_switch"
 SourceMessage::default = {"id":null,"action":null}
 SourceMessage::full = {"id":9,"action":{"action":"Stop"},"identity":{"state":"Nothing"},"transient":true,"preset":2,"preset_count":10,"preset_name":"Name","location":"loc","status_text":{"kind":"Verbatim","data":"s"},"can_eject":true,"has_finite_list":true,"presets":[{"index":1,"name":"One"}],"cover":{"kind":"path","path":"/c"},"cover_thumb":{"kind":"url","url":"https://example.invalid/t"},"cover_archivable":true,"lyrics":{"plain":"words","synced":"[00:01.00]words"},"lyrics_archivable":true,"play_request":"switch","armed":{"identity":{"k":1},"media_path":"/m/a"}}
-[display 1.2]
+[display 1.3]
 Overlay::Volume = {"kind":"volume","level":30,"muted":false,"text":"30","remaining_ms":800}
 Overlay::Tens = {"kind":"tens","offset":10,"text":"+10","remaining_ms":800}
 Overlay::Message = {"kind":"message","text":"m","remaining_ms":800}
@@ -71,16 +71,26 @@ Repeat::Off = "off"
 Repeat::All = "all"
 Repeat::One = "one"
 Preset = {"index":1,"name":"One"}
+SleepTimerState::Armed = {"ends_at_unix_s":1800000000,"mode":"fade","phase":"armed"}
+SleepTimerState::WaitingEndOfTrack = {"ends_at_unix_s":1800000000,"mode":"fade","phase":"waiting_end_of_track"}
+SleepTimerState::Fading = {"ends_at_unix_s":1800000000,"mode":"fade","phase":"fading"}
+NextAlarm::Sunday = {"weekday":"sunday","hour":6,"minute":5}
+NextAlarm::Monday = {"weekday":"monday","hour":6,"minute":5}
+NextAlarm::Tuesday = {"weekday":"tuesday","hour":6,"minute":5}
+NextAlarm::Wednesday = {"weekday":"wednesday","hour":6,"minute":5}
+NextAlarm::Thursday = {"weekday":"thursday","hour":6,"minute":5}
+NextAlarm::Friday = {"weekday":"friday","hour":6,"minute":5}
+NextAlarm::Saturday = {"weekday":"saturday","hour":6,"minute":5}
 Track::full = {"artist":"Artist","title":"Title","album":"Album","duration_s":215,"year":1999,"links":[{"platform":"youtube","url":"https://example.invalid/y"}],"origin":"musicbrainz","cover_href":"/cover/1","cover_origin":"deezer","lyrics_href":"/api/lyrics/1","lyrics_synced":true,"lyrics_origin":"lrclib","provenance":{"fields":{"title":"musicbrainz"},"misses":["album"],"derived":{"year":"title"}}}
 Track::default = {"artist":null,"title":null,"album":null,"duration_s":null,"origin":null}
 PlayerState::default = {"source":"","volume":0,"muted":false,"standby":false,"preset":null,"preset_count":null,"preset_name":null,"artist":null,"title":null,"album":null,"duration_s":null,"origin":null}
-PlayerState::full = {"source":"radio","volume":42,"muted":true,"standby":true,"preset":3,"preset_count":10,"preset_name":"Jazz","location":"loc","status":"buffering","overlay":{"kind":"message","text":"hello","remaining_ms":1500},"position_s":12,"playback":"playing","seekable":true,"can_eject":true,"has_finite_list":true,"random":true,"repeat":"one","clock":{"date":"year_month_day","twelve_hour":true},"artist":"Artist","title":"Title","album":"Album","duration_s":215,"year":1999,"links":[{"platform":"youtube","url":"https://example.invalid/y"}],"origin":"musicbrainz","cover_href":"/cover/1","cover_origin":"deezer","lyrics_href":"/api/lyrics/1","lyrics_synced":true,"lyrics_origin":"lrclib","provenance":{"fields":{"title":"musicbrainz"},"misses":["album"],"derived":{"year":"title"}}}
-DisplayFrame::State = {"frame":"state","data":{"source":"radio","volume":42,"muted":true,"standby":true,"preset":3,"preset_count":10,"preset_name":"Jazz","location":"loc","status":"buffering","overlay":{"kind":"message","text":"hello","remaining_ms":1500},"position_s":12,"playback":"playing","seekable":true,"can_eject":true,"has_finite_list":true,"random":true,"repeat":"one","clock":{"date":"year_month_day","twelve_hour":true},"artist":"Artist","title":"Title","album":"Album","duration_s":215,"year":1999,"links":[{"platform":"youtube","url":"https://example.invalid/y"}],"origin":"musicbrainz","cover_href":"/cover/1","cover_origin":"deezer","lyrics_href":"/api/lyrics/1","lyrics_synced":true,"lyrics_origin":"lrclib","provenance":{"fields":{"title":"musicbrainz"},"misses":["album"],"derived":{"year":"title"}}}}
+PlayerState::full = {"source":"radio","volume":42,"muted":true,"standby":true,"preset":3,"preset_count":10,"preset_name":"Jazz","location":"loc","status":"buffering","overlay":{"kind":"message","text":"hello","remaining_ms":1500},"position_s":12,"playback":"playing","seekable":true,"can_eject":true,"has_finite_list":true,"random":true,"repeat":"one","clock":{"date":"year_month_day","twelve_hour":true},"sleep_timer":{"ends_at_unix_s":1800000000,"mode":"end_of_track","phase":"waiting_end_of_track"},"next_alarm":{"weekday":"friday","hour":7,"minute":30},"artist":"Artist","title":"Title","album":"Album","duration_s":215,"year":1999,"links":[{"platform":"youtube","url":"https://example.invalid/y"}],"origin":"musicbrainz","cover_href":"/cover/1","cover_origin":"deezer","lyrics_href":"/api/lyrics/1","lyrics_synced":true,"lyrics_origin":"lrclib","provenance":{"fields":{"title":"musicbrainz"},"misses":["album"],"derived":{"year":"title"}}}
+DisplayFrame::State = {"frame":"state","data":{"source":"radio","volume":42,"muted":true,"standby":true,"preset":3,"preset_count":10,"preset_name":"Jazz","location":"loc","status":"buffering","overlay":{"kind":"message","text":"hello","remaining_ms":1500},"position_s":12,"playback":"playing","seekable":true,"can_eject":true,"has_finite_list":true,"random":true,"repeat":"one","clock":{"date":"year_month_day","twelve_hour":true},"sleep_timer":{"ends_at_unix_s":1800000000,"mode":"end_of_track","phase":"waiting_end_of_track"},"next_alarm":{"weekday":"friday","hour":7,"minute":30},"artist":"Artist","title":"Title","album":"Album","duration_s":215,"year":1999,"links":[{"platform":"youtube","url":"https://example.invalid/y"}],"origin":"musicbrainz","cover_href":"/cover/1","cover_origin":"deezer","lyrics_href":"/api/lyrics/1","lyrics_synced":true,"lyrics_origin":"lrclib","provenance":{"fields":{"title":"musicbrainz"},"misses":["album"],"derived":{"year":"title"}}}}
 DisplayFrame::Catalog = {"frame":"catalog","data":{"sources":[{"name":"radio","presets":[{"index":1,"name":"One"}],"icon":"radio"},{"name":"cd"}]}}
 DisplayFrame::Cover = {"frame":"cover","data":{"href":"/cover/1","mime":"image/jpeg","bytes":"AQID"}}
 DisplayFrame::Lyrics = {"frame":"lyrics","data":{"href":"/api/lyrics/1","synced":[{"t_ms":1000,"text":"words"}],"plain":null}}
 LyricsFrame::plain = {"href":"/api/lyrics/2","synced":null,"plain":"words"}
-[input 1.0]
+[input 1.1]
 Command::Select = {"cmd":"Select","arg":3}
 Command::Next = {"cmd":"Next"}
 Command::Prev = {"cmd":"Prev"}
@@ -102,11 +112,17 @@ Command::ToggleRandom = {"cmd":"ToggleRandom"}
 Command::CycleRepeat = {"cmd":"CycleRepeat"}
 Command::SetRandom = {"cmd":"SetRandom","arg":true}
 Command::SetRepeat = {"cmd":"SetRepeat","arg":"all"}
+Command::SetSleepTimer = {"cmd":"SetSleepTimer","arg":{"minutes":30,"mode":"fade"}}
+Command::ExtendSleepTimer = {"cmd":"ExtendSleepTimer","arg":15}
+Command::CancelSleepTimer = {"cmd":"CancelSleepTimer"}
 InputMessage = {"cmd":"Next"}
 InputMessage::held = {"cmd":"VolumeUp","held":true}
 Repeat::Off = "off"
 Repeat::All = "all"
 Repeat::One = "one"
+SleepMode::Immediate = "immediate"
+SleepMode::Fade = "fade"
+SleepMode::EndOfTrack = "end_of_track"
 [metadata 1.2]
 NowPlaying::default = {"source":"","identity":null}
 NowPlaying::full = {"source":"radio","identity":{"station":"x"},"known":{"artist":"A","title":"T","album":"Al","duration_s":10,"year":2001,"cover":true,"lyrics":true,"measured_duration_s":11,"stream_title":"A - T"}}

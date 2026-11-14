@@ -57,8 +57,8 @@ impl fmt::Display for ContractVersion {
 // `scripts/changed-components.sh` reads these five lines with sed: keep each
 // one on a single line, in exactly this shape.
 pub const SOURCE_CONTRACT: ContractVersion = ContractVersion::new(1, 3);
-pub const DISPLAY_CONTRACT: ContractVersion = ContractVersion::new(1, 2);
-pub const INPUT_CONTRACT: ContractVersion = ContractVersion::new(1, 0);
+pub const DISPLAY_CONTRACT: ContractVersion = ContractVersion::new(1, 3);
+pub const INPUT_CONTRACT: ContractVersion = ContractVersion::new(1, 1);
 pub const METADATA_CONTRACT: ContractVersion = ContractVersion::new(1, 2);
 pub const ADMIN_CONTRACT: ContractVersion = ContractVersion::new(1, 0);
 
@@ -130,14 +130,20 @@ mod tests {
             //   `SourceReq::ArchiveLyrics`) and for `Play::ytdl_path`, both
             //   in the same unreleased version;
             // - display: 1.1 for the source catalog's `icon`, 1.2 for lyrics
-            //   (`DisplayFrame::Lyrics`, `Track::lyrics_href`…);
+            //   (`DisplayFrame::Lyrics`, `Track::lyrics_href`…), 1.3 for the
+            //   sleep timer and the next alarm (`PlayerState::sleep_timer`,
+            //   `PlayerState::next_alarm`);
             // - metadata: 1.1 for `NowPlaying::armed`, 1.2 for lyrics
             //   (`Enrichment::lyrics`, `Known::lyrics`,
             //   `Known::measured_duration_s`);
+            // - input: 1.1 for the sleep timer commands (`SetSleepTimer`,
+            //   `ExtendSleepTimer`, `CancelSleepTimer`);
             // - every other one: still 1.0.
             let expected = match c {
                 Contract::Source => ContractVersion::new(1, 3),
-                Contract::Display | Contract::Metadata => ContractVersion::new(1, 2),
+                Contract::Display => ContractVersion::new(1, 3),
+                Contract::Metadata => ContractVersion::new(1, 2),
+                Contract::Input => ContractVersion::new(1, 1),
                 _ => ContractVersion::new(1, 0),
             };
             assert_eq!(c.current(), expected, "{c:?}");

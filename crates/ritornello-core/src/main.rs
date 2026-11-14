@@ -2458,8 +2458,9 @@ async fn main() -> Result<()> {
     // player was doing, and the rollback's own core must still find it
     // afterwards. Read here rather than inside `core`, which has no business
     // knowing about `/var/lib/ritornello-update`.
-    let startup_over = update::startup_instruction(Path::new("/"), update::now_unix_s());
-    if startup_over == update::StartupOverride::Previous {
+    let startup_now = update::now_unix_s();
+    let startup_over = update::startup_instruction(Path::new("/"), startup_now);
+    if matches!(startup_over, update::StartupOverride::Previous { .. }) {
         tracing::info!(
             "a fresh install marker is on disk: starting in whatever state the device was left in, ignoring the startup power setting for this start only"
         );
@@ -2469,9 +2470,14 @@ async fn main() -> Result<()> {
     // `settings.startup_power` unless the marker overrides it; its standby
     // branch skips the source wake but still configures mpv, so the first
     // `Power` starts right.
-    if let Err(e) = core.startup(startup_over).await {
+    if let Err(e) = core.startup(startup_over, startup_now).await {
         tracing::warn!("startup wake: {e}");
     }
+    // The alarms an update made the device miss, with the clock read again:
+    // `startup` can wait seconds on a source, across a minute boundary that
+    // `startup_now` predates. `first_check_in` below closes the rest of the
+    // gap, up to the first regular check.
+    let caught_up_to = core.catch_up_after(startup_over, update::now_unix_s()).await;
 
     // Relays the state to every connected display: the same channel that
     // feeds the SPA's SSE route, each plugin composing its own layout from
@@ -2552,6 +2558,18 @@ async fn main() -> Result<()> {
     // of at 09:01.
     let mut update_ticker = tokio::time::interval(std::time::Duration::from_secs(60));
 
+    // The alarm clocks' minute check: one second past each minute boundary,
+    // an absolute deadline recomputed after every check (see
+    // `core::secs_until_next_check` for why not an `interval`). Kept outside
+    // the loop, like `next_tick`: the futures below are rebuilt on every turn,
+    // and only an absolute deadline survives that.
+    let alarm_deadline = || {
+        tokio::time::Instant::now()
+            + std::time::Duration::from_secs(core::secs_until_next_check(update::now_unix_s() as i64))
+    };
+    let mut alarm_at = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(core::first_check_in(caught_up_to, update::now_unix_s() as i64));
+
     loop {
         let retry_sleep = async {
             match retry_at {
@@ -2576,6 +2594,15 @@ async fn main() -> Result<()> {
         let overlay_at = core.overlay_deadline().map(tokio::time::Instant::from);
         let overlay_sleep = async {
             match overlay_at {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
+        // Sleep timer: its countdown, then each step of a fade. Absolute, and
+        // read before the `select!` like `overlay_at`, for the same reasons.
+        let sleep_at = core.sleep_deadline().map(tokio::time::Instant::from);
+        let sleep_timer_sleep = async {
+            match sleep_at {
                 Some(at) => tokio::time::sleep_until(at).await,
                 None => std::future::pending().await,
             }
@@ -2618,6 +2645,13 @@ async fn main() -> Result<()> {
                     tracing::warn!("command: {e}");
                 }
                 status_state.write().await.active_source = core.active_source().to_string();
+                // The sleep timer's remembered mode is the one setting a
+                // command writes: the copy `GET /api/settings` serves must
+                // follow, or the menu would reopen on the previous choice.
+                let mode = core.sleep_timer_mode();
+                if settings_current.read().await.sleep_timer_mode != mode {
+                    settings_current.write().await.sleep_timer_mode = mode;
+                }
             }
             // Closed channel (mpv pump dead): the `Some(..)` pattern stops
             // matching and `tokio::select!` disables the arm — the
@@ -3128,6 +3162,13 @@ async fn main() -> Result<()> {
             }
             _ = overlay_sleep => {
                 core.expire_overlay();
+            }
+            _ = sleep_timer_sleep => {
+                core.on_sleep_deadline().await;
+            }
+            _ = tokio::time::sleep_until(alarm_at) => {
+                core.check_alarms(update::now_unix_s() as i64).await;
+                alarm_at = alarm_deadline();
             }
             _ = position_sleep => {
                 // Rearm first, from now: the cadence stays at one second no
@@ -4764,7 +4805,7 @@ mod toggle_tests {
             json["incompatible"],
             serde_json::json!({
                 "reason": "major",
-                "gaps": [{"contract": "display", "plugin": {"major": 2, "minor": 0}, "core": {"major": 1, "minor": 2}}],
+                "gaps": [{"contract": "display", "plugin": {"major": 2, "minor": 0}, "core": {"major": 1, "minor": 3}}],
             }),
             "{json}"
         );
@@ -4824,7 +4865,7 @@ mod toggle_tests {
         // reason that is not this test's.
         let socket = ritornello_plugin_sdk::socket_kind(&b.children.sockets_dir.join("mpd"), PluginKind::Display);
         let _display = tokio::net::UnixListener::bind(&socket).unwrap();
-        let a = mpd_like(ContractVersion::new(1, 3));
+        let a = mpd_like(ContractVersion::new(1, 4));
 
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
 
@@ -4842,7 +4883,7 @@ mod toggle_tests {
             assert_eq!(line.incompatible, None);
             assert_eq!(
                 line.limited,
-                vec![display_gap(ContractVersion::new(1, 3))],
+                vec![display_gap(ContractVersion::new(1, 4))],
                 "the {} line must name the display contract, and only it",
                 line.kind
             );

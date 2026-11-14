@@ -97,6 +97,48 @@ pub enum SettingsError {
     CoverCacheBudget { min: u32, max: u32 },
     CoverDownloadMax { min: u32, max: u32 },
     UpdateHour { value: u32 },
+    Alarm(AlarmProblem),
+}
+
+/// What is wrong with the alarm list, defined next to the rules themselves
+/// (`state::Alarm::problem`), which `state::load` applies too. No bounds are
+/// quoted: the SPA's editor cannot produce any of these, so the sentence only
+/// has to say which rule a hand-written request broke.
+pub use crate::state::AlarmProblem;
+
+/// Checks a request's `alarms` strictly, on the raw body: an `alarms` that is
+/// not an array, an element that does not parse as an `Alarm`, or one that
+/// breaks an alarm rule is refused. `Settings` itself reads that array
+/// leniently, dropping such an alarm (a damaged `state.json` must not reset
+/// every setting, nor keep an alarm that cannot ring), and on a PUT that
+/// leniency would turn into silent data loss answered with a success. An
+/// absent `alarms` is no alarm (the struct's default), not an error.
+pub fn check_alarms_parse(body: &serde_json::Value) -> Result<(), SettingsError> {
+    let Some(alarms) = body.get("alarms") else { return Ok(()) };
+    let alarms: Vec<crate::state::Alarm> = match alarms {
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(|item| serde_json::from_value(item.clone()))
+            .collect::<Result<_, _>>()
+            .map_err(|_| SettingsError::Alarm(AlarmProblem::Malformed))?,
+        _ => return Err(SettingsError::Alarm(AlarmProblem::Malformed)),
+    };
+    validate_alarms(&alarms).map_err(SettingsError::Alarm)
+}
+
+impl AlarmProblem {
+    fn key(self) -> &'static str {
+        match self {
+            AlarmProblem::Hour => "settings_alarm_hour_range",
+            AlarmProblem::Minute => "settings_alarm_minute_range",
+            AlarmProblem::NoDays => "settings_alarm_no_days",
+            AlarmProblem::Volume => "settings_alarm_volume_range",
+            AlarmProblem::DuplicateId => "settings_alarm_duplicate_id",
+            AlarmProblem::SleepMinutes => "settings_alarm_sleep_minutes_range",
+            AlarmProblem::EmptySourceName => "settings_alarm_source_name_empty",
+            AlarmProblem::Malformed => "settings_alarm_malformed",
+        }
+    }
 }
 
 impl SettingsError {
@@ -145,6 +187,7 @@ impl SettingsError {
             SettingsError::CoverMaxPixels { min, max } => {
                 ("settings_cover_max_pixels_out_of_range", *min, *max)
             }
+            SettingsError::Alarm(problem) => return catalog.get(problem.key()).to_string(),
             SettingsError::UpdateHour { value } => {
                 return ritornello_i18n::interpolate(
                     catalog.get("settings_update_hour_range"),
@@ -201,6 +244,7 @@ impl std::fmt::Display for SettingsError {
             SettingsError::UpdateHour { value } => {
                 write!(f, "update hour out of range (0-23), got {value}")
             }
+            SettingsError::Alarm(problem) => write!(f, "invalid alarm: {problem:?}"),
         }
     }
 }
@@ -291,7 +335,16 @@ pub fn validate_settings(s: &crate::state::Settings) -> Result<(), SettingsError
     if s.update_hour > 23 {
         return Err(SettingsError::UpdateHour { value: s.update_hour });
     }
-    Ok(())
+    validate_alarms(&s.alarms).map_err(SettingsError::Alarm)
+}
+
+/// The alarm list's first problem, by the rules `state::load` applies too
+/// (`state::alarm_list_problems`): a PUT refuses what a load would drop.
+fn validate_alarms(alarms: &[crate::state::Alarm]) -> Result<(), AlarmProblem> {
+    match crate::state::alarm_list_problems(alarms).into_iter().flatten().next() {
+        Some(problem) => Err(problem),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -397,6 +450,91 @@ mod tests {
         );
     }
 
+    fn good_alarm(id: u32) -> crate::state::Alarm {
+        crate::state::Alarm {
+            id,
+            enabled: true,
+            hour: 7,
+            minute: 0,
+            days: vec![ritornello_proto::Weekday::Monday],
+            target: crate::state::AlarmTarget::Resume,
+            volume: 30,
+            sleep_after: None,
+        }
+    }
+
+    fn with_alarms(alarms: Vec<crate::state::Alarm>) -> Result<(), SettingsError> {
+        validate_settings(&crate::state::Settings { alarms, ..Default::default() })
+    }
+
+    /// One case per rule, each next to its boundary: the neighbour that must
+    /// pass is checked first so a rule cannot hide behind a broken fixture.
+    #[test]
+    fn every_alarm_rule_refuses_its_own_violation() {
+        use crate::state::{AlarmSleep, AlarmTarget};
+        let sleep = |minutes| Some(AlarmSleep { minutes, mode: ritornello_proto::SleepMode::Fade });
+        let bad = |f: &dyn Fn(&mut crate::state::Alarm)| {
+            let mut a = good_alarm(1);
+            f(&mut a);
+            with_alarms(vec![a])
+        };
+        assert_eq!(with_alarms(vec![good_alarm(1), good_alarm(2)]), Ok(()));
+        assert_eq!(bad(&|a| a.hour = 23), Ok(()));
+        assert_eq!(bad(&|a| a.hour = 24), Err(SettingsError::Alarm(AlarmProblem::Hour)));
+        assert_eq!(bad(&|a| a.minute = 59), Ok(()));
+        assert_eq!(bad(&|a| a.minute = 60), Err(SettingsError::Alarm(AlarmProblem::Minute)));
+        assert_eq!(bad(&|a| a.days.clear()), Err(SettingsError::Alarm(AlarmProblem::NoDays)));
+        assert_eq!(bad(&|a| a.volume = 100), Ok(()));
+        assert_eq!(bad(&|a| a.volume = 101), Err(SettingsError::Alarm(AlarmProblem::Volume)));
+        assert_eq!(bad(&|a| a.sleep_after = sleep(1)), Ok(()));
+        assert_eq!(bad(&|a| a.sleep_after = sleep(600)), Ok(()));
+        assert_eq!(bad(&|a| a.sleep_after = sleep(0)), Err(SettingsError::Alarm(AlarmProblem::SleepMinutes)));
+        assert_eq!(bad(&|a| a.sleep_after = sleep(601)), Err(SettingsError::Alarm(AlarmProblem::SleepMinutes)));
+        assert_eq!(bad(&|a| a.target = AlarmTarget::Source { name: "radio".into() }), Ok(()));
+        assert_eq!(
+            bad(&|a| a.target = AlarmTarget::Source { name: String::new() }),
+            Err(SettingsError::Alarm(AlarmProblem::EmptySourceName))
+        );
+        assert_eq!(
+            bad(&|a| a.target = AlarmTarget::Source { name: "  ".into() }),
+            Err(SettingsError::Alarm(AlarmProblem::EmptySourceName))
+        );
+    }
+
+    /// The raw check of a PUT: an `alarms` that is not an array is refused,
+    /// not read as "no alarm" (which would wipe the list with a success), and
+    /// an alarm that breaks a rule is refused there, before the lenient parse
+    /// that drops it.
+    #[test]
+    fn the_raw_alarm_check_refuses_a_non_array_and_a_broken_rule() {
+        use serde_json::json;
+        for alarms in [json!({}), json!(3), json!(null), json!("x"), json!(true)] {
+            assert_eq!(
+                check_alarms_parse(&json!({ "alarms": alarms })),
+                Err(SettingsError::Alarm(AlarmProblem::Malformed)),
+                "{alarms}"
+            );
+        }
+        assert_eq!(check_alarms_parse(&json!({ "overlay_ms": 3000 })), Ok(()), "absent: no alarm");
+        assert_eq!(check_alarms_parse(&json!({ "alarms": [] })), Ok(()));
+        let good = serde_json::to_value(good_alarm(1)).unwrap();
+        assert_eq!(check_alarms_parse(&json!({ "alarms": [good] })), Ok(()));
+        let mut late = good.clone();
+        late["hour"] = json!(24);
+        assert_eq!(
+            check_alarms_parse(&json!({ "alarms": [good, late] })),
+            Err(SettingsError::Alarm(AlarmProblem::Hour))
+        );
+    }
+
+    #[test]
+    fn duplicate_alarm_ids_are_refused() {
+        assert_eq!(
+            with_alarms(vec![good_alarm(4), good_alarm(4)]),
+            Err(SettingsError::Alarm(AlarmProblem::DuplicateId))
+        );
+    }
+
     #[test]
     fn settings_message_interpolates_the_bounds_against_the_catalog() {
         let dir = tempfile::tempdir().unwrap();
@@ -458,6 +596,14 @@ mod tests {
             SettingsError::CoverCacheBudget { min: 8, max: 256 },
             SettingsError::CoverDownloadMax { min: 1, max: 20 },
             SettingsError::UpdateHour { value: 24 },
+            SettingsError::Alarm(AlarmProblem::Hour),
+            SettingsError::Alarm(AlarmProblem::Minute),
+            SettingsError::Alarm(AlarmProblem::NoDays),
+            SettingsError::Alarm(AlarmProblem::Volume),
+            SettingsError::Alarm(AlarmProblem::DuplicateId),
+            SettingsError::Alarm(AlarmProblem::SleepMinutes),
+            SettingsError::Alarm(AlarmProblem::EmptySourceName),
+            SettingsError::Alarm(AlarmProblem::Malformed),
         ];
         for err in &all {
             let message = err.message(&catalog);

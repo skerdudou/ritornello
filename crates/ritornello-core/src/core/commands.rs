@@ -12,7 +12,14 @@ impl<P: Player> Core<P> {
         if self.standby && !matches!(cmd, Command::Power | Command::SourceCycle | Command::SelectSource(_)) {
             return Ok(());
         }
-        let outcome = self.apply_command(cmd).await;
+        // Pause and Stop during a sleep fade, or while it waits for the end
+        // of the track, end it at once: the device goes to standby at the
+        // volume to restore (see `ends_sleep_wind_down`).
+        let outcome = if self.ends_sleep_wind_down(&cmd) {
+            self.enter_standby().await
+        } else {
+            self.apply_command(cmd).await
+        };
         // Publication on the way out of **every** command, rather than a call
         // in each one: volume, mute, standby and active source all change
         // here, and a forgotten branch would leave the UI showing a stale
@@ -27,9 +34,15 @@ impl<P: Player> Core<P> {
     /// MPD's `setvol`. Same side effects as the relative step — mpv, disk,
     /// overlay — because a volume changed from the network must announce
     /// itself on screen like one changed from the remote.
+    ///
+    /// During a sleep fade, the new value is the volume to restore once in
+    /// standby, and mpv is left to the fade (`retarget_fade`): it is still
+    /// persisted at once, so a restart mid-fade never wakes the device low.
     pub(super) async fn set_volume(&mut self, v: u8) -> Result<()> {
         self.volume = v.min(100);
-        self.player.set_volume(self.volume).await?;
+        if !self.retarget_fade(self.volume) {
+            self.player.set_volume(self.volume).await?;
+        }
         self.persist();
         self.show_overlay().await;
         Ok(())
@@ -74,7 +87,7 @@ impl<P: Player> Core<P> {
 
     /// New settings from `PUT /api/settings` (via the `select!` loop of main).
     /// No bounds check here: the HTTP layer validates, and tests rely on tiny
-    /// timings.
+    /// timings. Publishes the state, which carries the next alarm.
     pub fn set_settings(&mut self, s: crate::state::Settings) {
         // Pushed into the cover cache, which is the only other holder of
         // these settings. Here and not in an arm of the `select!`:
@@ -84,8 +97,17 @@ impl<P: Player> Core<P> {
         // caller. Synchronous because `CoverCache` keeps these settings under
         // a `std::sync` lock precisely for this.
         self.covers.set_cover_settings(crate::cover::CoverSettings::from(&s));
+        // The sleep timer's remembered mode belongs to its menu, not to the
+        // config page: the page PUTs back a copy it read earlier, which may
+        // predate the last timer armed.
+        let sleep_timer_mode = self.settings.sleep_timer_mode;
         self.settings = s;
+        self.settings.sleep_timer_mode = sleep_timer_mode;
         self.persist();
+        // An alarm added, moved or switched off changes the next one at once,
+        // not at the next minute check.
+        self.refresh_next_alarm(crate::update::now_unix_s() as i64);
+        self.publish_state();
     }
 
     /// Startup: what the process does with the active source when it
@@ -106,22 +128,44 @@ impl<P: Player> Core<P> {
     /// disk here: the marker lives in `/var/lib/ritornello-update`, a
     /// directory this file has no business knowing about — `main` reads it
     /// once and hands the answer over.
-    pub async fn startup(&mut self, over: crate::update::StartupOverride) -> Result<()> {
-        let in_standby = match over {
-            crate::update::StartupOverride::Previous => self.persisted_standby,
-            crate::update::StartupOverride::AsConfigured => match self.settings.startup_power {
-                StartupPower::On => false,
-                StartupPower::Standby => true,
-                StartupPower::Previous => self.persisted_standby,
-            },
+    ///
+    /// That restart also keeps the sleep timer, after the device is put back
+    /// as it was: still running, armed for what is left; expired meanwhile,
+    /// or already winding down, standby at once without waking first — the
+    /// spec's "direct standby". Every other start drops it. The alarms it
+    /// made the device miss come next, from `main`, with a clock read once
+    /// this has returned (`catch_up_after`): waking the source here can take
+    /// seconds, and they may hold a minute boundary.
+    pub async fn startup(&mut self, over: crate::update::StartupOverride, now_unix_s: u64) -> Result<()> {
+        let sleep = self.persisted_sleep.take();
+        let (in_standby, sleep) = match over {
+            crate::update::StartupOverride::Previous { .. } => {
+                let expired = sleep.is_some_and(|t| t.ends_at_unix_s <= now_unix_s);
+                (self.persisted_standby || expired, sleep.filter(|_| !expired))
+            }
+            crate::update::StartupOverride::AsConfigured => {
+                let in_standby = match self.settings.startup_power {
+                    StartupPower::On => false,
+                    StartupPower::Standby => true,
+                    StartupPower::Previous => self.persisted_standby,
+                };
+                (in_standby, None)
+            }
         };
-        if in_standby {
-            return self.start_in_standby().await;
+        // Both branches persist, which is also what drops a timer left on
+        // disk by a start that does not keep it.
+        let outcome = if in_standby {
+            self.start_in_standby().await
+        } else {
+            // Lowered and written here too, so that the file describes an
+            // awake device.
+            self.leave_standby();
+            self.resume().await
+        };
+        if let Some(sleep) = sleep {
+            self.restore_sleep(sleep, now_unix_s);
         }
-        // Lowered and written here too, so that the file describes an awake
-        // device.
-        self.leave_standby();
-        self.resume().await
+        outcome
     }
 
     /// The flag half of every wake: lowered, then written to disk **before**
@@ -147,7 +191,7 @@ impl<P: Player> Core<P> {
     /// already applies to a disc that wakes the device, since waking the old
     /// source would start it for an instant only to cut it off. `None` (no
     /// source at all) leaves the device asleep: there is nothing to wake on.
-    async fn wake_on(&mut self, target: Option<String>) -> Result<()> {
+    pub(super) async fn wake_on(&mut self, target: Option<String>) -> Result<()> {
         let Some(name) = target else { return Ok(()) };
         // The flag first, then the wake: see `leave_standby`.
         self.leave_standby();
@@ -177,6 +221,127 @@ impl<P: Player> Core<P> {
         self.publish_state();
         // A held key must re-press after standby: stale deadlines don't survive it.
         self.volume_deadline = None;
+        Ok(())
+    }
+
+    /// Enters standby: the half of `Command::Power` that puts the device to
+    /// sleep, shared with the sleep timer's deadline.
+    ///
+    /// Always clears the sleep timer. If it was fading, mpv is set back to
+    /// the volume to restore once the player is stopped — whether or not the
+    /// stop succeeded — so the next listening never starts at the bottom of
+    /// the fade.
+    pub(super) async fn enter_standby(&mut self) -> Result<()> {
+        let restore = self.take_sleep_timer();
+        let outcome = self.enter_standby_flags_and_player().await;
+        match restore {
+            Some(v) => outcome.and(self.player.set_volume(v).await),
+            None => outcome,
+        }
+    }
+
+    /// What entering standby does to the flags, the Source and the player —
+    /// `Command::Power`'s own sequence, moved here unchanged.
+    async fn enter_standby_flags_and_player(&mut self) -> Result<()> {
+        self.standby = true;
+        // Persist **before** notifying the Source, for the same
+        // reason as `leave_standby`'s: an unreachable Source
+        // makes us wait up to 5 s, and `StartupPower::Previous`
+        // must find the intended standby even if the power is cut
+        // during that wait.
+        self.persist();
+        let _ = self.active_request(SourceReq::Deactivate).await;
+        self.player.stop().await?;
+        self.expecting_stream = false;
+        self.playback = false;
+        // Same reason as above: the Source's answer to
+        // `Deactivate` is ignored, and the standby view that
+        // follows would bypass the guard of `handle_source_update`.
+        self.set_identity(None);
+        // The preset count and the status only make sense for the
+        // active Source: standby forgets both, and the next Source
+        // (activate/wake) will redeclare them if it has any.
+        // Without this clearing, the old source's status
+        // ("NO DISC") survived standby in memory, ready to
+        // reappear on wake before the Source had spoken again.
+        self.preset_count = None;
+        self.source_status = None;
+        // Same fate for the eject capability: in standby only the
+        // commands that wake the device get through
+        // (`handle_command`), and the Source will redeclare it on
+        // wake.
+        self.can_eject = false;
+        // Same fate again for the finite-list capability, for the
+        // same reason.
+        self.has_finite_list = false;
+        // The volume/mute overlay does not survive entering
+        // standby: it keeps priority in `player_state`, and
+        // "VOLUME 65 %" stayed on screen for up to 2 s after
+        // power-off before the standby word appeared.
+        self.overlay = None;
+        // A pending `+10` goes with its overlay. `apply_command`'s abandon
+        // guard already drops it on the Power key, but a sleep timer's
+        // standby does not pass through `apply_command`.
+        self.pending_tens = 0;
+        // `standby_status` is not resolved here: it already is,
+        // since construction and every `set_locale` (see its
+        // doc) — never again at the moment standby is entered.
+        // A held key must re-press after standby: stale deadlines don't survive it.
+        self.volume_deadline = None;
+        Ok(())
+    }
+
+    /// Pauses what plays, or resumes what is paused.
+    async fn toggle_pause(&mut self) -> Result<()> {
+        // Flip the belief **after** mpv has accepted, never
+        // before. The `?` propagates a `toggle_pause` failure and
+        // leaves `paused` intact: that is the very value
+        // `PlayerState.playback` publishes, and the one the MPD
+        // plugin compares its `pause 0`/`pause 1` against — a core
+        // that believes itself paused in front of an mpv that
+        // plays answers "paused" to a client whose music goes on,
+        // and the following `pause 0` is then judged a no-op and
+        // ignored.
+        self.player.toggle_pause().await?;
+        self.paused = !self.paused;
+        Ok(())
+    }
+
+    /// Play, and never pause: resumes a pause, does nothing to what already
+    /// plays, and asks the active source to play when nothing is loaded. The
+    /// Play half of `Command::PlayPause`, shared with an alarm, which must
+    /// never pause the device nor go through `Command::Power`.
+    pub(super) async fn play(&mut self) -> Result<()> {
+        if self.playback {
+            if self.paused {
+                self.toggle_pause().await?;
+            }
+            return Ok(());
+        }
+        // Nothing is loaded: `stop` **clears mpv's playlist**, so
+        // "toggle pause" has nothing left to resume. The Play key
+        // therefore did nothing at all after a Stop, on every
+        // source — measured on the radio as well as on files. We
+        // ask the active source to play, which is exactly what
+        // the key promises.
+        //
+        // **`Play` and not `Activate`**, and the difference is
+        // one the core is the only one able to make: "the user
+        // pressed Play" and "this source has just become the
+        // active one" are two intentions that used to share a
+        // signal. A source may answer the second by playing
+        // nothing — the cd, whose arrival is configurable, does
+        // so by default — and the key went inert with it. The
+        // SDK's default keeps `Play` behaving as `Activate`, so
+        // no other source changes.
+        //
+        // `playback` and not `expecting_stream`: the first says
+        // "something plays, of whatever nature", the second only
+        // holds for restartable streams. A pause touches neither —
+        // so resuming stays a simple toggle, without reloading.
+        if let Some(action) = self.active_request(SourceReq::Play).await? {
+            self.apply(action).await?;
+        }
         Ok(())
     }
 
@@ -272,42 +437,9 @@ impl<P: Player> Core<P> {
             }
             Command::PlayPause => {
                 if self.playback {
-                    // Flip the belief **after** mpv has accepted, never
-                    // before. The `?` propagates a `toggle_pause` failure and
-                    // leaves `paused` intact: that is the very value
-                    // `PlayerState.playback` publishes, and the one the MPD
-                    // plugin compares its `pause 0`/`pause 1` against — a core
-                    // that believes itself paused in front of an mpv that
-                    // plays answers "paused" to a client whose music goes on,
-                    // and the following `pause 0` is then judged a no-op and
-                    // ignored.
-                    self.player.toggle_pause().await?;
-                    self.paused = !self.paused;
+                    self.toggle_pause().await?;
                 } else {
-                    // Nothing is loaded: `stop` **clears mpv's playlist**, so
-                    // "toggle pause" has nothing left to resume. The Play key
-                    // therefore did nothing at all after a Stop, on every
-                    // source — measured on the radio as well as on files. We
-                    // ask the active source to play, which is exactly what
-                    // the key promises.
-                    //
-                    // **`Play` and not `Activate`**, and the difference is
-                    // one the core is the only one able to make: "the user
-                    // pressed Play" and "this source has just become the
-                    // active one" are two intentions that used to share a
-                    // signal. A source may answer the second by playing
-                    // nothing — the cd, whose arrival is configurable, does
-                    // so by default — and the key went inert with it. The
-                    // SDK's default keeps `Play` behaving as `Activate`, so
-                    // no other source changes.
-                    //
-                    // `playback` and not `expecting_stream`: the first says
-                    // "something plays, of whatever nature", the second only
-                    // holds for restartable streams. A pause touches neither —
-                    // so resuming stays a simple toggle, without reloading.
-                    if let Some(action) = self.active_request(SourceReq::Play).await? {
-                        self.apply(action).await?;
-                    }
+                    self.play().await?;
                 }
             }
             Command::Stop => {
@@ -377,47 +509,9 @@ impl<P: Player> Core<P> {
                     self.leave_standby();
                     self.resume().await?;
                 } else {
-                    self.standby = true;
-                    // Persist **before** notifying the Source, for the same
-                    // reason as at `SourceCycle` below: an unreachable Source
-                    // makes us wait up to 5 s, and `StartupPower::Previous`
-                    // must find the intended standby even if the power is cut
-                    // during that wait.
-                    self.persist();
-                    let _ = self.active_request(SourceReq::Deactivate).await;
-                    self.player.stop().await?;
-                    self.expecting_stream = false;
-                    self.playback = false;
-                    // Same reason as above: the Source's answer to
-                    // `Deactivate` is ignored, and the standby view that
-                    // follows would bypass the guard of `handle_source_update`.
-                    self.set_identity(None);
-                    // The preset count and the status only make sense for the
-                    // active Source: standby forgets both, and the next Source
-                    // (activate/wake) will redeclare them if it has any.
-                    // Without this clearing, the old source's status
-                    // ("NO DISC") survived standby in memory, ready to
-                    // reappear on wake before the Source had spoken again.
-                    self.preset_count = None;
-                    self.source_status = None;
-                    // Same fate for the eject capability: in standby only the
-                    // commands that wake the device get through
-                    // (`handle_command`), and the Source will redeclare it on
-                    // wake.
-                    self.can_eject = false;
-                    // Same fate again for the finite-list capability, for the
-                    // same reason.
-                    self.has_finite_list = false;
-                    // The volume/mute overlay does not survive entering
-                    // standby: it keeps priority in `player_state`, and
-                    // "VOLUME 65 %" stayed on screen for up to 2 s after
-                    // power-off before the standby word appeared.
-                    self.overlay = None;
-                    // `standby_status` is not resolved here: it already is,
-                    // since construction and every `set_locale` (see its
-                    // doc) — never again at the moment standby is entered.
-                    // A held key must re-press after standby: stale deadlines don't survive it.
-                    self.volume_deadline = None;
+                    // By hand, in any phase of a sleep timer: the timer goes
+                    // with it (`enter_standby` clears it).
+                    self.enter_standby().await?;
                 }
             }
             Command::SourceCycle => {
@@ -557,6 +651,20 @@ impl<P: Player> Core<P> {
                 self.push_play_mode().await;
                 self.sync_loop_track().await?;
             }
+            // Only reached awake: `handle_command`'s standby gate drops all
+            // three, so a timer is never armed on a sleeping device.
+            // Outside `SLEEP_TIMER_MINUTES` (0, or more than ten hours) it is
+            // not a timer the menu can send: ignored, not even remembered.
+            Command::SetSleepTimer { minutes, mode } => {
+                if crate::state::SLEEP_TIMER_MINUTES.contains(&minutes) {
+                    // The menu's choice, remembered for the next timer: set
+                    // before arming, whose own write then carries it.
+                    self.settings.sleep_timer_mode = mode;
+                    self.arm_sleep_timer(minutes, mode).await;
+                }
+            }
+            Command::ExtendSleepTimer(minutes) => self.extend_sleep_timer(minutes).await,
+            Command::CancelSleepTimer => self.cancel_sleep_timer().await,
         }
         Ok(())
     }
@@ -1239,7 +1347,7 @@ mod tests {
             ..Default::default()
         };
         let (mut core, _pc, source_calls, _rx, _d) = setup_persisted(persisted);
-        core.startup(over).await.unwrap();
+        core.startup(over, crate::update::now_unix_s()).await.unwrap();
         // The guard is a temporary of the tail expression, so edition
         // 2024 drops it *before* the block's locals and it cannot
         // outlive `source_calls`. Up to edition 2021 the reverse held,
@@ -1274,7 +1382,7 @@ mod tests {
     async fn an_install_induced_restart_does_not_wake_a_device_in_standby() {
         use crate::update::StartupOverride;
         // StartupPower::On is the default, and is what would start playing.
-        let woke = wakes_with_override(StartupPower::On, true, StartupOverride::Previous).await;
+        let woke = wakes_with_override(StartupPower::On, true, StartupOverride::Previous { since_unix_s: 0 }).await;
         assert!(!woke, "a restart after an install woke a device in standby");
         // And the same start, outside the marker's window, obeys the setting.
         let woke = wakes_with_override(StartupPower::On, true, StartupOverride::AsConfigured).await;
@@ -1290,7 +1398,7 @@ mod tests {
         // The setting says "standby", so obeying it would prove nothing here:
         // only reading the persisted state can produce a wake.
         let woke =
-            wakes_with_override(StartupPower::Standby, false, StartupOverride::Previous).await;
+            wakes_with_override(StartupPower::Standby, false, StartupOverride::Previous { since_unix_s: 0 }).await;
         assert!(woke, "a restart after an install left a playing device asleep");
     }
 

@@ -14,6 +14,7 @@
 //! - `position`: progress reported by mpv, anchor set by a plugin
 //! - `publish`: player state and sources_catalog pushed to displays, SPA and plugins
 //! - `settings`: audio output, language, theme, writing `state.json`
+//! - `sleep_timer`: the sleep timer — countdown, fade, standby at the deadline
 //! - `sources`: cycle order, switching, hotplug arrival and a plugin's death, `apply`
 //! - `test_support`: fake player and sources, rigs shared by the tests
 
@@ -35,6 +36,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, RwLock};
 
+mod alarms;
 mod commands;
 mod deadlines;
 mod play_request;
@@ -43,7 +45,9 @@ mod track_metadata;
 mod position;
 mod publish;
 mod settings;
+mod sleep_timer;
 mod sources;
+pub use alarms::{first_check_in, secs_until_next_check};
 pub use deadlines::next_deadline;
 
 #[cfg(test)]
@@ -509,6 +513,32 @@ pub struct Core<P: Player> {
     /// the reason `cover_archive_task` gives.
     #[cfg(test)]
     lyrics_archive_task: Option<tokio::task::JoinHandle<()>>,
+    /// The running sleep timer, if any (see `sleep_timer.rs`). Persisted,
+    /// but read back only by the restart an update provokes: any other
+    /// restart loses it, by the owner's decision. Cleared by every entry
+    /// into standby (`enter_standby`).
+    sleep: Option<sleep_timer::SleepTimer>,
+    /// The timer `state.json` held at launch, a snapshot for the reason
+    /// `persisted_standby` gives. Consumed by `startup`.
+    persisted_sleep: Option<crate::state::PersistedSleep>,
+    /// The track mpv is on, as far as the sleep timer's "end of track" is
+    /// concerned: the first `TrackChanged` since the last `Play`, moved by
+    /// every later one and by a `PlayerChapter` the core applies. `None`
+    /// until the content just played has said where it is. See
+    /// `sleep_on_track_changed`.
+    track_ref: Option<i64>,
+    /// The last minute an alarm fired in (`alarms::minute_index`), persisted:
+    /// an alarm rings at most once per minute, however many times its minute
+    /// is checked. See `check_alarms`.
+    last_alarm_minute: Option<i64>,
+    /// The same firing as the local clock named it, persisted. See
+    /// `alarms::minute_is_new`.
+    last_alarm_local: Option<crate::state::LocalMinute>,
+    /// The next alarm to ring, as displays see it. Computed from the clock
+    /// at each minute check and on every settings change, not at each
+    /// publication: reading the local time costs a `tzset`, and the state is
+    /// published several times a second during playback.
+    next_alarm: Option<ritornello_proto::NextAlarm>,
 }
 
 /// What the detached read of an armed file (`Core::arm`) found: its tags
@@ -586,7 +616,7 @@ impl<P: Player> Core<P> {
                 None
             }
         };
-        let core = Self {
+        let mut core = Self {
             player,
             sources,
             source_order,
@@ -660,6 +690,12 @@ impl<P: Player> Core<P> {
             lyrics_archive_attempted: None,
             #[cfg(test)]
             lyrics_archive_task: None,
+            sleep: None,
+            persisted_sleep: persisted.sleep_timer,
+            track_ref: None,
+            last_alarm_minute: persisted.last_alarm_minute,
+            last_alarm_local: persisted.last_alarm_local,
+            next_alarm: None,
         };
         // The sources wired at startup are already known: without this
         // publication, the channel would keep its blank
@@ -673,6 +709,9 @@ impl<P: Player> Core<P> {
         // from the first visit to the config page, and would push full-size
         // images until then. Startup must obey the file.
         core.covers.set_cover_settings(crate::cover::CoverSettings::from(&core.settings));
+        // The first frame must already name the next alarm, not wait for the
+        // first minute check.
+        core.refresh_next_alarm(crate::update::now_unix_s() as i64);
         core
     }
 

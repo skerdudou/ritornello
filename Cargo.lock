@@ -2460,7 +2460,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-core"
-version = "0.2.0"
+version = "0.3.0-beta.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2507,7 +2507,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-i18n"
-version = "0.2.0"
+version = "0.3.0-beta.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2539,7 +2539,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-manifest"
-version = "0.2.0"
+version = "0.3.0-beta.1"
 dependencies = [
  "toml_edit",
 ]
@@ -2565,7 +2565,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-console"
-version = "0.2.0"
+version = "0.3.0-beta.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2750,7 +2750,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-sdk"
-version = "0.2.0"
+version = "0.3.0-beta.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2765,7 +2765,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-web-streaming"
-version = "0.2.0"
+version = "0.3.0-beta.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2794,7 +2794,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-proto"
-version = "0.2.0"
+version = "0.3.0-beta.1"
 dependencies = [
  "base64 0.23.1",
  "serde",

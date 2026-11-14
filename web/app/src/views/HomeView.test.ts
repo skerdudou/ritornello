@@ -135,6 +135,42 @@ describe('HomeView', () => {
     expect(action.find('[data-remote-power]').exists()).toBe(true)
   })
 
+  it('the sleep timer key sits beside standby and posts with the mode the core remembers', async () => {
+    vi.stubGlobal('EventSource', FakeEventSource)
+    const spy = vi.fn().mockImplementation(async (url: string) =>
+      url === '/api/settings'
+        ? new Response(JSON.stringify({ seek_step_s: 10, sleep_timer_mode: 'end_of_track' }), { status: 200 })
+        : new Response(null, { status: 204 }))
+    vi.stubGlobal('fetch', spy)
+    const HomeView = (await import('./HomeView.vue')).default
+    const w = mount(HomeView, { attachTo: document.body })
+    await flushPromises()
+    const action = w.get('[data-slot="card-action"]')
+    expect(action.find('[data-sleep-timer-key]').exists()).toBe(true)
+    // Standby keeps the far corner.
+    const keys = action.findAll('button').map((b) => b.attributes('data-sleep-timer-key') !== undefined ? 'sleep' : b.attributes('data-remote-power') !== undefined ? 'power' : 'other')
+    expect(keys.slice(-2)).toEqual(['sleep', 'power'])
+
+    await action.get('[data-sleep-timer-key]').trigger('click')
+    await flushPromises()
+    document.body.querySelector<HTMLElement>('[data-sleep-timer-menu] [data-sleep-minutes="60"]')!.click()
+    await flushPromises()
+    expect(spy).toHaveBeenCalledWith(
+      '/api/command',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ cmd: 'SetSleepTimer', arg: { minutes: 60, mode: 'end_of_track' } }),
+      }),
+    )
+
+    // In standby the core ignores it: the key is greyed.
+    FakeEventSource.last!.push({ standby: true })
+    await flushPromises()
+    expect(w.get('[data-sleep-timer-key]').attributes('disabled')).toBeDefined()
+    w.unmount()
+    document.body.innerHTML = ''
+  })
+
   it('highlights the key of the playing preset, and turns it off on stop', async () => {
     // "We don't know which preset we are on": the key matching what plays
     // (declared by the active source through the pushed stream) carries
@@ -552,8 +588,9 @@ describe('HomeView — sliders and names', () => {
 })
 
 describe('headerMode', () => {
-  // Three keys, the gaps between them, the gap before standby, standby.
-  const NEEDED = 3 * KEY + 2 * GAP + GAP + KEY
+  // Three keys, the gaps between them, then the sleep timer key at rest and
+  // standby, each after its gap.
+  const NEEDED = 3 * KEY + 2 * GAP + GAP + KEY + GAP + KEY
 
   it('the measures are those of the kit: icon-sm is size-8, the row is gap-1', () => {
     expect(KEY).toBe(32)
@@ -561,39 +598,49 @@ describe('headerMode', () => {
   })
 
   it('a single source, once the list is read: nothing to choose between', () => {
-    expect(headerMode({ sources: 1, listRead: true, available: 1000, standby: false, activeListed: true })).toBe('none')
-    expect(headerMode({ sources: 0, listRead: true, available: 1000, standby: false, activeListed: true })).toBe('none')
+    expect(headerMode({ sources: 1, listRead: true, available: 1000, standby: false, sleepKey: KEY, activeListed: true })).toBe('none')
+    expect(headerMode({ sources: 0, listRead: true, available: 1000, standby: false, sleepKey: KEY, activeListed: true })).toBe('none')
   })
 
   it('an unread list keeps the cycle key: a failed /api/presets must leave a way to change source', () => {
-    expect(headerMode({ sources: 0, listRead: false, available: 1000, standby: false, activeListed: true })).toBe('cycle')
-    expect(headerMode({ sources: 3, listRead: false, available: 1000, standby: false, activeListed: true })).toBe('cycle')
+    expect(headerMode({ sources: 0, listRead: false, available: 1000, standby: false, sleepKey: KEY, activeListed: true })).toBe('cycle')
+    expect(headerMode({ sources: 3, listRead: false, available: 1000, standby: false, sleepKey: KEY, activeListed: true })).toBe('cycle')
   })
 
   it('an unknown width keeps the cycle key', () => {
-    expect(headerMode({ sources: 3, listRead: true, available: null, standby: false, activeListed: true })).toBe('cycle')
+    expect(headerMode({ sources: 3, listRead: true, available: null, standby: false, sleepKey: KEY, activeListed: true })).toBe('cycle')
   })
 
   it('the icons from exactly the width they need, the cycle key one pixel below', () => {
-    expect(NEEDED).toBe(140)
-    expect(headerMode({ sources: 3, listRead: true, available: NEEDED, standby: false, activeListed: true })).toBe('icons')
-    expect(headerMode({ sources: 3, listRead: true, available: NEEDED - 1, standby: false, activeListed: true })).toBe('cycle')
+    expect(NEEDED).toBe(176)
+    expect(headerMode({ sources: 3, listRead: true, available: NEEDED, standby: false, sleepKey: KEY, activeListed: true })).toBe('icons')
+    expect(headerMode({ sources: 3, listRead: true, available: NEEDED - 1, standby: false, sleepKey: KEY, activeListed: true })).toBe('cycle')
   })
 
   it('standby makes room for its badge', () => {
     const withBadge = NEEDED + STANDBY_BADGE + GAP
-    expect(headerMode({ sources: 3, listRead: true, available: withBadge, standby: false, activeListed: true })).toBe('icons')
-    expect(headerMode({ sources: 3, listRead: true, available: withBadge, standby: true, activeListed: true })).toBe('icons')
-    expect(headerMode({ sources: 3, listRead: true, available: withBadge - 1, standby: true, activeListed: true })).toBe('cycle')
+    expect(headerMode({ sources: 3, listRead: true, available: withBadge, standby: false, sleepKey: KEY, activeListed: true })).toBe('icons')
+    expect(headerMode({ sources: 3, listRead: true, available: withBadge, standby: true, sleepKey: KEY, activeListed: true })).toBe('icons')
+    expect(headerMode({ sources: 3, listRead: true, available: withBadge - 1, standby: true, sleepKey: KEY, activeListed: true })).toBe('cycle')
     // The same width that holds the keys alone no longer does with the badge.
-    expect(headerMode({ sources: 3, listRead: true, available: NEEDED, standby: true, activeListed: true })).toBe('cycle')
+    expect(headerMode({ sources: 3, listRead: true, available: NEEDED, standby: true, sleepKey: KEY, activeListed: true })).toBe('cycle')
+  })
+
+  it('a sleep timer key reading the time left takes its measured width', () => {
+    // At rest a bare moon (`KEY`); counting down, `29:59` widens it.
+    const wide = 80
+    const needed = NEEDED - KEY + wide
+    expect(headerMode({ sources: 3, listRead: true, available: needed, standby: false, sleepKey: wide, activeListed: true })).toBe('icons')
+    expect(headerMode({ sources: 3, listRead: true, available: needed - 1, standby: false, sleepKey: wide, activeListed: true })).toBe('cycle')
+    // The width that holds the row with a bare moon no longer does.
+    expect(headerMode({ sources: 3, listRead: true, available: NEEDED, standby: false, sleepKey: wide, activeListed: true })).toBe('cycle')
   })
 
   it('an active source absent from the list is named by the pill, even with ample width', () => {
     // The core keeps the active source while mpv plays after its plugin died.
-    expect(headerMode({ sources: 3, listRead: true, available: 1000, standby: false, activeListed: false })).toBe('cycle')
+    expect(headerMode({ sources: 3, listRead: true, available: 1000, standby: false, sleepKey: KEY, activeListed: false })).toBe('cycle')
     // Listed (or empty, which the caller reports as listed): unchanged.
-    expect(headerMode({ sources: 3, listRead: true, available: 1000, standby: false, activeListed: true })).toBe('icons')
+    expect(headerMode({ sources: 3, listRead: true, available: 1000, standby: false, sleepKey: KEY, activeListed: true })).toBe('icons')
   })
 })
 

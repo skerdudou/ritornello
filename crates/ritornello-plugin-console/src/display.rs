@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use ritornello_proto::{Overlay, Playback, PlayerState};
+use ritornello_proto::{NextAlarm, Overlay, Playback, PlayerState, SleepTimerState, Weekday};
 use std::io::Write;
 use std::path::Path;
 
@@ -70,12 +70,86 @@ pub fn format_time(hours: u32, minutes: u32, twelve_hour: bool) -> String {
     format!("{h}:{minutes:02} {suffix}")
 }
 
+/// Width of the console in columns, as far as the layout is concerned: the
+/// owner's tty shows about twenty. The alarm and the sleep timer are optional
+/// additions to a line, and are left out rather than truncated or wrapped when
+/// they would not fit in it.
+const COLUMNS: usize = 20;
+
+/// Seconds since the Unix epoch, or `None` before the system clock is set.
+pub fn unix_now() -> Option<u64> {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs())
+}
+
+/// Minutes left on the sleep timer, rounded **up**: `0:30` left reads `1m`,
+/// so the figure only reaches `0m` once `ends_at_unix_s` has passed. That
+/// instant follows the phase: the deadline while armed, then the 5-minute
+/// cap while waiting for the end of the track, then the end of the fade —
+/// so waiting reads up to `5m` and fading `1m`, not `0m`; `0m` shows only in
+/// the gap before the core's next frame.
+///
+/// Computed here from the deadline: the core does not push a frame per second
+/// for the timer, only when its state changes.
+pub fn timer_minutes(timer: &SleepTimerState, now_unix_s: u64) -> u64 {
+    timer.ends_at_unix_s.saturating_sub(now_unix_s).div_ceil(60)
+}
+
+/// `Z 25m`: the sleep timer as a line suffix. Plain letter and not a glyph:
+/// the console font (Lat15-Fixed16) has no moon nor bell, and a missing glyph
+/// renders as a blank or a box.
+fn timer_text(timer: &SleepTimerState, now_unix_s: u64) -> String {
+    format!("Z {}m", timer_minutes(timer, now_unix_s))
+}
+
+/// Three-letter English day. Like the rest of this display it is not
+/// translated (it has no language); a day name is still more readable than a
+/// number, and short enough for the line.
+fn weekday_abbr(day: Weekday) -> &'static str {
+    match day {
+        Weekday::Sunday => "Sun",
+        Weekday::Monday => "Mon",
+        Weekday::Tuesday => "Tue",
+        Weekday::Wednesday => "Wed",
+        Weekday::Thursday => "Thu",
+        Weekday::Friday => "Fri",
+        Weekday::Saturday => "Sat",
+    }
+}
+
+/// `A Mon 07:00`: the next alarm, in the device's 12/24 h form. `A` and not a
+/// bell: see [`timer_text`].
+fn alarm_text(alarm: &NextAlarm, twelve_hour: bool) -> String {
+    format!(
+        "A {} {}",
+        weekday_abbr(alarm.weekday),
+        format_time(u32::from(alarm.hour), u32::from(alarm.minute), twelve_hour)
+    )
+}
+
+/// `base` followed by two spaces and `extra`, when the result fits in
+/// [`COLUMNS`]; otherwise `base` alone.
+fn append_if_fits(base: String, extra: &str) -> String {
+    let joined = if base.is_empty() { extra.to_string() } else { format!("{base}  {extra}") };
+    if joined.chars().count() <= COLUMNS { joined } else { base }
+}
+
 /// Like [`compose`], but with the time to write in standby.
 ///
 /// Separate so that the layout stays **pure**: `compose` reads no clock, so
 /// every case is tested on a chosen time. `None` = no time to display (system
 /// clock unusable, or state outside standby).
+#[cfg(test)]
 pub fn compose_at(state: &PlayerState, now: Option<(u32, u32)>) -> [String; 3] {
+    compose_full(state, now, None)
+}
+
+/// [`compose_at`] plus the Unix time, which the sleep timer's countdown needs.
+/// `None` for the Unix time = no countdown shown. Pure, like its siblings.
+pub fn compose_full(
+    state: &PlayerState,
+    now: Option<(u32, u32)>,
+    unix_now_s: Option<u64>,
+) -> [String; 3] {
     if state.overlay.is_none() && state.standby {
         // **The time in standby**, requested by the owner: it is the only
         // moment the screen has nothing else to say, and a clock is more useful
@@ -84,9 +158,26 @@ pub fn compose_at(state: &PlayerState, now: Option<(u32, u32)>) -> [String; 3] {
         let time = now
             .map(|(h, m)| format_time(h, m, state.clock.twelve_hour))
             .unwrap_or_default();
-        return [state.status.clone().unwrap_or_default(), time, String::new()];
+        // The next alarm shares the clock's line when it fits: that is the
+        // moment it is useful ("will it wake me?"). Without a clock the line
+        // stays empty: an alarm with no time next to it would be a puzzle.
+        let line2 = match (&state.next_alarm, time.is_empty()) {
+            (Some(alarm), false) => {
+                append_if_fits(time, &alarm_text(alarm, state.clock.twelve_hour))
+            }
+            _ => time,
+        };
+        return [state.status.clone().unwrap_or_default(), line2, String::new()];
     }
-    compose(state)
+    let mut lines = compose(state);
+    // **The sleep timer rides on line 1**, which is the one with room: the
+    // source name and the preset number are short, where line 2 carries a
+    // station or album name and line 3 the title, both free text that fills
+    // the width. Overlays take the whole screen and show no countdown.
+    if let (Some(timer), Some(unix), None) = (&state.sleep_timer, unix_now_s, &state.overlay) {
+        lines[0] = append_if_fits(std::mem::take(&mut lines[0]), &timer_text(timer, unix));
+    }
+    lines
 }
 
 /// Three lines for a text screen of about twenty columns, composed from the
@@ -264,7 +355,9 @@ impl ConsoleDisplay {
         // look at it, and a `tzset` per state frame — one per second during
         // playback — would be one `stat` per second for nothing.
         let now = state.standby.then(local_time).flatten();
-        let lines = compose_at(state, now);
+        // Same reasoning for the Unix time: only a running timer needs it.
+        let unix = state.sleep_timer.and_then(|_| unix_now());
+        let lines = compose_full(state, now, unix);
         if self.last_lines.as_ref() == Some(&lines) {
             return Ok(());
         }
@@ -601,5 +694,115 @@ mod tests {
         e.position_s = Some(88);
         e.overlay = Some(Overlay::Message { text: "PRESELECTION VIDE".into(), remaining_ms: 4000 });
         assert_eq!(compose(&e), before);
+    }
+
+    // ---- next alarm and sleep timer ----------------------------------
+
+    /// A frame as the core pushes it with an alarm and a timer set.
+    ///
+    /// `PlayerState` has no serde defaults (the core always writes every
+    /// field), so the fragment given here is laid over a default frame
+    /// serialized the way the core writes it: what is parsed back is a whole
+    /// frame, the new fields travelling as JSON, as on the socket.
+    fn frame(json: &str) -> PlayerState {
+        let mut base = serde_json::to_value(PlayerState::default()).unwrap();
+        let over: serde_json::Value = serde_json::from_str(json).expect("valid JSON");
+        for (k, v) in over.as_object().unwrap() {
+            base[k] = v.clone();
+        }
+        serde_json::from_value(base).expect("a valid frame")
+    }
+
+    const STANDBY_WITH_ALARM: &str = r#"{"standby":true,"status":"VEILLE",
+        "next_alarm":{"weekday":"monday","hour":7,"minute":0}}"#;
+
+    const PLAYING_WITH_TIMER: &str = r#"{"source":"radio","preset":3,"preset_count":12,
+        "preset_name":"France Inter","playback":"playing",
+        "sleep_timer":{"ends_at_unix_s":1000600,"mode":"immediate","phase":"armed"}}"#;
+
+    /// **[MUTATION]** dropping the alarm branch of `compose_full` makes this
+    /// fire; so does swapping the weekday table.
+    #[test]
+    fn standby_shows_the_next_alarm_after_the_clock() {
+        let st = frame(STANDBY_WITH_ALARM);
+        assert_eq!(compose_at(&st, Some((7, 12))), ["VEILLE", "07:12  A Mon 07:00", ""]);
+    }
+
+    #[test]
+    fn the_alarm_follows_the_twelve_hour_setting_and_drops_when_it_does_not_fit() {
+        let mut st = frame(STANDBY_WITH_ALARM);
+        st.clock.twelve_hour = true;
+        // "7:12 AM  A Mon 7:00 AM" is 22 columns: too wide, so the clock
+        // stays alone rather than being truncated.
+        assert_eq!(compose_at(&st, Some((7, 12)))[1], "7:12 AM");
+        // The boundary, on the helper itself: exactly 20 columns fits.
+        assert_eq!(append_if_fits("12345678".into(), "1234567890"), "12345678  1234567890");
+        assert_eq!(append_if_fits("12345678".into(), "12345678901"), "12345678");
+    }
+
+    #[test]
+    fn no_clock_means_no_alarm_either() {
+        let st = frame(STANDBY_WITH_ALARM);
+        assert_eq!(compose_at(&st, None), ["VEILLE", "", ""]);
+    }
+
+    #[test]
+    fn a_standby_frame_without_the_new_fields_renders_as_before() {
+        let st = frame(r#"{"standby":true,"status":"VEILLE"}"#);
+        assert_eq!(compose_at(&st, Some((13, 5))), ["VEILLE", "13:05", ""]);
+        assert_eq!(compose_full(&st, Some((13, 5)), Some(1_000_000)), ["VEILLE", "13:05", ""]);
+    }
+
+    /// **[MUTATION]** rounding down instead of up, or ignoring the unix time,
+    /// makes one of these fire.
+    #[test]
+    fn playback_shows_the_remaining_minutes_on_the_first_line() {
+        let st = frame(PLAYING_WITH_TIMER);
+        let l = compose_full(&st, None, Some(1_000_000));
+        assert_eq!(l[0], "▶ RADIO  3/12  Z 10m");
+        assert_eq!(l[1], "France Inter");
+        // 1 s short of the deadline still reads one minute; 61 s reads two.
+        assert_eq!(compose_full(&st, None, Some(1_000_599))[0], "▶ RADIO  3/12  Z 1m");
+        assert_eq!(compose_full(&st, None, Some(1_000_539))[0], "▶ RADIO  3/12  Z 2m");
+        // Past `ends_at_unix_s` with no newer frame yet: 0m. (Waiting and
+        // fading do not read 0m: their frames move `ends_at_unix_s` to the
+        // cap or to the end of the fade.)
+        assert_eq!(compose_full(&st, None, Some(1_000_700))[0], "▶ RADIO  3/12  Z 0m");
+    }
+
+    #[test]
+    fn the_timer_is_left_out_when_unknown_overlaid_or_too_wide() {
+        let st = frame(PLAYING_WITH_TIMER);
+        // No Unix time: no countdown.
+        assert_eq!(compose_full(&st, None, None)[0], "▶ RADIO  3/12");
+        // An overlay takes everything.
+        let mut ov = st.clone();
+        ov.overlay = Some(Overlay::Message { text: "OK".into(), remaining_ms: 1000 });
+        assert_eq!(compose_full(&ov, None, Some(1_000_000)), ["OK", "", ""]);
+        // "▶ RADIO  12/12" + "  Z 120m" is 22 columns: omitted whole.
+        let mut wide = st.clone();
+        wide.preset = Some(12);
+        wide.sleep_timer.as_mut().unwrap().ends_at_unix_s = 1_000_000 + 120 * 60;
+        assert_eq!(compose_full(&wide, None, Some(1_000_000))[0], "▶ RADIO  12/12");
+    }
+
+    #[test]
+    fn a_playing_frame_without_the_new_fields_renders_as_before() {
+        let st = frame(r#"{"source":"radio","preset":3,"preset_count":12,"preset_name":"France Inter"}"#);
+        assert_eq!(compose_full(&st, None, Some(1_000_000)), compose(&st));
+        assert_eq!(compose(&st)[0], "■ RADIO  3/12");
+    }
+
+    #[test]
+    fn the_countdown_reaches_the_tty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tty");
+        std::fs::write(&path, b"").unwrap();
+        let mut display = ConsoleDisplay::open(&path).unwrap();
+        let mut st = frame(PLAYING_WITH_TIMER);
+        st.sleep_timer.as_mut().unwrap().ends_at_unix_s = unix_now().unwrap() + 600;
+        display.show(&st).unwrap();
+        let out = String::from_utf8(std::fs::read(&path).unwrap()).unwrap();
+        assert!(out.contains("▶ RADIO  3/12  Z 10m\r\n"), "{out:?}");
     }
 }

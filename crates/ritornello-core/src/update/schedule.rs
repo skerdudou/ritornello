@@ -51,43 +51,9 @@ impl UpdatePolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Weekday {
-    Sunday,
-    Monday,
-    Tuesday,
-    Wednesday,
-    Thursday,
-    Friday,
-    Saturday,
-}
-
-impl Weekday {
-    /// Maps `tm_wday` (0 for Sunday, as `localtime_r` gives it) to a
-    /// `Weekday`.
-    ///
-    /// A pure function over `0..=6`, deliberately pulled out of `local_now`:
-    /// it is the one piece of logic in this file's only untested function
-    /// that is not time-zone-dependent, and an off-by-one here would mean a
-    /// weekly cadence silently firing on the wrong day, every week, forever.
-    ///
-    /// `None` outside `0..=6` — `localtime_r` never produces such a value,
-    /// but the signature admits one, and answering `None` rather than
-    /// panicking or guessing keeps that promise honest for any other caller.
-    fn from_tm(wday: i32) -> Option<Self> {
-        Some(match wday {
-            0 => Self::Sunday,
-            1 => Self::Monday,
-            2 => Self::Tuesday,
-            3 => Self::Wednesday,
-            4 => Self::Thursday,
-            5 => Self::Friday,
-            6 => Self::Saturday,
-            _ => return None,
-        })
-    }
-}
+/// Moved to the protocol crate (the display contract carries it in
+/// `NextAlarm`); re-exported so the core keeps one name for it.
+pub use ritornello_proto::Weekday;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "day")]

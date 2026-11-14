@@ -554,13 +554,36 @@ async fn settings_json(State(state): State<AppState>) -> Json<crate::state::Sett
 /// whole. A field absent from the body falls back to its default (the struct
 /// is `serde(default)`), which is the price of reusing the state type — fine
 /// on a single-user device.
-async fn settings_put(State(state): State<AppState>, Json(req): Json<crate::state::Settings>) -> Response {
+async fn settings_put(State(state): State<AppState>, Json(body): Json<serde_json::Value>) -> Response {
+    // Read as a raw value first: `Settings` drops a malformed alarm silently
+    // (that is right for `state::load`, wrong here), so the alarms are checked
+    // strictly before the lenient parse.
+    if let Err(e) = settings_validation::check_alarms_parse(&body) {
+        let msg = e.message(&*state.catalog.read().await);
+        return (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": msg }))).into_response();
+    }
+    let mut req: crate::state::Settings = match serde_json::from_value(body) {
+        Ok(s) => s,
+        Err(e) => {
+            return (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": e.to_string() })))
+                .into_response();
+        }
+    };
     if let Err(e) = validate_settings(&req) {
         let msg = e.message(&*state.catalog.read().await);
         return (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": msg })))
             .into_response();
     }
-    *state.settings_current.write().await = req.clone();
+    {
+        // The sleep timer's remembered mode is written by its menu through the
+        // core (`main` mirrors it here), never by this page: a body carrying
+        // an older copy, or none at all, must not replace it in what
+        // `GET /api/settings` serves. The core ignores it too
+        // (`Core::set_settings`).
+        let mut current = state.settings_current.write().await;
+        req.sleep_timer_mode = current.sleep_timer_mode;
+        *current = req.clone();
+    }
     if state.settings_tx.send(req).await.is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
@@ -1546,6 +1569,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn put_settings_keeps_the_remembered_sleep_timer_mode() {
+        // A body without the field (serde default: `fade`) and one with a
+        // stale value: neither replaces the mode the timer's menu chose.
+        for body in [r#"{"overlay_ms":3000}"#, r#"{"overlay_ms":3000,"sleep_timer_mode":"fade"}"#] {
+            let (state, mut settings_rx) = app_state_with_settings();
+            state.settings_current.write().await.sleep_timer_mode = ritornello_proto::SleepMode::EndOfTrack;
+            let app = router(state);
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::put("/api/settings")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NO_CONTENT, "{body}");
+            assert_eq!(settings_rx.recv().await.unwrap().overlay_ms, 3000);
+            let resp = app.oneshot(Request::get("/api/settings").body(Body::empty()).unwrap()).await.unwrap();
+            let served = resp.into_body().collect().await.unwrap().to_bytes();
+            let v: serde_json::Value = serde_json::from_slice(&served).unwrap();
+            assert_eq!(v["sleep_timer_mode"], "end_of_track", "{body}");
+            assert_eq!(v["overlay_ms"], 3000, "{body}");
+        }
+    }
+
+    #[tokio::test]
     async fn put_settings_out_of_bounds_returns_422_and_changes_nothing() {
         // Same contract as /api/audio-output and /api/theme: validated before
         // any state change, with an `error` message the SPA turns into a toast.
@@ -1581,6 +1632,75 @@ mod tests {
         assert_eq!(settings_current.read().await.overlay_ms, 5000);
         assert_eq!(settings_current.read().await.tens_window_ms, 5000);
         assert!(settings_rx.try_recv().is_err(), "nothing must go out on the channel");
+    }
+
+    /// PUTs `settings` and returns the status, checking that a refusal leaves
+    /// the served settings and the channel untouched.
+    async fn put_alarm_settings(settings: &str) -> StatusCode {
+        let (state, mut settings_rx) = app_state_with_settings();
+        let settings_current = state.settings_current.clone();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::put("/api/settings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(settings.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        if status == StatusCode::UNPROCESSABLE_ENTITY {
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(v["error"].is_string());
+            assert!(settings_current.read().await.alarms.is_empty(), "a refusal must change nothing");
+            assert_eq!(settings_rx.recv().await, None, "nothing must go out on the channel");
+        }
+        status
+    }
+
+    #[tokio::test]
+    async fn put_settings_rejects_alarm_without_days() {
+        let alarm = |days: &str| {
+            format!(
+                r#"{{"alarms":[{{"id":1,"enabled":true,"hour":7,"minute":0,"days":{days},"target":{{"kind":"resume"}},"volume":30}}]}}"#
+            )
+        };
+        assert_eq!(put_alarm_settings(&alarm(r#"["monday"]"#)).await, StatusCode::NO_CONTENT);
+        assert_eq!(put_alarm_settings(&alarm("[]")).await, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// Tolerance belongs to `state::load`: on a PUT a malformed alarm must be
+    /// refused, not dropped and answered with a success.
+    #[tokio::test]
+    async fn put_settings_rejects_a_malformed_alarm_instead_of_dropping_it() {
+        let one = |alarm: &str| format!(r#"{{"alarms":[{alarm}]}}"#);
+        // hour 300 overflows u8.
+        let overflow = one(
+            r#"{"id":1,"enabled":true,"hour":300,"minute":0,"days":["monday"],"target":{"kind":"resume"},"volume":30}"#,
+        );
+        // no `volume`.
+        let missing = one(r#"{"id":1,"enabled":true,"hour":7,"minute":0,"days":["monday"],"target":{"kind":"resume"}}"#);
+        // unknown target kind.
+        let unknown = one(
+            r#"{"id":1,"enabled":true,"hour":7,"minute":0,"days":["monday"],"target":{"kind":"teleport"},"volume":30}"#,
+        );
+        for body in [overflow, missing, unknown] {
+            assert_eq!(put_alarm_settings(&body).await, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn put_settings_rejects_duplicate_alarm_ids() {
+        let alarm = |id: u32| {
+            format!(
+                r#"{{"id":{id},"enabled":true,"hour":7,"minute":0,"days":["monday"],"target":{{"kind":"resume"}},"volume":30}}"#
+            )
+        };
+        let body = |a: u32, b: u32| format!(r#"{{"alarms":[{},{}]}}"#, alarm(a), alarm(b));
+        assert_eq!(put_alarm_settings(&body(1, 2)).await, StatusCode::NO_CONTENT);
+        assert_eq!(put_alarm_settings(&body(2, 2)).await, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]

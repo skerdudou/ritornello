@@ -11,12 +11,14 @@ and a single set of components; the difference between the phone and the
 desktop arrangement is Tailwind breakpoints, not two separate views (see
 "Layout" below).
 
-The page embeds buttons for 10 of the protocol's 21 commands: standby,
+The page embeds buttons for 10 of the protocol's 24 commands: standby,
 source switch, mute, previous/next, play/pause, stop, eject, and the two
 play modes, random and repeat (see "Transport" below). Three more
 commands are sent by controls that are not buttons — the preset tiles send
 `Select`, the progress bar sends `SeekTo`, the volume slider sends
-`SetVolume`. The remaining eight belong elsewhere: `VolumeUp`/`VolumeDown`
+`SetVolume`. Three are the sleep timer's menu — `SetSleepTimer`,
+`ExtendSleepTimer`, `CancelSleepTimer` (see [Sleep timer and
+alarms](#sleep-timer-and-alarms)). The remaining eight belong elsewhere: `VolumeUp`/`VolumeDown`
 and `SeekForward`/`SeekBackward` are the physical remote's hold-to-repeat
 and step keys (see "Physical remote" below) — the web page dropped its own
 ±5%-volume and ±`seek_step_s`-seek buttons in this refonte, in favour of
@@ -295,7 +297,9 @@ not sees nothing playing until Play.
 On the console display, line 1 starts with the playback state as one glyph
 followed by a space: ▶ playing, ║ paused, ■ stopped (the overlay and
 standby screens show none); these are glyphs the console font (Lat15-Fixed16)
-actually contains.
+actually contains. A running sleep timer adds its minutes at the end of that
+line, and the next alarm follows the standby clock (see [On the console
+display](#on-the-console-display)).
 
 ### Progress bar
 
@@ -687,6 +691,257 @@ as such (the source's name, marked "not installed") and remains fully
 editable — its code can still be cleared or reassigned — it is only the
 source it names that is gone.
 
+## Sleep timer and alarms
+
+Two radio-alarm-clock gestures: falling asleep to music — a countdown at the
+end of which the device goes to standby, without cutting off abruptly unless
+asked to — and waking up to it — recurring alarms, set like a phone's, which
+take the device out of standby and may arm a sleep timer of their own ("wake
+me at 7, turn off at 8"). The core owns both (`core/sleep_timer.rs`,
+`core/alarms.rs`); the page and the displays only show what it publishes.
+None of it has run on the Pi yet: see [What has not been
+verified](installation.md#what-has-not-been-verified).
+
+### The sleep timer key
+
+A key in the Player card's header, **beside the standby key**: both act on
+the whole device rather than on what plays. At rest it is a moon. While a
+timer counts down it reads the time left, counted down **in the browser**,
+once a second, from the deadline the core pushed
+(`sleep_timer.ends_at_unix_s` in the `GET /api/player` frame): the core
+publishes the deadline when it changes and never a frame per second for the
+timer alone. The countdown therefore reads the browser's own clock against
+the device's deadline: a browser whose clock is a minute off shows a minute
+off, while the device still goes to standby on time. Past the deadline the key reads what the device is doing instead
+— "After this track" while it waits for the end of the track, "Fading out"
+during the fade.
+
+A click opens the menu, a dialog of the kit (which has no dropdown menu): the
+end mode first, then the durations — **15, 30, 45, 60 and 90 min** — each of
+which starts a timer at once, replacing a running one (including one an alarm
+armed). While a timer runs, **+15 min** and **Cancel** come first. The mode
+is **remembered**: the menu opens on the mode of the last timer started
+**from the menu** (an alarm's own timer does not change it), which
+the core keeps in `state.json` (`settings.sleep_timer_mode`, default `fade`,
+served by `GET /api/settings`). Starting a timer is what records it; a `PUT
+/api/settings` never overwrites it, so saving another card cannot reset it.
+
+The key is **disabled in standby**: there is nothing to put to sleep, and the
+core drops the three timer commands there like every command the standby gate
+does not let through. The commands themselves, for a script:
+
+    {"cmd":"SetSleepTimer","arg":{"minutes":30,"mode":"end_of_track"}}
+    {"cmd":"ExtendSleepTimer","arg":15}
+    {"cmd":"CancelSleepTimer"}
+
+`mode` is `immediate`, `fade` or `end_of_track`. `minutes` runs from 1 to
+600, the same bounds as an alarm's timer: a `SetSleepTimer` outside them is
+ignored (no timer, mode not remembered). `ExtendSleepTimer` with no timer
+running, or with 0, does nothing, and never leaves more than 600 minutes to
+run: past that it extends up to the ceiling only.
+
+### What happens at the deadline
+
+The device goes to **standby exactly as the Power key puts it there** — the
+source deactivated, the player stopped, `standby` persisted. If nothing is
+playing at the deadline (paused, stopped), that happens at once whatever the
+mode. Otherwise the mode decides:
+
+- **Immediate** — standby at the deadline.
+- **Fade** — the volume goes down to zero over **10 s, in 20 steps of
+  500 ms**, a straight line from where it was; then standby. The steps are
+  written to mpv only: they are not persisted and show no volume overlay, so
+  the stored volume stays the one from before the fade, and mpv is set back to
+  it once the player is stopped. The next listening starts at the level it
+  left, never at zero.
+- **End of track** — the device keeps playing until the playing track ends,
+  **5 minutes at most**, then fades as above. Which source will be playing is
+  not known when the timer starts, so the choice is made at the deadline: a
+  stream with no title at that moment has no track to finish and fades at
+  once. What counts as the end of a track: mpv moving to the next entry or
+  chapter of finite content (files, CD); the end of the content itself
+  (nothing left to play goes straight to standby; another pass starting
+  fades); a new ICY title, different from the previous one; a changed title
+  from the file's tags or from a `metadata` plugin. A track the user skips to
+  on the CD is not the end being waited for: the wait goes on to the next
+  natural change, or the cap. The cap reached while nothing plays any more
+  goes straight to standby.
+
+### Touching the device while it winds down
+
+**During the fade**, an ordinary command **cancels neither the fade nor the
+timer** (the owner's decision): it is applied, the fade runs to its end and
+the device goes to standby. In detail:
+
+- a volume key, the slider, MPD's `setvol` — change the volume **to
+  restore** (persisted, overlay shown as usual), not the level going down:
+  the ramp never climbs back up;
+- Mute — mutes, and the fade goes on;
+- Play/Pause, Stop or Power — **standby at once**, at the volume to restore;
+- a source switch — happens, and the fade goes on over the new source.
+
+Only the timer's own menu stops the wind-down — Cancel, +15 min (counted
+from now) or a new timer — and each sets the volume back.
+
+**While waiting for the end of the track** the volume is untouched, so there
+is nothing to restore. Play/Pause, Stop or Power put the device in standby at
+once. A source switch keeps waiting, on the new source and under the same
+cap; the first title the new source announces names the track already playing
+and is not a boundary. The menu can still extend (from now) or cancel.
+
+A manual entry into standby always ends the timer.
+
+### Alarms card
+
+A card of the config page: one line per alarm, phone-style, in time order —
+the time, the days, what it plays, and an **on/off switch** right on the line.
+A click on a line opens its dialog; "Add an alarm" opens the same dialog on a
+new one (weekdays at 07:00, resume, volume 30). Deleting is done from the
+dialog. Each alarm has:
+
+- a **time**, hour and minute, in the device's local time and written in its
+  12/24-hour form (the [Date and time](#date-and-time) setting). No zone is
+  shown or asked: the device already has what it needs to set its clock, and
+  shows it in standby;
+- its **days**, at least one — a one-shot alarm is out of scope, and the
+  dialog refuses to save with no day ticked. The days are listed **Monday
+  first**, in every language;
+- what it **plays**: "Resume" (what the Power key would do) or a named
+  source (what choosing that source in standby would do — the radio replays
+  its last station). A source the alarm still names after its plugin was
+  uninstalled stays offered, so opening the alarm does not silently
+  retarget it. There is **no preset**, by the owner's decision: a preset is
+  only a number whose meaning the radio alone knows, and it moves when the
+  stations are reordered;
+- a **volume**, applied at once when it rings;
+- an optional **turn off after** N minutes (1 to 600) and its end mode,
+  which arms an ordinary sleep timer when the alarm rings — visible,
+  extendable and cancellable as if started by hand.
+
+The alarms are settings (`settings.alarms` in `state.json`), written through
+the same `PUT /api/settings` as every other card: the switch and the
+dialog's Save send the **whole** settings with the new list in it, the way
+the other cards save — so they also carry another card's unsaved edits. The
+list on screen is what the core accepted: a refused write leaves the line as
+it was. The `PUT` replaces the list (a body without `alarms` empties it) and
+answers `422` with a translated message for an hour outside 0–23, a minute
+outside 0–59, no day, a volume outside 0–100, two alarms sharing an `id`, a
+sleep timer outside 1–600 min, a source alarm without a name, or an alarm
+that does not read at all. One alarm in the wire form:
+
+    {"id":1,"enabled":true,"hour":7,"minute":0,"days":["monday","friday"],
+     "target":{"kind":"source","name":"radio"},"volume":30,
+     "sleep_after":{"minutes":60,"mode":"fade"}}
+
+`target` is `{"kind":"resume"}` for "Resume"; `sleep_after` is absent when
+off. An `alarms` that is not an array is refused the same way. Reading
+`state.json` is tolerant **alarm by alarm**: one that does not read
+(hand-edited, or written by a later version), or that breaks one of the
+rules above — the same rules, not a copy — is dropped alone with a warning,
+rather than taking the all-or-nothing path that would reset every other
+setting; of two alarms sharing an `id`, the later is dropped. The remembered
+timer mode and the alarms' record of their last firing are tolerant in the
+same way: a value this core cannot read is the default (`fade`, no record).
+
+### When an alarm rings
+
+- If the device is **playing** — awake and not paused, **even muted** — the
+  alarm does **nothing**: no volume, no source, no timer. An alarm never
+  interrupts a listening, and one that falls during a sleep timer's fade or
+  wait finds the device playing.
+- Otherwise it first **cancels a running sleep timer** — one set the night
+  before must not put the device back to sleep minutes after it woke, and a
+  fade whose playback ended must not keep ramping under the alarm (its volume
+  is set back first, as Cancel does). Then it **unmutes**, applies its
+  **volume** (persisted, as if set by hand, with no overlay), and plays its
+  target:
+  - **in standby** — "Resume" is the waking half of Power; a source is
+    woken on directly;
+  - **awake, paused or stopped** — "Resume" is a Play (the pause resumed,
+    or the armed track started) — **never Power**, which would put the
+    device to sleep; a source is a Play if it is already the active one,
+    otherwise a switch to it, as a manual selection would do.
+- If after that wake or switch nothing plays — a source whose arrival plays
+  nothing, like the CD with its default "on arrival: nothing" — the source
+  is asked to play as the **Play key** asks it: an alarm is meant to wake to
+  music. A source that already plays on its wake gets no second request.
+- A source that is not wired (plugin absent or refused) falls back to
+  "Resume". A CD alarm with no disc behaves as choosing the CD by hand and
+  pressing Play does: nothing plays, and the display says there is no disc.
+- Last, the alarm's sleep timer, if it has one, is armed.
+
+Each step is best effort: one that fails is logged and the next still runs,
+so an mpv that misses the unmute does not cost the wake.
+
+**Once per minute, never twice.** The core checks the alarms one second past
+each minute boundary, on an absolute deadline recomputed after each check —
+never an interval, which drifts and can skip a whole minute. A check that
+runs late in its minute still rings it; a second check in the same minute
+rings nothing. An alarm rings at most once per **local day-minute**: the
+firing minute is recorded (in `state.json`, before the alarm acts, so a
+restart meanwhile cannot ring it again), and a minute rings only if it is
+later than the recorded one **and** another local minute — the autumn change
+repeats an hour, and an alarm inside it would otherwise ring twice. A
+recorded minute more than one minute **ahead** of now is treated as stale
+(written while the clock was wrong) rather than silencing every alarm until
+that date. Several alarms due in the same minute: the first in the list
+rings, alone. A minute the device slept through (a power cut, a crash, the
+clock jumping forward) is not caught up — with one exception, below. In the
+same way, an alarm set inside the hour the spring change skips (02:30 where
+the clock goes from 02:00 to 03:00) does **not** ring that day: that local
+minute never exists.
+
+`next_alarm` in the player frame — `{"weekday":"monday","hour":7,"minute":0}`
+— is the earliest enabled alarm strictly after the current minute, within the
+coming week; it moves on at each minute check and with each change of the
+list.
+
+### Across an update restart
+
+A restart of the core loses the sleep timer, by the owner's decision —
+**except the restart an update provokes**, so that an automatic update at
+3 a.m. does not leave the device playing all night. It is the restart
+described under [Automatic update policy](#automatic-update-policy) (the
+installer's marker or the rollback's report, still fresh):
+
+- the timer is written to `state.json` (`sleep_timer`: the deadline and the
+  mode) whenever it changes. A deadline still ahead is re-armed for what is
+  left of it; a deadline passed meanwhile sends the device **straight to
+  standby**, without waking first. A timer that was already waiting for the
+  end of a track or fading is written with the moment of writing as its
+  deadline, so it always reads as expired;
+- an alarm whose minute fell **while the device was being updated** rings
+  at once, once, under the usual rules (nothing if the device plays). The
+  minutes looked at run from the update's own instant up to and including the
+  minute the restart ends in, but **never more than 15 minutes back** — a
+  minute counts only if it starts inside that window — so an update stuck
+  for an hour does not ring an alarm an hour late. Several due: the latest
+  rings, alone. The alarm wins over "the device stays as it was".
+
+Every other start — a power cut, a crash, a manual restart outside that
+window — drops the timer and catches nothing up.
+
+### On the console display
+
+The console shows both, each as an addition to an existing line that is left
+out whole, never truncated, when it would pass twenty columns:
+
+- **in standby**, the next alarm follows the clock on line 2, in the
+  device's 12/24-hour form: `07:12  A Mon 07:00`. Without a clock (system
+  time not set yet) the line stays empty: an alarm with no time beside it
+  would be a puzzle;
+- **while a timer runs**, line 1 ends with the minutes left, rounded up:
+  `▶ RADIO  3/12  Z 10m`. While waiting for the end of the track it counts
+  down to the 5-minute cap, and during the fade to the fade's end. An
+  overlay hides it like everything else.
+
+`A` and `Z` are plain letters and the day names are English three-letter
+abbreviations: the console translates nothing (everything else it writes
+reaches it already translated) and its font, Lat15-Fixed16, has no bell nor
+moon. The countdown is computed by the console from the deadline; its
+ten-second heartbeat (see [Date and time](#date-and-time)) now also runs
+while a timer is set, and writes only when the minute changes.
+
 ## Config page
 
 The former status page is now the **config page**, at
@@ -694,7 +949,8 @@ The former status page is now the **config page**, at
 there, so existing bookmarks and links keep working. It opens on
 self-update and plugin management (below), then the audio output and
 language pickers, the rest of the settings cards described here, and the
-recent error log. Every plugin — its connection state, its admin link,
+recent error log. The Alarms card is described with the sleep timer, under
+[Sleep timer and alarms](#alarms-card). Every plugin — its connection state, its admin link,
 and now whether it is declared, installed or neither — lives in the
 plugins table, not in a separate list.
 
@@ -915,6 +1171,10 @@ covers any ordinary case; only a boot that starts more than ten minutes
 after either file was written falls back to reading the Startup setting as
 normal. A device asleep at 3 a.m. that updates itself at 3 a.m. is still
 asleep afterwards, whether the update took or was reverted.
+
+The same restart, and only it, also keeps a running sleep timer and rings
+an alarm the update made the device miss: see [Across an update
+restart](#across-an-update-restart).
 
 **A plugin gesture arms nothing.** The rollback net is for the core, whose
 install and whose crash-loop are the same event; a plugin runs in a process

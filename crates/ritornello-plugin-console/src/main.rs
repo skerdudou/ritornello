@@ -43,24 +43,30 @@ impl DisplayPlugin for ConsolePlugin {
     }
 }
 
-/// Redraws periodically as long as the device is in standby, so that the clock
-/// advances.
+/// Redraws periodically as long as the device is in standby or a sleep timer
+/// runs, so that the clock and the countdown advance.
 ///
 /// Does nothing outside standby: the core pushes then, and at a much higher
 /// cadence. Does nothing before the first frame either — there is nothing to
 /// redraw then, and inventing an empty screen would erase what the tty showed
 /// before the plugin was launched.
+fn needs_heartbeat(state: &PlayerState) -> bool {
+    state.standby || state.sleep_timer.is_some()
+}
+
 async fn tick_clock(display: Arc<Mutex<ConsoleDisplay>>, last: Arc<Mutex<Option<PlayerState>>>) {
     loop {
         tokio::time::sleep(CLOCK_TICK).await;
         let Some(state) = last.lock().await.clone() else { continue };
-        if !state.standby {
+        // The sleep timer's countdown needs the same heartbeat as the clock:
+        // a paused device pushes no frame, and the minute can turn between two.
+        if !needs_heartbeat(&state) {
             continue;
         }
         if let Err(e) = display.lock().await.show(&state) {
             // Logged and not fatal: a momentarily unavailable tty must not take
             // the plugin down, which stays useful as soon as it comes back.
-            tracing::warn!("could not refresh the standby clock: {e}");
+            tracing::warn!("could not refresh the clock or the countdown: {e}");
         }
     }
 }
@@ -99,6 +105,22 @@ mod tests {
             last: Arc::new(Mutex::new(None)),
         };
         assert!(!plugin.wants_covers(), "the console has no use for an image's bytes");
+    }
+
+    #[test]
+    fn the_heartbeat_runs_in_standby_and_while_a_sleep_timer_runs() {
+        use ritornello_proto::{SleepMode, SleepPhase, SleepTimerState};
+        let mut st = PlayerState::default();
+        assert!(!needs_heartbeat(&st), "playing with no timer: the core pushes every second");
+        st.standby = true;
+        assert!(needs_heartbeat(&st), "the clock");
+        st.standby = false;
+        st.sleep_timer = Some(SleepTimerState {
+            ends_at_unix_s: 1,
+            mode: SleepMode::Immediate,
+            phase: SleepPhase::Armed,
+        });
+        assert!(needs_heartbeat(&st), "the countdown, even paused");
     }
 
     #[tokio::test]
