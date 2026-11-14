@@ -2473,6 +2473,11 @@ async fn main() -> Result<()> {
     if let Err(e) = core.startup(startup_over, startup_now).await {
         tracing::warn!("startup wake: {e}");
     }
+    // The alarms an update made the device miss, with the clock read again:
+    // `startup` can wait seconds on a source, across a minute boundary that
+    // `startup_now` predates. `first_check_in` below closes the rest of the
+    // gap, up to the first regular check.
+    let caught_up_to = core.catch_up_after(startup_over, update::now_unix_s()).await;
 
     // Relays the state to every connected display: the same channel that
     // feeds the SPA's SSE route, each plugin composing its own layout from
@@ -2562,7 +2567,8 @@ async fn main() -> Result<()> {
         tokio::time::Instant::now()
             + std::time::Duration::from_secs(core::secs_until_next_check(update::now_unix_s() as i64))
     };
-    let mut alarm_at = alarm_deadline();
+    let mut alarm_at = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(core::first_check_in(caught_up_to, update::now_unix_s() as i64));
 
     loop {
         let retry_sleep = async {

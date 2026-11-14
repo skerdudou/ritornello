@@ -4,10 +4,11 @@
 //! except the restart an update provokes, so that an automatic update at
 //! 3 a.m. does not leave the device playing all night: the timer is written
 //! to `state.json` on every change (`persisted_sleep`), and `restore_sleep`
-//! puts it back after that restart only. At the deadline the device goes to standby exactly as the
-//! Power key puts it there (`enter_standby`); `Fade` first ramps mpv's
-//! volume down to zero; `EndOfTrack` first waits for the playing track to
-//! end (`sleep_on_boundary`), five minutes at most, then fades.
+//! puts it back after that restart only. At the deadline the device goes to
+//! standby exactly as the Power key puts it there (`enter_standby`); `Fade`
+//! first ramps mpv's volume down to zero; `EndOfTrack` first waits for the
+//! playing track to end (`sleep_on_boundary`), five minutes at most, then
+//! fades.
 //!
 //! **The volume is never left low.** The fade steps write to mpv directly
 //! (`Player::set_volume`), never through `Core::set_volume`, which would

@@ -47,7 +47,7 @@ mod publish;
 mod settings;
 mod sleep_timer;
 mod sources;
-pub use alarms::secs_until_next_check;
+pub use alarms::{first_check_in, secs_until_next_check};
 pub use deadlines::next_deadline;
 
 #[cfg(test)]

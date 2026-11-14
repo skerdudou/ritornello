@@ -49,6 +49,19 @@ pub fn secs_until_next_check(now_unix_s: i64) -> u64 {
     (to_boundary + 1) as u64
 }
 
+/// How long `main` waits before its **first** minute check. At once when
+/// the clock has already left the last minute the update catch-up covered
+/// (`catch_up_after`): main's setup between the two can cross a boundary,
+/// and the regular rhythm would then look at the following minute only,
+/// skipping that one for good. Deduplication makes an early check free.
+/// `None` (no catch-up: an ordinary start) keeps the regular rhythm.
+pub fn first_check_in(caught_up_to: Option<i64>, now_unix_s: i64) -> u64 {
+    match caught_up_to {
+        Some(minute) if minute_index(now_unix_s) > minute => 0,
+        _ => secs_until_next_check(now_unix_s),
+    }
+}
+
 /// The local minute `at` names.
 pub fn local_minute(at: &LocalNow) -> LocalMinute {
     LocalMinute { day_key: at.day_key, hour: at.hour as u8, minute: at.minute as u8 }
@@ -171,11 +184,17 @@ impl<P: Player> Core<P> {
     /// twice. Several minutes due: the latest rings, alone — one firing in
     /// all, recorded as that minute's. A clock that went back (`since` ahead
     /// of now) looks at nothing.
-    pub(super) async fn catch_up_alarms(&mut self, since_unix_s: u64, now_unix_s: u64) {
+    ///
+    /// Returns the last minute it covered, for `first_check_in`.
+    pub(super) async fn catch_up_alarms(&mut self, since_unix_s: u64, now_unix_s: u64) -> i64 {
         let now = now_unix_s as i64;
-        let from = (since_unix_s as i64).max(now - ALARM_CATCH_UP);
         let now_minute = minute_index(now);
-        for minute in (minute_index(from)..=now_minute).rev() {
+        // A minute is inside the window only if it *starts* inside it: the
+        // first whole minute at or after `now - ALARM_CATCH_UP` (rounded
+        // up), so an alarm is never rung more than fifteen minutes late.
+        let oldest = -(ALARM_CATCH_UP - now).div_euclid(60);
+        let from = minute_index(since_unix_s as i64).max(oldest);
+        for minute in (from..=now_minute).rev() {
             let Some(at) = crate::update::schedule::local_now(minute * 60) else { continue };
             if !minute_is_new_as_of(minute, now_minute, &at, self.last_alarm_minute, self.last_alarm_local) {
                 continue;
@@ -191,6 +210,21 @@ impl<P: Player> Core<P> {
         }
         self.refresh_next_alarm(now);
         self.publish_state();
+        now_minute
+    }
+
+    /// The alarm catch-up the start `over` calls for: only after the restart
+    /// an update provoked (`catch_up_alarms`), nothing after any other —
+    /// a power cut or a crash catches nothing up. `now_unix_s` must be read
+    /// after `startup` has returned. The minute covered, for
+    /// `first_check_in`.
+    pub async fn catch_up_after(&mut self, over: crate::update::StartupOverride, now_unix_s: u64) -> Option<i64> {
+        match over {
+            crate::update::StartupOverride::Previous { since_unix_s } => {
+                Some(self.catch_up_alarms(since_unix_s, now_unix_s).await)
+            }
+            crate::update::StartupOverride::AsConfigured => None,
+        }
     }
 
     /// Recomputes the next alarm as displays see it. `None` when the clock
@@ -691,7 +725,9 @@ mod tests {
     async fn restart_after_update(persisted: PersistedState, since: i64, now: i64) -> Rig {
         let rig = setup_persisted(persisted);
         let (mut core, pc, sc, rx, d) = rig;
-        core.startup(StartupOverride::Previous { since_unix_s: since as u64 }, now as u64).await.unwrap();
+        let over = StartupOverride::Previous { since_unix_s: since as u64 };
+        core.startup(over, now as u64).await.unwrap();
+        core.catch_up_after(over, now as u64).await;
         (core, pc, sc, rx, d)
     }
 
@@ -740,9 +776,41 @@ mod tests {
         assert!(core.standby, "an alarm sixteen minutes old rang");
         assert!(sc.lock().unwrap().is_empty(), "{:?}", sc.lock().unwrap());
         assert_eq!(on_disk(&d).last_alarm_minute, None);
+        // Fifteen minutes and 59 seconds: its minute started more than
+        // fifteen minutes ago, and flooring `now - 15 min` would let it in.
+        let (core, _pc, _sc, _rx, _d) = restart_after_update(persisted.clone(), T - 60, T + 15 * 60 + 59).await;
+        assert!(core.standby, "an alarm 15:59 old rang");
         // Fifteen minutes on the dot is still inside the window.
         let (core, _pc, _sc, _rx, _d) = restart_after_update(persisted, T - 60, T + 15 * 60).await;
         assert!(!core.standby, "an alarm fifteen minutes old did not ring");
+    }
+
+    /// The update restart starts at 06:59:58 and waking the source takes
+    /// until 07:00:03: the 07:00 alarm must ring. Caught up with the clock
+    /// read before the wake, it would not — that minute is past `now`, and
+    /// the first regular check looks at 07:01.
+    #[tokio::test]
+    async fn alarm_in_the_minute_the_restart_ends_in_fires() {
+        let persisted = asleep_with(vec![ringing_at(T, AlarmTarget::Resume, 35)]);
+        let (core, _pc, _sc, _rx, _d) = restart_after_update(persisted.clone(), T - 10, T - 2).await;
+        assert!(core.standby, "the fixture: a catch-up at the start-up clock misses it");
+        let over = StartupOverride::Previous { since_unix_s: (T - 10) as u64 };
+        let (mut core, _pc, sc, _rx, _d) = setup_persisted(persisted);
+        core.startup(over, (T - 2) as u64).await.unwrap();
+        assert_eq!(core.catch_up_after(over, (T + 3) as u64).await, Some(minute_index(T)));
+        assert!(!core.standby, "the minute the restart ended in was never checked");
+        assert!(has(&sc, "radio:Wake"), "{:?}", sc.lock().unwrap());
+    }
+
+    /// The other half of that gap: between the catch-up and the first
+    /// regular check, `main` may cross another boundary. Then the first
+    /// check runs at once, instead of one second past the next boundary.
+    #[test]
+    fn first_check_runs_at_once_once_the_caught_up_minute_is_over() {
+        let covered = minute_index(T);
+        assert_eq!(first_check_in(Some(covered), T + 61), 0, "the minute after the catch-up");
+        assert_eq!(first_check_in(Some(covered), T + 30), secs_until_next_check(T + 30), "still inside it");
+        assert_eq!(first_check_in(None, T + 61), secs_until_next_check(T + 61), "an ordinary start");
     }
 
     #[tokio::test]
@@ -786,6 +854,7 @@ mod tests {
         let persisted = asleep_with(vec![ringing_at(T, AlarmTarget::Resume, 35)]);
         let (mut core, _pc, sc, _rx, d) = setup_persisted(persisted);
         core.startup(StartupOverride::AsConfigured, (T + 120) as u64).await.unwrap();
+        assert_eq!(core.catch_up_after(StartupOverride::AsConfigured, (T + 120) as u64).await, None);
         assert!(core.standby, "a plain restart caught up an alarm");
         assert!(sc.lock().unwrap().is_empty(), "{:?}", sc.lock().unwrap());
         assert_eq!(on_disk(&d).last_alarm_minute, None);

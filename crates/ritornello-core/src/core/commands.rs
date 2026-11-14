@@ -129,19 +129,19 @@ impl<P: Player> Core<P> {
     /// directory this file has no business knowing about — `main` reads it
     /// once and hands the answer over.
     ///
-    /// That restart also keeps the sleep timer and catches up the alarms it
-    /// made the device miss, in this order: the device as it was, then the
-    /// timer (still running: armed for what is left; expired meanwhile, or
-    /// already winding down: standby at once, without waking first — the
-    /// spec's "direct standby"), then the alarms (`catch_up_alarms`), which
-    /// may wake it again: an alarm must never be missed because of an
-    /// update. Every other start drops the timer and catches nothing up.
+    /// That restart also keeps the sleep timer, after the device is put back
+    /// as it was: still running, armed for what is left; expired meanwhile,
+    /// or already winding down, standby at once without waking first — the
+    /// spec's "direct standby". Every other start drops it. The alarms it
+    /// made the device miss come next, from `main`, with a clock read once
+    /// this has returned (`catch_up_after`): waking the source here can take
+    /// seconds, and they may hold a minute boundary.
     pub async fn startup(&mut self, over: crate::update::StartupOverride, now_unix_s: u64) -> Result<()> {
         let sleep = self.persisted_sleep.take();
-        let (in_standby, sleep, catch_up_since) = match over {
-            crate::update::StartupOverride::Previous { since_unix_s } => {
+        let (in_standby, sleep) = match over {
+            crate::update::StartupOverride::Previous { .. } => {
                 let expired = sleep.is_some_and(|t| t.ends_at_unix_s <= now_unix_s);
-                (self.persisted_standby || expired, sleep.filter(|_| !expired), Some(since_unix_s))
+                (self.persisted_standby || expired, sleep.filter(|_| !expired))
             }
             crate::update::StartupOverride::AsConfigured => {
                 let in_standby = match self.settings.startup_power {
@@ -149,7 +149,7 @@ impl<P: Player> Core<P> {
                     StartupPower::Standby => true,
                     StartupPower::Previous => self.persisted_standby,
                 };
-                (in_standby, None, None)
+                (in_standby, None)
             }
         };
         // Both branches persist, which is also what drops a timer left on
@@ -164,9 +164,6 @@ impl<P: Player> Core<P> {
         };
         if let Some(sleep) = sleep {
             self.restore_sleep(sleep, now_unix_s);
-        }
-        if let Some(since) = catch_up_since {
-            self.catch_up_alarms(since, now_unix_s).await;
         }
         outcome
     }
