@@ -710,7 +710,9 @@ timer counts down it reads the time left, counted down **in the browser**,
 once a second, from the deadline the core pushed
 (`sleep_timer.ends_at_unix_s` in the `GET /api/player` frame): the core
 publishes the deadline when it changes and never a frame per second for the
-timer alone. Past the deadline the key reads what the device is doing instead
+timer alone. The countdown therefore reads the browser's own clock against
+the device's deadline: a browser whose clock is a minute off shows a minute
+off, while the device still goes to standby on time. Past the deadline the key reads what the device is doing instead
 — "After this track" while it waits for the end of the track, "Fading out"
 during the fade.
 
@@ -718,7 +720,8 @@ A click opens the menu, a dialog of the kit (which has no dropdown menu): the
 end mode first, then the durations — **15, 30, 45, 60 and 90 min** — each of
 which starts a timer at once, replacing a running one (including one an alarm
 armed). While a timer runs, **+15 min** and **Cancel** come first. The mode
-is **remembered**: the menu opens on the mode of the last timer started, which
+is **remembered**: the menu opens on the mode of the last timer started
+**from the menu** (an alarm's own timer does not change it), which
 the core keeps in `state.json` (`settings.sleep_timer_mode`, default `fade`,
 served by `GET /api/settings`). Starting a timer is what records it; a `PUT
 /api/settings` never overwrites it, so saving another card cannot reset it.
@@ -731,8 +734,11 @@ does not let through. The commands themselves, for a script:
     {"cmd":"ExtendSleepTimer","arg":15}
     {"cmd":"CancelSleepTimer"}
 
-`mode` is `immediate`, `fade` or `end_of_track`. `ExtendSleepTimer` with no
-timer running does nothing.
+`mode` is `immediate`, `fade` or `end_of_track`. `minutes` runs from 1 to
+600, the same bounds as an alarm's timer: a `SetSleepTimer` outside them is
+ignored (no timer, mode not remembered). `ExtendSleepTimer` with no timer
+running, or with 0, does nothing, and never leaves more than 600 minutes to
+run: past that it extends up to the ceiling only.
 
 ### What happens at the deadline
 
@@ -828,10 +834,14 @@ that does not read at all. One alarm in the wire form:
      "sleep_after":{"minutes":60,"mode":"fade"}}
 
 `target` is `{"kind":"resume"}` for "Resume"; `sleep_after` is absent when
-off. Reading `state.json` is tolerant **alarm by alarm**: one that does not
-read (hand-edited, or written by a later version) is dropped alone with a
-warning, rather than taking the all-or-nothing path that would reset every
-other setting.
+off. An `alarms` that is not an array is refused the same way. Reading
+`state.json` is tolerant **alarm by alarm**: one that does not read
+(hand-edited, or written by a later version), or that breaks one of the
+rules above — the same rules, not a copy — is dropped alone with a warning,
+rather than taking the all-or-nothing path that would reset every other
+setting; of two alarms sharing an `id`, the later is dropped. The remembered
+timer mode and the alarms' record of their last firing are tolerant in the
+same way: a value this core cannot read is the default (`fade`, no record).
 
 ### When an alarm rings
 
@@ -839,16 +849,25 @@ other setting.
   alarm does **nothing**: no volume, no source, no timer. An alarm never
   interrupts a listening, and one that falls during a sleep timer's fade or
   wait finds the device playing.
-- Otherwise it **unmutes**, applies its **volume** (persisted, as if set by
-  hand, with no overlay), then plays its target:
+- Otherwise it first **cancels a running sleep timer** — one set the night
+  before must not put the device back to sleep minutes after it woke, and a
+  fade whose playback ended must not keep ramping under the alarm (its volume
+  is set back first, as Cancel does). Then it **unmutes**, applies its
+  **volume** (persisted, as if set by hand, with no overlay), and plays its
+  target:
   - **in standby** — "Resume" is the waking half of Power; a source is
     woken on directly;
   - **awake, paused or stopped** — "Resume" is a Play (the pause resumed,
     or the armed track started) — **never Power**, which would put the
     device to sleep; a source is a Play if it is already the active one,
     otherwise a switch to it, as a manual selection would do.
+- If after that wake or switch nothing plays — a source whose arrival plays
+  nothing, like the CD with its default "on arrival: nothing" — the source
+  is asked to play as the **Play key** asks it: an alarm is meant to wake to
+  music. A source that already plays on its wake gets no second request.
 - A source that is not wired (plugin absent or refused) falls back to
-  "Resume". A CD alarm with no disc behaves as choosing the CD by hand does.
+  "Resume". A CD alarm with no disc behaves as choosing the CD by hand and
+  pressing Play does: nothing plays, and the display says there is no disc.
 - Last, the alarm's sleep timer, if it has one, is armed.
 
 Each step is best effort: one that fails is logged and the next still runs,
@@ -867,7 +886,10 @@ recorded minute more than one minute **ahead** of now is treated as stale
 (written while the clock was wrong) rather than silencing every alarm until
 that date. Several alarms due in the same minute: the first in the list
 rings, alone. A minute the device slept through (a power cut, a crash, the
-clock jumping forward) is not caught up — with one exception, below.
+clock jumping forward) is not caught up — with one exception, below. In the
+same way, an alarm set inside the hour the spring change skips (02:30 where
+the clock goes from 02:00 to 03:00) does **not** ring that day: that local
+minute never exists.
 
 `next_alarm` in the player frame — `{"weekday":"monday","hour":7,"minute":0}`
 — is the earliest enabled alarm strictly after the current minute, within the

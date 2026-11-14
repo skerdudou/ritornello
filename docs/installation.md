@@ -1710,7 +1710,14 @@ by tests on composed lines; nothing below has been observed on the device:
   saved, and an alarm due meanwhile rings late — or, its minute passed by
   the time the clock jumps forward, not at all. A firing minute recorded
   while the clock was far ahead is treated as stale rather than blocking,
-  but that path too is tested, not observed.
+  but that path too is tested, not observed. A sleep timer armed before the
+  sync keeps a wrong wall-clock deadline (`ends_at_unix_s`): the countdown
+  the displays show and the deadline written to `state.json` are off by the
+  jump, while the timer itself, on the monotonic clock, still ends on time;
+- **a rollback to a core without alarms.** That core does not know
+  `settings.alarms` and rewrites `state.json` without them on its first
+  write: the alarms are lost, and coming back to a core that has them does
+  not bring them back. Read from serde's behaviour, not tried.
 
 **The rollback only recognises "does not start."** It watches the service
 failing to come up — systemd's start-limit plus `OnFailure=` on the unit —

@@ -920,10 +920,11 @@ impl Weekday {
     /// Maps `tm_wday` (0 for Sunday, as `localtime_r` gives it) to a
     /// `Weekday`.
     ///
-    /// A pure function over `0..=6`, deliberately pulled out of `local_now`:
-    /// it is the one piece of logic in this file's only untested function
-    /// that is not time-zone-dependent, and an off-by-one here would mean a
-    /// weekly cadence silently firing on the wrong day, every week, forever.
+    /// A pure function over `0..=6`, kept apart from the core's clock reading
+    /// (`update::schedule::local_now`, where it is tested) because it is the
+    /// one piece of that logic that is not time-zone-dependent, and an
+    /// off-by-one here would mean a weekly cadence or an alarm silently
+    /// firing on the wrong day, every week, forever.
     ///
     /// `None` outside `0..=6` — `localtime_r` never produces such a value,
     /// but the signature admits one, and answering `None` rather than
