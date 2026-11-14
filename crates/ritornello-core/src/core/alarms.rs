@@ -4,7 +4,7 @@
 //! minute check `main` wakes for, and what an alarm does to the device.
 
 use super::*;
-use crate::state::{Alarm, AlarmTarget};
+use crate::state::{Alarm, AlarmTarget, LocalMinute};
 use crate::update::schedule::{LocalNow, Weekday};
 use ritornello_proto::NextAlarm;
 
@@ -42,6 +42,29 @@ pub fn secs_until_next_check(now_unix_s: i64) -> u64 {
     // In 1..=60: from :00 exactly, the next boundary is a whole minute away.
     let to_boundary = 60 - now_unix_s.rem_euclid(60);
     (to_boundary + 1) as u64
+}
+
+/// The local minute `at` names.
+pub fn local_minute(at: &LocalNow) -> LocalMinute {
+    LocalMinute { day_key: at.day_key, hour: at.hour as u8, minute: at.minute as u8 }
+}
+
+/// Whether the minute being checked may ring, given the last firing. Two
+/// rules, both required:
+///
+/// - **UTC**: a later minute than the last firing's. Equality blocks (a
+///   second check in the same minute, or a clock stepped back a few seconds).
+///   A last firing more than a minute *ahead* of now is stale rather than
+///   blocking: it was recorded while the clock was wrong (a bad RTC, a manual
+///   `date`, a wrong NTP answer), and honouring it would silence every alarm
+///   until that date.
+/// - **Local**: another local minute than the last firing's. The autumn
+///   change repeats an hour, so one local minute spans two UTC minutes an
+///   hour apart: without this, an alarm in that hour would ring twice.
+pub fn minute_is_new(minute: i64, at: &LocalNow, last_minute: Option<i64>, last_local: Option<LocalMinute>) -> bool {
+    let utc_new = last_minute.is_none_or(|last| minute > last || last > minute + 1);
+    let local_new = last_local.is_none_or(|last| last != local_minute(at));
+    utc_new && local_new
 }
 
 /// The alarms that ring at `at`'s minute: enabled, that weekday among their
@@ -101,13 +124,14 @@ impl<P: Player> Core<P> {
         // The clock read once: the alarm to fire and the next one to publish
         // come from the same instant.
         let local = crate::update::schedule::local_now(now_unix_s);
-        if self.last_alarm_minute.is_none_or(|last| minute > last)
-            && let Some(at) = &local
+        if let Some(at) = &local
+            && minute_is_new(minute, at, self.last_alarm_minute, self.last_alarm_local)
             && let Some(alarm) = due_at(&self.settings.alarms, at).first().map(|a| (*a).clone())
         {
             // Written before the alarm acts: firing can wait up to 5 s on a
             // plugin, and a restart meanwhile must not ring it again.
             self.last_alarm_minute = Some(minute);
+            self.last_alarm_local = Some(local_minute(at));
             self.persist();
             self.fire_alarm(&alarm).await;
         }
@@ -141,9 +165,10 @@ impl<P: Player> Core<P> {
             return;
         }
         tracing::info!("alarm {} rings", alarm.id);
-        self.muted = false;
-        if let Err(e) = self.player.set_mute(false).await {
-            tracing::warn!("alarm unmute: {e}");
+        // Believed unmuted once mpv agrees, never before.
+        match self.player.set_mute(false).await {
+            Ok(()) => self.muted = false,
+            Err(e) => tracing::warn!("alarm unmute: {e}"),
         }
         self.volume = alarm.volume.min(100);
         if let Err(e) = self.player.set_volume(self.volume).await {
@@ -271,6 +296,36 @@ mod tests {
     }
 
     #[test]
+    fn autumn_repeated_hour_rings_its_local_minute_once() {
+        // 02:30 on the autumn Sunday, rung at UTC minute `u`. An hour later
+        // the clock reads 02:30 again, same local day: a new UTC minute, the
+        // same local one.
+        let at = LocalNow { hour: 2, minute: 30, weekday: Weekday::Sunday, day_key: 125_302 };
+        let u = 28_333_333;
+        assert!(!minute_is_new(u + 60, &at, Some(u), Some(local_minute(&at))));
+        // The same time the next week is another local day: it rings.
+        let next_week = LocalNow { day_key: 125_309, ..at };
+        assert!(minute_is_new(u + 7 * 24 * 60, &next_week, Some(u), Some(local_minute(&at))));
+        // No local firing recorded (a state file from before the field): the
+        // UTC rule alone decides.
+        assert!(minute_is_new(u + 60, &at, Some(u), None));
+    }
+
+    #[test]
+    fn utc_rule_blocks_the_same_minute_and_ignores_a_stale_future_one() {
+        let at = at(7, 0, Weekday::Monday);
+        let m = 28_333_333;
+        assert!(minute_is_new(m, &at, None, None));
+        assert!(!minute_is_new(m, &at, Some(m), None), "the same minute twice");
+        assert!(minute_is_new(m, &at, Some(m - 1), None));
+        // Clock stepped back a few seconds across a boundary: still blocked.
+        assert!(!minute_is_new(m, &at, Some(m + 1), None));
+        // Recorded while the clock was far ahead: stale, not a ban.
+        assert!(minute_is_new(m, &at, Some(m + 2), None));
+        assert!(minute_is_new(m, &at, Some(m + 10_000), None));
+    }
+
+    #[test]
     fn next_check_is_one_second_past_the_next_minute_boundary() {
         assert_eq!(secs_until_next_check(T), 61);
         assert_eq!(secs_until_next_check(T + 1), 60);
@@ -357,6 +412,8 @@ mod tests {
         let disk = on_disk(&d);
         assert_eq!((disk.volume, disk.standby), (35, false));
         assert_eq!(disk.last_alarm_minute, Some(minute_index(T)));
+        let at_t = crate::update::schedule::local_now(T).unwrap();
+        assert_eq!(disk.last_alarm_local, Some(local_minute(&at_t)));
         let state = rx.borrow().clone();
         assert!(!state.standby);
         assert_eq!(state.volume, 35);
@@ -488,6 +545,35 @@ mod tests {
         clear(&sc);
         core.check_alarms(T + 50).await;
         assert!(core.standby, "a restart rang the same minute again");
+    }
+
+    /// A device in standby whose state file says an alarm last fired at
+    /// UTC minute `last`.
+    async fn in_standby_last_fired(last: i64) -> Rig {
+        let persisted = PersistedState { last_alarm_minute: Some(last), ..Default::default() };
+        let (mut core, pc, sc, rx, d) = setup_persisted(persisted);
+        core.start_in_standby().await.unwrap();
+        clear(&sc);
+        (core, pc, sc, rx, d)
+    }
+
+    #[tokio::test]
+    async fn alarm_fires_after_a_last_firing_recorded_in_the_future() {
+        let (mut core, _pc, sc, _rx, d) = in_standby_last_fired(minute_index(T) + 10_000).await;
+        with_alarms(&mut core, vec![ringing_at(T, AlarmTarget::Resume, 35)]);
+        core.check_alarms(T).await;
+        assert!(!core.standby, "a minute recorded while the clock was ahead silenced the alarm");
+        assert!(has(&sc, "radio:Wake"));
+        assert_eq!(on_disk(&d).last_alarm_minute, Some(minute_index(T)));
+    }
+
+    #[tokio::test]
+    async fn alarm_does_not_fire_again_in_a_minute_already_recorded() {
+        let (mut core, _pc, sc, _rx, _d) = in_standby_last_fired(minute_index(T)).await;
+        with_alarms(&mut core, vec![ringing_at(T, AlarmTarget::Resume, 35)]);
+        core.check_alarms(T + 10).await;
+        assert!(core.standby);
+        assert!(sc.lock().unwrap().is_empty(), "{:?}", sc.lock().unwrap());
     }
 
     #[tokio::test]

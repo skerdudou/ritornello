@@ -527,6 +527,9 @@ pub struct Core<P: Player> {
     /// an alarm rings at most once per minute, however many times its minute
     /// is checked. See `check_alarms`.
     last_alarm_minute: Option<i64>,
+    /// The same firing as the local clock named it, persisted. See
+    /// `alarms::minute_is_new`.
+    last_alarm_local: Option<crate::state::LocalMinute>,
     /// The next alarm to ring, as displays see it. Computed from the clock
     /// at each minute check and on every settings change, not at each
     /// publication: reading the local time costs a `tzset`, and the state is
@@ -686,6 +689,7 @@ impl<P: Player> Core<P> {
             sleep: None,
             track_ref: None,
             last_alarm_minute: persisted.last_alarm_minute,
+            last_alarm_local: persisted.last_alarm_local,
             next_alarm: None,
         };
         // The sources wired at startup are already known: without this

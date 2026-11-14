@@ -287,6 +287,15 @@ pub enum AlarmTarget {
     Source { name: String },
 }
 
+/// A local minute: the local day (`schedule::day_key`), hour and minute.
+/// Two different UTC minutes share one when the clock goes back an hour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalMinute {
+    pub day_key: i64,
+    pub hour: u8,
+    pub minute: u8,
+}
+
 /// The sleep timer an alarm arms when it fires.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AlarmSleep {
@@ -450,6 +459,10 @@ pub struct PersistedState {
     /// keeps an alarm from ringing twice in one minute, across a restart too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_alarm_minute: Option<i64>,
+    /// The same firing, as the local clock named it: what keeps an alarm in
+    /// the hour repeated by the autumn change from ringing twice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_alarm_local: Option<LocalMinute>,
 }
 
 /// The operator's choice of `pack` (a pack id) for `module` in `language`.
@@ -533,6 +546,7 @@ impl Default for PersistedState {
             update_sources: Vec::new(),
             pack_preferences: Vec::new(),
             last_alarm_minute: None,
+            last_alarm_local: None,
         }
     }
 }
@@ -726,6 +740,7 @@ mod tests {
             update_sources: Vec::new(),
             pack_preferences: Vec::new(),
             last_alarm_minute: Some(28_333_333),
+            last_alarm_local: Some(LocalMinute { day_key: 123_317, hour: 7, minute: 30 }),
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
@@ -760,6 +775,7 @@ mod tests {
             update_sources: Vec::new(),
             pack_preferences: Vec::new(),
             last_alarm_minute: None,
+            last_alarm_local: None,
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
@@ -787,6 +803,7 @@ mod tests {
             update_sources: Vec::new(),
             pack_preferences: Vec::new(),
             last_alarm_minute: None,
+            last_alarm_local: None,
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);

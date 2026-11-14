@@ -87,7 +87,7 @@ impl<P: Player> Core<P> {
 
     /// New settings from `PUT /api/settings` (via the `select!` loop of main).
     /// No bounds check here: the HTTP layer validates, and tests rely on tiny
-    /// timings.
+    /// timings. Publishes the state, which carries the next alarm.
     pub fn set_settings(&mut self, s: crate::state::Settings) {
         // Pushed into the cover cache, which is the only other holder of
         // these settings. Here and not in an arm of the `select!`:
