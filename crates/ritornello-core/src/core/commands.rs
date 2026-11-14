@@ -104,6 +104,10 @@ impl<P: Player> Core<P> {
         self.settings = s;
         self.settings.sleep_timer_mode = sleep_timer_mode;
         self.persist();
+        // An alarm added, moved or switched off changes the next one at once,
+        // not at the next minute check.
+        self.refresh_next_alarm(crate::update::now_unix_s() as i64);
+        self.publish_state();
     }
 
     /// Startup: what the process does with the active source when it
@@ -165,7 +169,7 @@ impl<P: Player> Core<P> {
     /// already applies to a disc that wakes the device, since waking the old
     /// source would start it for an instant only to cut it off. `None` (no
     /// source at all) leaves the device asleep: there is nothing to wake on.
-    async fn wake_on(&mut self, target: Option<String>) -> Result<()> {
+    pub(super) async fn wake_on(&mut self, target: Option<String>) -> Result<()> {
         let Some(name) = target else { return Ok(()) };
         // The flag first, then the wake: see `leave_standby`.
         self.leave_standby();
@@ -265,6 +269,60 @@ impl<P: Player> Core<P> {
         Ok(())
     }
 
+    /// Pauses what plays, or resumes what is paused.
+    async fn toggle_pause(&mut self) -> Result<()> {
+        // Flip the belief **after** mpv has accepted, never
+        // before. The `?` propagates a `toggle_pause` failure and
+        // leaves `paused` intact: that is the very value
+        // `PlayerState.playback` publishes, and the one the MPD
+        // plugin compares its `pause 0`/`pause 1` against — a core
+        // that believes itself paused in front of an mpv that
+        // plays answers "paused" to a client whose music goes on,
+        // and the following `pause 0` is then judged a no-op and
+        // ignored.
+        self.player.toggle_pause().await?;
+        self.paused = !self.paused;
+        Ok(())
+    }
+
+    /// Play, and never pause: resumes a pause, does nothing to what already
+    /// plays, and asks the active source to play when nothing is loaded. The
+    /// Play half of `Command::PlayPause`, shared with an alarm, which must
+    /// never pause the device nor go through `Command::Power`.
+    pub(super) async fn play(&mut self) -> Result<()> {
+        if self.playback {
+            if self.paused {
+                self.toggle_pause().await?;
+            }
+            return Ok(());
+        }
+        // Nothing is loaded: `stop` **clears mpv's playlist**, so
+        // "toggle pause" has nothing left to resume. The Play key
+        // therefore did nothing at all after a Stop, on every
+        // source — measured on the radio as well as on files. We
+        // ask the active source to play, which is exactly what
+        // the key promises.
+        //
+        // **`Play` and not `Activate`**, and the difference is
+        // one the core is the only one able to make: "the user
+        // pressed Play" and "this source has just become the
+        // active one" are two intentions that used to share a
+        // signal. A source may answer the second by playing
+        // nothing — the cd, whose arrival is configurable, does
+        // so by default — and the key went inert with it. The
+        // SDK's default keeps `Play` behaving as `Activate`, so
+        // no other source changes.
+        //
+        // `playback` and not `expecting_stream`: the first says
+        // "something plays, of whatever nature", the second only
+        // holds for restartable streams. A pause touches neither —
+        // so resuming stays a simple toggle, without reloading.
+        if let Some(action) = self.active_request(SourceReq::Play).await? {
+            self.apply(action).await?;
+        }
+        Ok(())
+    }
+
     pub(super) async fn apply_command(&mut self, cmd: Command) -> Result<()> {
         // Any command other than Plus10/Select abandons a pending tens
         // sequence: pressing volume mid-sequence is a change of mind, not a
@@ -357,42 +415,9 @@ impl<P: Player> Core<P> {
             }
             Command::PlayPause => {
                 if self.playback {
-                    // Flip the belief **after** mpv has accepted, never
-                    // before. The `?` propagates a `toggle_pause` failure and
-                    // leaves `paused` intact: that is the very value
-                    // `PlayerState.playback` publishes, and the one the MPD
-                    // plugin compares its `pause 0`/`pause 1` against — a core
-                    // that believes itself paused in front of an mpv that
-                    // plays answers "paused" to a client whose music goes on,
-                    // and the following `pause 0` is then judged a no-op and
-                    // ignored.
-                    self.player.toggle_pause().await?;
-                    self.paused = !self.paused;
+                    self.toggle_pause().await?;
                 } else {
-                    // Nothing is loaded: `stop` **clears mpv's playlist**, so
-                    // "toggle pause" has nothing left to resume. The Play key
-                    // therefore did nothing at all after a Stop, on every
-                    // source — measured on the radio as well as on files. We
-                    // ask the active source to play, which is exactly what
-                    // the key promises.
-                    //
-                    // **`Play` and not `Activate`**, and the difference is
-                    // one the core is the only one able to make: "the user
-                    // pressed Play" and "this source has just become the
-                    // active one" are two intentions that used to share a
-                    // signal. A source may answer the second by playing
-                    // nothing — the cd, whose arrival is configurable, does
-                    // so by default — and the key went inert with it. The
-                    // SDK's default keeps `Play` behaving as `Activate`, so
-                    // no other source changes.
-                    //
-                    // `playback` and not `expecting_stream`: the first says
-                    // "something plays, of whatever nature", the second only
-                    // holds for restartable streams. A pause touches neither —
-                    // so resuming stays a simple toggle, without reloading.
-                    if let Some(action) = self.active_request(SourceReq::Play).await? {
-                        self.apply(action).await?;
-                    }
+                    self.play().await?;
                 }
             }
             Command::Stop => {

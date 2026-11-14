@@ -2552,6 +2552,17 @@ async fn main() -> Result<()> {
     // of at 09:01.
     let mut update_ticker = tokio::time::interval(std::time::Duration::from_secs(60));
 
+    // The alarm clocks' minute check: one second past each minute boundary,
+    // an absolute deadline recomputed after every check (see
+    // `core::secs_until_next_check` for why not an `interval`). Kept outside
+    // the loop, like `next_tick`: the futures below are rebuilt on every turn,
+    // and only an absolute deadline survives that.
+    let alarm_deadline = || {
+        tokio::time::Instant::now()
+            + std::time::Duration::from_secs(core::secs_until_next_check(update::now_unix_s() as i64))
+    };
+    let mut alarm_at = alarm_deadline();
+
     loop {
         let retry_sleep = async {
             match retry_at {
@@ -3147,6 +3158,10 @@ async fn main() -> Result<()> {
             }
             _ = sleep_timer_sleep => {
                 core.on_sleep_deadline().await;
+            }
+            _ = tokio::time::sleep_until(alarm_at) => {
+                core.check_alarms(update::now_unix_s() as i64).await;
+                alarm_at = alarm_deadline();
             }
             _ = position_sleep => {
                 // Rearm first, from now: the cadence stays at one second no

@@ -47,6 +47,7 @@ mod publish;
 mod settings;
 mod sleep_timer;
 mod sources;
+pub use alarms::secs_until_next_check;
 pub use deadlines::next_deadline;
 
 #[cfg(test)]
@@ -522,6 +523,15 @@ pub struct Core<P: Player> {
     /// until the content just played has said where it is. See
     /// `sleep_on_track_changed`.
     track_ref: Option<i64>,
+    /// The last minute an alarm fired in (`alarms::minute_index`), persisted:
+    /// an alarm rings at most once per minute, however many times its minute
+    /// is checked. See `check_alarms`.
+    last_alarm_minute: Option<i64>,
+    /// The next alarm to ring, as displays see it. Computed from the clock
+    /// at each minute check and on every settings change, not at each
+    /// publication: reading the local time costs a `tzset`, and the state is
+    /// published several times a second during playback.
+    next_alarm: Option<ritornello_proto::NextAlarm>,
 }
 
 /// What the detached read of an armed file (`Core::arm`) found: its tags
@@ -599,7 +609,7 @@ impl<P: Player> Core<P> {
                 None
             }
         };
-        let core = Self {
+        let mut core = Self {
             player,
             sources,
             source_order,
@@ -675,6 +685,8 @@ impl<P: Player> Core<P> {
             lyrics_archive_task: None,
             sleep: None,
             track_ref: None,
+            last_alarm_minute: persisted.last_alarm_minute,
+            next_alarm: None,
         };
         // The sources wired at startup are already known: without this
         // publication, the channel would keep its blank
@@ -688,6 +700,9 @@ impl<P: Player> Core<P> {
         // from the first visit to the config page, and would push full-size
         // images until then. Startup must obey the file.
         core.covers.set_cover_settings(crate::cover::CoverSettings::from(&core.settings));
+        // The first frame must already name the next alarm, not wait for the
+        // first minute check.
+        core.refresh_next_alarm(crate::update::now_unix_s() as i64);
         core
     }
 

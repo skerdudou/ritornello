@@ -251,8 +251,8 @@ impl<P: Player> Core<P> {
                 twelve_hour: !self.settings.clock_24h,
             },
             sleep_timer: self.sleep_timer_state(),
-            // Filled in by the alarm tasks that follow.
-            next_alarm: None,
+            // Kept by `refresh_next_alarm`, not computed here: see the field.
+            next_alarm: self.next_alarm,
             track: {
                 let mut m = self.metadata.state();
                 // Precedence: the duration measured by mpv wins over the one

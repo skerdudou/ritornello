@@ -200,6 +200,7 @@ impl<P: Player> Core<P> {
             update_last_run_day: self.update_last_run_day,
             update_sources: self.update_sources.clone(),
             pack_preferences: self.pack_preferences.clone(),
+            last_alarm_minute: self.last_alarm_minute,
         };
         if let Err(e) = state::save(&self.state_path, &st) {
             tracing::warn!("persistence failed: {e}");
@@ -235,6 +236,7 @@ mod tests {
             update_last_run_day: None,
             update_sources: Vec::new(),
             pack_preferences: Vec::new(),
+            last_alarm_minute: None,
         };
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));

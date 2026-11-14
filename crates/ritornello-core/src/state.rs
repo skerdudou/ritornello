@@ -446,6 +446,10 @@ pub struct PersistedState {
     /// by element: see `lenient_preferences`.
     #[serde(default, deserialize_with = "lenient_preferences", skip_serializing_if = "Vec::is_empty")]
     pub pack_preferences: Vec<PackPreference>,
+    /// The last minute an alarm fired in (`core::alarms::minute_index`): what
+    /// keeps an alarm from ringing twice in one minute, across a restart too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_alarm_minute: Option<i64>,
 }
 
 /// The operator's choice of `pack` (a pack id) for `module` in `language`.
@@ -528,6 +532,7 @@ impl Default for PersistedState {
             update_last_run_day: None,
             update_sources: Vec::new(),
             pack_preferences: Vec::new(),
+            last_alarm_minute: None,
         }
     }
 }
@@ -720,6 +725,7 @@ mod tests {
             update_last_run_day: None,
             update_sources: Vec::new(),
             pack_preferences: Vec::new(),
+            last_alarm_minute: Some(28_333_333),
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
@@ -753,6 +759,7 @@ mod tests {
             update_last_run_day: None,
             update_sources: Vec::new(),
             pack_preferences: Vec::new(),
+            last_alarm_minute: None,
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
@@ -779,6 +786,7 @@ mod tests {
             update_last_run_day: None,
             update_sources: Vec::new(),
             pack_preferences: Vec::new(),
+            last_alarm_minute: None,
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
