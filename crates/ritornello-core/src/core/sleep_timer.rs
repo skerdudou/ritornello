@@ -131,7 +131,15 @@ impl<P: Player> Core<P> {
                     SleepMode::Fade | SleepMode::EndOfTrack => self.start_fade(timer.mode),
                 }
             }
-            Phase::WaitingEndOfTrack { cap, .. } if now >= cap => self.start_fade(timer.mode),
+            // Paused (or stopped) by a way that is not a command, e.g. a
+            // source's own action: nothing to fade, as at the deadline.
+            Phase::WaitingEndOfTrack { cap, .. } if now >= cap => {
+                if self.playback && !self.paused {
+                    self.start_fade(timer.mode);
+                } else {
+                    self.sleep_into_standby().await;
+                }
+            }
             Phase::Fading { next_step, step, from, restore_volume, ends_at_unix_s } if now >= next_step => {
                 let step = step + 1;
                 // Straight to mpv: see the module's doc.
@@ -195,6 +203,29 @@ impl<P: Player> Core<P> {
         {
             self.start_fade(timer.mode);
             self.publish_state();
+        }
+    }
+
+    /// mpv says it is on track `n`: the sleep timer's "end of track" only
+    /// when it moves away from the reference (`track_ref`).
+    ///
+    /// - `n < 0` is no track: mpv sets `playlist-pos` to -1 as a list runs
+    ///   out, possibly before it reports idle. The end of the content
+    ///   (`PlaybackIdle`) decides then — standby, with no fade on silence.
+    /// - The first notification since a `Play` names the track that content
+    ///   opened on: a source switched to during the wait, whose track's end
+    ///   is still to come. It only sets the reference.
+    /// - A `PlayerChapter` the core applied (the cd plugin's resumed track or
+    ///   random first pick, answered to that first notification once mpv
+    ///   has the disc open) moved the reference already: its own
+    ///   notification confirms the seek and matches it.
+    pub(super) fn sleep_on_track_changed(&mut self, n: i64) {
+        if n < 0 {
+            return;
+        }
+        let previous = self.track_ref.replace(n);
+        if previous.is_some_and(|p| p != n) {
+            self.sleep_on_boundary();
         }
     }
 
@@ -650,11 +681,13 @@ mod tests {
     // --- End of track ---
 
     /// The core switched to the disc (finite content), which mpv confirms
-    /// is sounding.
+    /// is sounding, on track 1.
     async fn on_the_disc(core: &mut Core<FakePlayer>) {
         core.handle_command(Command::SelectSource("cd".into())).await.unwrap();
         core.handle_event(Event::PlaybackActive).await;
+        core.handle_event(Event::TrackChanged(1)).await;
         assert!(core.playback && !core.expecting_stream);
+        assert_eq!(core.track_ref, Some(1));
     }
 
     async fn icy(core: &mut Core<FakePlayer>, title: &str) {
@@ -842,14 +875,82 @@ mod tests {
         core.handle_command(Command::SelectSource("cd".into())).await.unwrap();
         assert_eq!(core.active_source, "cd");
         assert_eq!(phase(&core), Some(SleepPhase::WaitingEndOfTrack));
-        // mpv's notification while opening the disc, before it sounds:
-        // the track about to start, not the end of one.
+        // The disc's first notification names the track it opened on, not
+        // the end of one.
+        core.handle_event(Event::PlaybackActive).await;
         core.handle_event(Event::TrackChanged(1)).await;
         assert_eq!(phase(&core), Some(SleepPhase::WaitingEndOfTrack));
         assert_eq!((core.sleep_deadline(), core.sleep_timer_state().unwrap().ends_at_unix_s), cap);
-        core.handle_event(Event::PlaybackActive).await;
+        // The same notification restated is not a change either.
+        core.handle_event(Event::TrackChanged(1)).await;
+        assert_eq!(phase(&core), Some(SleepPhase::WaitingEndOfTrack));
         core.handle_event(Event::TrackChanged(2)).await;
         assert_eq!(phase(&core), Some(SleepPhase::Fading));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resumed_track_seek_is_not_a_boundary() {
+        // The real order on the disc (cd plugin, `pending_chapter`): mpv has
+        // it open, notifies track 0, the plugin answers with the chapter it
+        // owed, and mpv notifies that one.
+        let (mut core, _calls, _sc, _rx, _d) = playing_at(40).await;
+        icy(&mut core, "Song A").await;
+        waiting(&mut core).await;
+        core.handle_command(Command::SelectSource("cd".into())).await.unwrap();
+        core.handle_event(Event::PlaybackActive).await;
+        core.handle_event(Event::TrackChanged(0)).await;
+        assert_eq!(core.track_ref, Some(4), "the fake cd answered PlayerChapter(4)");
+        core.handle_event(Event::TrackChanged(4)).await;
+        assert_eq!(phase(&core), Some(SleepPhase::WaitingEndOfTrack), "the resumed track plays to its end");
+        // Its end is a boundary.
+        core.handle_event(Event::TrackChanged(5)).await;
+        assert_eq!(phase(&core), Some(SleepPhase::Fading));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn new_content_resets_the_track_reference() {
+        let (mut core, _calls, _sc, _rx, _d) = playing_at(40).await;
+        on_the_disc(&mut core).await;
+        waiting(&mut core).await;
+        // The radio's stream sits at playlist position 0: its first
+        // notification is a reference, not a change from the disc's track 1.
+        core.handle_command(Command::SelectSource("radio".into())).await.unwrap();
+        core.handle_event(Event::TrackChanged(0)).await;
+        assert_eq!(phase(&core), Some(SleepPhase::WaitingEndOfTrack));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_track_then_end_of_content_enters_standby() {
+        let (mut core, calls, _sc, _rx, _d) = playing_at(40).await;
+        on_the_disc(&mut core).await;
+        calls.lock().unwrap().clear();
+        waiting(&mut core).await;
+        // mpv leaves the list before it says it is idle.
+        core.handle_event(Event::TrackChanged(-1)).await;
+        assert_eq!(phase(&core), Some(SleepPhase::WaitingEndOfTrack));
+        core.handle_event(Event::PlaybackIdle).await;
+        assert!(core.standby);
+        assert!(volumes(&calls).is_empty(), "no fade on silence: {:?}", calls.lock().unwrap());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cap_reached_while_not_playing_enters_standby() {
+        // Paused, then stopped, by a way that is not a command (which would
+        // have ended the wait already): the two halves of "not playing".
+        for paused in [true, false] {
+            let (mut core, calls, _sc, _rx, _d) = playing_at(40).await;
+            icy(&mut core, "Song A").await;
+            waiting(&mut core).await;
+            if paused {
+                core.paused = true;
+            } else {
+                core.playback = false;
+            }
+            after(&mut core, END_OF_TRACK_CAP).await;
+            assert!(core.standby, "paused: {paused}");
+            assert_eq!(core.sleep_timer_state(), None, "paused: {paused}");
+            assert!(volumes(&calls).is_empty(), "paused: {paused}: no fade {:?}", calls.lock().unwrap());
+        }
     }
 
     #[tokio::test(start_paused = true)]

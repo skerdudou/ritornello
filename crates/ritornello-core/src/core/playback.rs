@@ -103,17 +103,10 @@ impl<P: Player> Core<P> {
             // whatever it had opened, so the sound did not follow.
             Event::TrackChanged(n) => {
                 if !self.standby {
-                    // The sleep timer's "end of track". Only once something
-                    // has sounded since the last `Play`: the notification mpv
-                    // sends while opening new content (a source switched to
-                    // while the timer waits) names the track about to start,
-                    // not the end of one — the cd plugin's `pending_chapter`
-                    // exists because that first notification comes before
-                    // the disc is open. Judged before the request, whose
-                    // answer may itself be a new `Play`.
-                    if self.played_since_play {
-                        self.sleep_on_boundary();
-                    }
+                    // Judged before the request, whose answer may move the
+                    // reference again (a `PlayerChapter`) or start new
+                    // content (a `Play`).
+                    self.sleep_on_track_changed(n);
                     match self.active_request(SourceReq::PlayerTrack(n)).await {
                         Ok(Some(action)) => {
                             if let Err(e) = self.apply(action).await {

@@ -515,6 +515,12 @@ pub struct Core<P: Player> {
     /// persisted: a restart loses it, by the owner's decision. Cleared by
     /// every entry into standby (`enter_standby`).
     sleep: Option<sleep_timer::SleepTimer>,
+    /// The track mpv is on, as far as the sleep timer's "end of track" is
+    /// concerned: the first `TrackChanged` since the last `Play`, moved by
+    /// every later one and by a `PlayerChapter` the core applies. `None`
+    /// until the content just played has said where it is. See
+    /// `sleep_on_track_changed`.
+    track_ref: Option<i64>,
 }
 
 /// What the detached read of an armed file (`Core::arm`) found: its tags
@@ -667,6 +673,7 @@ impl<P: Player> Core<P> {
             #[cfg(test)]
             lyrics_archive_task: None,
             sleep: None,
+            track_ref: None,
         };
         // The sources wired at startup are already known: without this
         // publication, the channel would keep its blank
