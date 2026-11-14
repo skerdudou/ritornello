@@ -115,6 +115,25 @@ pub enum AlarmProblem {
     DuplicateId,
     SleepMinutes,
     EmptySourceName,
+    /// An element of the `alarms` array that does not read as an alarm at all
+    /// (a number out of range for its type, a missing field, an unknown
+    /// target kind). Only the PUT refuses it; `state::load` drops it instead.
+    Malformed,
+}
+
+/// Refuses a request whose `alarms` array holds an element that does not
+/// parse as an `Alarm`. `Settings` itself reads that array leniently (a
+/// damaged `state.json` must not reset every setting), and on a PUT that
+/// leniency would turn into silent data loss answered with a success.
+pub fn check_alarms_parse(body: &serde_json::Value) -> Result<(), SettingsError> {
+    if let Some(serde_json::Value::Array(items)) = body.get("alarms") {
+        for item in items {
+            if serde_json::from_value::<crate::state::Alarm>(item.clone()).is_err() {
+                return Err(SettingsError::Alarm(AlarmProblem::Malformed));
+            }
+        }
+    }
+    Ok(())
 }
 
 impl AlarmProblem {
@@ -127,6 +146,7 @@ impl AlarmProblem {
             AlarmProblem::DuplicateId => "settings_alarm_duplicate_id",
             AlarmProblem::SleepMinutes => "settings_alarm_sleep_minutes_range",
             AlarmProblem::EmptySourceName => "settings_alarm_source_name_empty",
+            AlarmProblem::Malformed => "settings_alarm_malformed",
         }
     }
 }
@@ -592,6 +612,7 @@ mod tests {
             SettingsError::Alarm(AlarmProblem::DuplicateId),
             SettingsError::Alarm(AlarmProblem::SleepMinutes),
             SettingsError::Alarm(AlarmProblem::EmptySourceName),
+            SettingsError::Alarm(AlarmProblem::Malformed),
         ];
         for err in &all {
             let message = err.message(&catalog);

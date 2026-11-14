@@ -319,6 +319,7 @@ settings_alarm_volume_range = "Le volume d'un réveil doit être compris entre 0
 settings_alarm_duplicate_id = "Deux réveils portent le même identifiant"
 settings_alarm_sleep_minutes_range = "La minuterie d'un réveil doit durer entre 1 et 600 minutes"
 settings_alarm_source_name_empty = "Un réveil qui lance une source doit la nommer"
+settings_alarm_malformed = "Un réveil est incomplet ou contient une valeur inadmissible"
 theme_unknown_mode = "mode inconnu: {mode}"
 theme_name_invalid_length = "nom de theme de longueur invalide"
 theme_name_invalid_chars = "nom de theme hors [a-z0-9-]"

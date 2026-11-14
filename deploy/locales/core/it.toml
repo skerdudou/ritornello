@@ -322,6 +322,7 @@ settings_alarm_volume_range = "Il volume di una sveglia deve essere compreso tra
 settings_alarm_duplicate_id = "Due sveglie hanno lo stesso identificatore"
 settings_alarm_sleep_minutes_range = "Il timer di una sveglia deve durare tra 1 e 600 minuti"
 settings_alarm_source_name_empty = "Una sveglia che riproduce una sorgente deve nominarla"
+settings_alarm_malformed = "Una sveglia è incompleta o contiene un valore non ammesso"
 theme_unknown_mode = "modalità sconosciuta: {mode}"
 theme_name_invalid_length = "lunghezza del nome del tema non valida"
 theme_name_invalid_chars = "nome del tema fuori da [a-z0-9-]"

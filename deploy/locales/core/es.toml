@@ -322,6 +322,7 @@ settings_alarm_volume_range = "El volumen de una alarma debe estar entre 0 y 100
 settings_alarm_duplicate_id = "Dos alarmas tienen el mismo identificador"
 settings_alarm_sleep_minutes_range = "El temporizador de una alarma debe durar entre 1 y 600 minutos"
 settings_alarm_source_name_empty = "Una alarma que reproduce una fuente debe nombrarla"
+settings_alarm_malformed = "Una alarma está incompleta o contiene un valor no admitido"
 theme_unknown_mode = "modo desconocido: {mode}"
 theme_name_invalid_length = "longitud del nombre del tema no válida"
 theme_name_invalid_chars = "nombre del tema fuera de [a-z0-9-]"

@@ -554,7 +554,21 @@ async fn settings_json(State(state): State<AppState>) -> Json<crate::state::Sett
 /// whole. A field absent from the body falls back to its default (the struct
 /// is `serde(default)`), which is the price of reusing the state type — fine
 /// on a single-user device.
-async fn settings_put(State(state): State<AppState>, Json(mut req): Json<crate::state::Settings>) -> Response {
+async fn settings_put(State(state): State<AppState>, Json(body): Json<serde_json::Value>) -> Response {
+    // Read as a raw value first: `Settings` drops a malformed alarm silently
+    // (that is right for `state::load`, wrong here), so the alarms are checked
+    // strictly before the lenient parse.
+    if let Err(e) = settings_validation::check_alarms_parse(&body) {
+        let msg = e.message(&*state.catalog.read().await);
+        return (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": msg }))).into_response();
+    }
+    let mut req: crate::state::Settings = match serde_json::from_value(body) {
+        Ok(s) => s,
+        Err(e) => {
+            return (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": e.to_string() })))
+                .into_response();
+        }
+    };
     if let Err(e) = validate_settings(&req) {
         let msg = e.message(&*state.catalog.read().await);
         return (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": msg })))
@@ -1655,6 +1669,26 @@ mod tests {
         };
         assert_eq!(put_alarm_settings(&alarm(r#"["monday"]"#)).await, StatusCode::NO_CONTENT);
         assert_eq!(put_alarm_settings(&alarm("[]")).await, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// Tolerance belongs to `state::load`: on a PUT a malformed alarm must be
+    /// refused, not dropped and answered with a success.
+    #[tokio::test]
+    async fn put_settings_rejects_a_malformed_alarm_instead_of_dropping_it() {
+        let one = |alarm: &str| format!(r#"{{"alarms":[{alarm}]}}"#);
+        // hour 300 overflows u8.
+        let overflow = one(
+            r#"{"id":1,"enabled":true,"hour":300,"minute":0,"days":["monday"],"target":{"kind":"resume"},"volume":30}"#,
+        );
+        // no `volume`.
+        let missing = one(r#"{"id":1,"enabled":true,"hour":7,"minute":0,"days":["monday"],"target":{"kind":"resume"}}"#);
+        // unknown target kind.
+        let unknown = one(
+            r#"{"id":1,"enabled":true,"hour":7,"minute":0,"days":["monday"],"target":{"kind":"teleport"},"volume":30}"#,
+        );
+        for body in [overflow, missing, unknown] {
+            assert_eq!(put_alarm_settings(&body).await, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        }
     }
 
     #[tokio::test]

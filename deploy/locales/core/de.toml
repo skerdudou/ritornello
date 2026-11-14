@@ -322,6 +322,7 @@ settings_alarm_volume_range = "Die Lautstärke eines Weckers muss zwischen 0 und
 settings_alarm_duplicate_id = "Zwei Wecker haben dieselbe Kennung"
 settings_alarm_sleep_minutes_range = "Der Schlaftimer eines Weckers muss zwischen 1 und 600 Minuten dauern"
 settings_alarm_source_name_empty = "Ein Wecker, der eine Quelle abspielt, muss sie benennen"
+settings_alarm_malformed = "Ein Wecker ist unvollständig oder enthält einen unzulässigen Wert"
 theme_unknown_mode = "unbekannter Modus: {mode}"
 theme_name_invalid_length = "ungültige Länge des Designnamens"
 theme_name_invalid_chars = "Designname außerhalb von [a-z0-9-]"
