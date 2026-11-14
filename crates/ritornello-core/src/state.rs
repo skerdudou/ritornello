@@ -252,6 +252,67 @@ pub struct Settings {
     /// never by the config page: `Core::set_settings` keeps the core's own
     /// value over whatever a `PUT /api/settings` carries.
     pub sleep_timer_mode: ritornello_proto::SleepMode,
+
+    /// The alarm clocks, as edited on the config page (`PUT /api/settings`).
+    /// Lenient at load, element by element: see `lenient_alarms`.
+    #[serde(deserialize_with = "lenient_alarms")]
+    pub alarms: Vec<Alarm>,
+}
+
+/// One alarm clock: a time of day, the days it rings on, and what it plays.
+///
+/// The ids are assigned by the SPA (highest + 1) and only have to be unique
+/// within the list; the core never reuses one for anything but identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Alarm {
+    pub id: u32,
+    pub enabled: bool,
+    pub hour: u8,
+    pub minute: u8,
+    /// Never empty once validated; the order is irrelevant.
+    pub days: Vec<ritornello_proto::Weekday>,
+    pub target: AlarmTarget,
+    /// Volume the alarm sets, 0..=100.
+    pub volume: u8,
+    /// An optional sleep timer armed when the alarm fires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sleep_after: Option<AlarmSleep>,
+}
+
+/// What an alarm plays: whatever was playing last, or a named source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AlarmTarget {
+    Resume,
+    Source { name: String },
+}
+
+/// The sleep timer an alarm arms when it fires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AlarmSleep {
+    pub minutes: u16,
+    pub mode: ritornello_proto::SleepMode,
+}
+
+/// Keeps every array element that reads as an `Alarm` and drops the rest with
+/// a warning; anything but an array reads as no alarm. One malformed alarm
+/// (hand-edited, or written by a future version) must never take `load`'s
+/// all-or-nothing path, which would reset every other setting.
+fn lenient_alarms<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Alarm>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(match v {
+        serde_json::Value::Array(items) => items
+            .into_iter()
+            .filter_map(|i| match serde_json::from_value::<Alarm>(i.clone()) {
+                Ok(a) => Some(a),
+                Err(e) => {
+                    tracing::warn!(error = %e, alarm = %i, "dropping an unreadable alarm from the settings");
+                    None
+                }
+            })
+            .collect(),
+        _ => Vec::new(),
+    })
 }
 
 impl Default for Settings {
@@ -312,6 +373,7 @@ impl Default for Settings {
             update_prereleases: false,
             // A fade: the gentlest ending, and the proto's own default.
             sleep_timer_mode: ritornello_proto::SleepMode::Fade,
+            alarms: Vec::new(),
         }
     }
 }
@@ -525,6 +587,32 @@ mod tests {
         assert!(text.contains(wire), "the fixture must actually carry the replaced value");
         std::fs::write(&path, text).unwrap();
         load(&path)
+    }
+
+    #[test]
+    fn one_bad_alarm_is_dropped_and_other_settings_survive() {
+        let text = r#"{
+            "active_source": "radio",
+            "volume": 20,
+            "settings": {
+                "overlay_ms": 3000,
+                "alarms": [
+                    {"id": 1, "enabled": true, "hour": "seven", "minute": 0, "days": ["monday"],
+                     "target": {"kind": "resume"}, "volume": 30},
+                    {"id": 2, "enabled": true, "hour": 6, "minute": 45, "days": ["tuesday"],
+                     "target": {"kind": "resume"}, "volume": 30},
+                    {"id": 3, "enabled": true, "hour": 6, "minute": 45, "days": ["tuesday"],
+                     "target": {"kind": "teleport"}, "volume": 30}
+                ]
+            }
+        }"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, text).unwrap();
+        let st = load(&path);
+        assert_eq!(st.settings.overlay_ms, 3000, "another setting must survive the bad alarm");
+        assert_eq!(st.settings.alarms.len(), 1);
+        assert_eq!(st.settings.alarms[0].id, 2);
     }
 
     fn customised() -> PersistedState {
@@ -846,6 +934,16 @@ mod tests {
                 update_prereleases: true,
                 // Not the default (`Fade`), for the same reason.
                 sleep_timer_mode: ritornello_proto::SleepMode::Immediate,
+                alarms: vec![Alarm {
+                    id: 3,
+                    enabled: true,
+                    hour: 7,
+                    minute: 30,
+                    days: vec![ritornello_proto::Weekday::Monday, ritornello_proto::Weekday::Friday],
+                    target: AlarmTarget::Source { name: "radio".into() },
+                    volume: 40,
+                    sleep_after: Some(AlarmSleep { minutes: 45, mode: ritornello_proto::SleepMode::Fade }),
+                }],
             },
             ..Default::default()
         };

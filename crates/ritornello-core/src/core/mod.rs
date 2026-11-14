@@ -36,6 +36,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, RwLock};
 
+mod alarms;
 mod commands;
 mod deadlines;
 mod play_request;

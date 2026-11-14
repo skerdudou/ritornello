@@ -1620,6 +1620,55 @@ mod tests {
         assert!(settings_rx.try_recv().is_err(), "nothing must go out on the channel");
     }
 
+    /// PUTs `settings` and returns the status, checking that a refusal leaves
+    /// the served settings and the channel untouched.
+    async fn put_alarm_settings(settings: &str) -> StatusCode {
+        let (state, mut settings_rx) = app_state_with_settings();
+        let settings_current = state.settings_current.clone();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::put("/api/settings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(settings.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        if status == StatusCode::UNPROCESSABLE_ENTITY {
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(v["error"].is_string());
+            assert!(settings_current.read().await.alarms.is_empty(), "a refusal must change nothing");
+            assert_eq!(settings_rx.recv().await, None, "nothing must go out on the channel");
+        }
+        status
+    }
+
+    #[tokio::test]
+    async fn put_settings_rejects_alarm_without_days() {
+        let alarm = |days: &str| {
+            format!(
+                r#"{{"alarms":[{{"id":1,"enabled":true,"hour":7,"minute":0,"days":{days},"target":{{"kind":"resume"}},"volume":30}}]}}"#
+            )
+        };
+        assert_eq!(put_alarm_settings(&alarm(r#"["monday"]"#)).await, StatusCode::NO_CONTENT);
+        assert_eq!(put_alarm_settings(&alarm("[]")).await, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn put_settings_rejects_duplicate_alarm_ids() {
+        let alarm = |id: u32| {
+            format!(
+                r#"{{"id":{id},"enabled":true,"hour":7,"minute":0,"days":["monday"],"target":{{"kind":"resume"}},"volume":30}}"#
+            )
+        };
+        let body = |a: u32, b: u32| format!(r#"{{"alarms":[{},{}]}}"#, alarm(a), alarm(b));
+        assert_eq!(put_alarm_settings(&body(1, 2)).await, StatusCode::NO_CONTENT);
+        assert_eq!(put_alarm_settings(&body(2, 2)).await, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
     #[tokio::test]
     async fn put_settings_with_an_unknown_update_policy_is_refused_and_sends_nothing() {
         // An unknown policy is refused at the door (axum's `Json` rejection):
