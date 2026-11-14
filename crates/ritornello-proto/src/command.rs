@@ -95,6 +95,24 @@ pub enum Command {
     /// Absolute value of the repeat setting. Same reason for being as
     /// `SetRandom`.
     SetRepeat(Repeat),
+    /// Arms the sleep timer for `minutes`, replacing any running one.
+    SetSleepTimer { minutes: u16, mode: SleepMode },
+    /// Adds `minutes` to the running timer's deadline.
+    ExtendSleepTimer(u16),
+    CancelSleepTimer,
+}
+
+/// What a sleep timer does when its deadline comes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SleepMode {
+    /// Standby at once.
+    Immediate,
+    /// Ramp the volume down, then standby.
+    #[default]
+    Fade,
+    /// Let the playing track finish (capped), then standby.
+    EndOfTrack,
 }
 
 /// One line of the input protocol: the command, plus whether it comes from a
@@ -122,6 +140,22 @@ impl From<Command> for InputMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sleep_timer_commands_parse_from_their_wire_form() {
+        let set: Command =
+            serde_json::from_str(r#"{"cmd":"SetSleepTimer","arg":{"minutes":30,"mode":"end_of_track"}}"#).unwrap();
+        assert_eq!(set, Command::SetSleepTimer { minutes: 30, mode: SleepMode::EndOfTrack });
+        let extend: Command = serde_json::from_str(r#"{"cmd":"ExtendSleepTimer","arg":15}"#).unwrap();
+        assert_eq!(extend, Command::ExtendSleepTimer(15));
+        let cancel: Command = serde_json::from_str(r#"{"cmd":"CancelSleepTimer"}"#).unwrap();
+        assert_eq!(cancel, Command::CancelSleepTimer);
+        assert_eq!(SleepMode::default(), SleepMode::Fade);
+        assert_eq!(
+            serde_json::to_string(&set).unwrap(),
+            r#"{"cmd":"SetSleepTimer","arg":{"minutes":30,"mode":"end_of_track"}}"#
+        );
+    }
 
     #[test]
     fn json_roundtrip_with_argument() {

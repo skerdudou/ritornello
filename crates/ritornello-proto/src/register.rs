@@ -289,7 +289,7 @@ mod tests {
         assert_eq!(
             line,
             format!(
-                r#"{{"name":"mpd","kinds":["input","display"],"admin":true,"covers":true,"protocol":{PROTOCOL_VERSION},"contracts":{{"display":{{"major":1,"minor":2}},"input":{{"major":1,"minor":0}},"admin":{{"major":1,"minor":0}}}},"version":"0.2.0","repository":"https://github.com/skerdudou/ritornello"}}"#
+                r#"{{"name":"mpd","kinds":["input","display"],"admin":true,"covers":true,"protocol":{PROTOCOL_VERSION},"contracts":{{"display":{{"major":1,"minor":3}},"input":{{"major":1,"minor":1}},"admin":{{"major":1,"minor":0}}}},"version":"0.2.0","repository":"https://github.com/skerdudou/ritornello"}}"#
             )
         );
         assert_eq!(serde_json::from_str::<Announcement>(&line).unwrap(), a);

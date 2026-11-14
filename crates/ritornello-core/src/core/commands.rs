@@ -557,6 +557,8 @@ impl<P: Player> Core<P> {
                 self.push_play_mode().await;
                 self.sync_loop_track().await?;
             }
+            // Wired in Task 2 (its real arms will make this one unreachable).
+            Command::SetSleepTimer { .. } | Command::ExtendSleepTimer(_) | Command::CancelSleepTimer => {}
         }
         Ok(())
     }

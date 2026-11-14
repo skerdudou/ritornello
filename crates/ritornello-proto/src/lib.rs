@@ -41,7 +41,7 @@ pub mod register;
 pub mod source;
 
 pub use admin::{AdminReq, AdminRequest, AdminResponse, AdminResult};
-pub use command::{Command, InputMessage, Repeat};
+pub use command::{Command, InputMessage, Repeat, SleepMode};
 pub use contract::{
     Contract, ContractVersion, ADMIN_CONTRACT, DISPLAY_CONTRACT, INPUT_CONTRACT, METADATA_CONTRACT,
     SOURCE_CONTRACT,
@@ -53,7 +53,7 @@ pub use lyrics::{
 };
 pub use metadata::{
     valid_year, CoverRef, Enrichment, DateFormat, Clock, IdentityUpdate, Known, Link, Track,
-    NowPlaying, Overlay, Playback, PlayerState, Provenance,
+    NowPlaying, Overlay, Playback, PlayerState, Provenance, NextAlarm, SleepPhase, SleepTimerState, Weekday,
 };
 pub use register::{Announcement, PluginKind, ANNOUNCEMENT_MAX_BYTES};
 pub use source::{Armed, PlayRequest, Preset, SourceAction, SourceMessage, SourceReq, SourceRequest, Text};

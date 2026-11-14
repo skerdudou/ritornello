@@ -858,8 +858,88 @@ pub struct PlayerState {
     /// JSON at its default value, so no existing frame changes shape.
     #[serde(default, skip_serializing_if = "Clock::is_default")]
     pub clock: Clock,
+    /// The sleep timer, while one is armed (see `SleepTimerState`). Absent
+    /// otherwise, so no existing frame changes shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sleep_timer: Option<SleepTimerState>,
+    /// The next alarm that will fire, if any is enabled (see `NextAlarm`).
+    /// Absent when none is, so no existing frame changes shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_alarm: Option<NextAlarm>,
     #[serde(flatten)]
     pub track: Track,
+}
+
+/// Where a running sleep timer stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SleepPhase {
+    /// Counting down to the deadline.
+    Armed,
+    /// The deadline passed; waiting for the playing track to end (capped).
+    WaitingEndOfTrack,
+    /// The volume is ramping down.
+    Fading,
+}
+
+/// A running sleep timer, as displays see it.
+///
+/// `ends_at_unix_s` is the wall-clock instant of the deadline (for
+/// `WaitingEndOfTrack`: the cap; for `Fading`: the end of the fade).
+/// Consumers compute the remaining time themselves: the core does not
+/// republish every second for the timer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SleepTimerState {
+    pub ends_at_unix_s: u64,
+    pub mode: crate::command::SleepMode,
+    pub phase: SleepPhase,
+}
+
+/// The next alarm to fire, as displays see it: a day and a time of day, in
+/// the device's local time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NextAlarm {
+    pub weekday: Weekday,
+    pub hour: u8,
+    pub minute: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Weekday {
+    Sunday,
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
+    Saturday,
+}
+
+impl Weekday {
+    /// Maps `tm_wday` (0 for Sunday, as `localtime_r` gives it) to a
+    /// `Weekday`.
+    ///
+    /// A pure function over `0..=6`, deliberately pulled out of `local_now`:
+    /// it is the one piece of logic in this file's only untested function
+    /// that is not time-zone-dependent, and an off-by-one here would mean a
+    /// weekly cadence silently firing on the wrong day, every week, forever.
+    ///
+    /// `None` outside `0..=6` — `localtime_r` never produces such a value,
+    /// but the signature admits one, and answering `None` rather than
+    /// panicking or guessing keeps that promise honest for any other caller.
+    pub fn from_tm(wday: i32) -> Option<Self> {
+        Some(match wday {
+            0 => Self::Sunday,
+            1 => Self::Monday,
+            2 => Self::Tuesday,
+            3 => Self::Wednesday,
+            4 => Self::Thursday,
+            5 => Self::Friday,
+            6 => Self::Saturday,
+            _ => return None,
+        })
+    }
 }
 
 /// The two time-writing settings, as they travel to the displays.
@@ -923,6 +1003,40 @@ impl Track {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_state_without_the_sleep_timer_and_alarm_fields_reads_back_with_both_absent() {
+        let state: PlayerState = serde_json::from_str(r#"{"source":"radio","volume":10,"muted":false,"standby":false,"preset":null,"preset_count":null,"preset_name":null}"#).unwrap();
+        assert_eq!(state.sleep_timer, None);
+        assert_eq!(state.next_alarm, None);
+    }
+
+    #[test]
+    fn a_default_state_does_not_write_the_sleep_timer_and_alarm_keys() {
+        let json = serde_json::to_string(&PlayerState::default()).unwrap();
+        assert!(!json.contains("sleep_timer"), "{json}");
+        assert!(!json.contains("next_alarm"), "{json}");
+    }
+
+    #[test]
+    fn the_sleep_timer_and_the_next_alarm_travel_in_their_wire_form() {
+        let state = PlayerState {
+            sleep_timer: Some(SleepTimerState {
+                ends_at_unix_s: 1_800_000_000,
+                mode: crate::command::SleepMode::EndOfTrack,
+                phase: SleepPhase::WaitingEndOfTrack,
+            }),
+            next_alarm: Some(NextAlarm { weekday: Weekday::Monday, hour: 7, minute: 30 }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(
+            json.contains(r#""sleep_timer":{"ends_at_unix_s":1800000000,"mode":"end_of_track","phase":"waiting_end_of_track"}"#),
+            "{json}"
+        );
+        assert!(json.contains(r#""next_alarm":{"weekday":"monday","hour":7,"minute":30}"#), "{json}");
+        assert_eq!(serde_json::from_str::<PlayerState>(&json).unwrap(), state);
+    }
     use serde_json::json;
 
     #[test]
