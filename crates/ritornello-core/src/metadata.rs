@@ -755,6 +755,18 @@ impl Metadata {
         }
     }
 
+    /// The title the displays show, without building the whole state (no
+    /// cover, no lyrics): what the sleep timer compares to see a stream's
+    /// track change.
+    pub fn title(&self) -> Option<String> {
+        self.composed_text().title
+    }
+
+    /// The last title the stream announced itself (ICY), verbatim.
+    pub fn icy(&self) -> Option<&str> {
+        self.icy.as_deref()
+    }
+
     /// Resolution, in order: the retained contributor's text block,
     /// complemented by the `fill_only`s, plus the retained cover if the bytes
     /// are in hand.

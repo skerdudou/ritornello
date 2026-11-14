@@ -12,9 +12,10 @@ impl<P: Player> Core<P> {
         if self.standby && !matches!(cmd, Command::Power | Command::SourceCycle | Command::SelectSource(_)) {
             return Ok(());
         }
-        // Pause and Stop during a sleep fade end it at once: the device
-        // goes to standby at the volume to restore (see `ends_fade`).
-        let outcome = if self.ends_fade(&cmd) {
+        // Pause and Stop during a sleep fade, or while it waits for the end
+        // of the track, end it at once: the device goes to standby at the
+        // volume to restore (see `ends_sleep_wind_down`).
+        let outcome = if self.ends_sleep_wind_down(&cmd) {
             self.enter_standby().await
         } else {
             self.apply_command(cmd).await

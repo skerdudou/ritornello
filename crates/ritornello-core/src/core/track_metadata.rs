@@ -370,8 +370,18 @@ impl<P: Player> Core<P> {
         if self.standby || !self.expecting_stream {
             return;
         }
+        // The sleep timer's "end of track" on a stream: the stream announcing
+        // a **different** title — `set_icy` refuses the same one restated,
+        // and the first one names the track already playing. Judged on the
+        // ICY itself, not on the published title: a `metadata` plugin
+        // outranks the ICY on screen, and a plugin gone silent would
+        // otherwise hide every boundary.
+        let had_a_title = self.metadata.icy().is_some();
         if !self.metadata.set_icy(title) {
             return;
+        }
+        if had_a_title {
+            self.sleep_on_boundary();
         }
         self.publish_state();
     }
@@ -400,6 +410,7 @@ impl<P: Player> Core<P> {
         if self.standby || !self.playback {
             return;
         }
+        let title_before = self.title_before_frame();
         // Both applied before either is judged: a `||` would skip the lyrics
         // whenever the text changed.
         let tags_changed = track.is_some_and(|t| self.metadata.set_tags(t));
@@ -407,6 +418,10 @@ impl<P: Player> Core<P> {
         if !tags_changed && !lyrics_changed {
             return;
         }
+        // A stream sending file-style tags (Ogg's Vorbis comments) changes
+        // track only through them. On finite content `TrackChanged` has
+        // already said so; this second boundary finds nothing waiting.
+        self.sleep_on_title_change(title_before);
         self.publish_state();
     }
 
@@ -522,9 +537,15 @@ impl<P: Player> Core<P> {
     /// stale, empty, or emitted by an undeclared plugin (see
     /// `Metadata::add`).
     pub fn handle_enrichment(&mut self, plugin: &str, e: Enrichment) {
+        let title_before = self.title_before_frame();
         if !self.metadata.add(plugin, e) {
             return;
         }
+        // A plugin following a stream (Radio France, OUI FM) naming the next
+        // song: the sleep timer's "end of track". Judged on the published
+        // title, so a plugin held in reserve that changes nothing on screen
+        // is not one.
+        self.sleep_on_title_change(title_before);
         // We log **the winner**, not the one that just answered: a
         // lower-priority plugin can be held in reserve without displaying
         // anything, and a log naming it would lie in the only case where it

@@ -3,7 +3,8 @@
 //! One timer at a time, never persisted (a restart loses it, by the owner's
 //! decision). At the deadline the device goes to standby exactly as the
 //! Power key puts it there (`enter_standby`); `Fade` first ramps mpv's
-//! volume down to zero.
+//! volume down to zero; `EndOfTrack` first waits for the playing track to
+//! end (`sleep_on_boundary`), five minutes at most, then fades.
 //!
 //! **The volume is never left low.** The fade steps write to mpv directly
 //! (`Player::set_volume`), never through `Core::set_volume`, which would
@@ -26,6 +27,8 @@ const FADE_STEP: Duration = Duration::from_millis(500);
 /// `ExtendSleepTimer`; this pins the step the menu is designed around.
 #[cfg_attr(not(test), expect(dead_code, reason = "the step the SPA sends, pinned by the tests"))]
 const EXTEND_MINUTES: u16 = 15;
+/// The longest `EndOfTrack` waits for the track to end before fading anyway.
+const END_OF_TRACK_CAP: Duration = Duration::from_secs(300);
 
 /// A running sleep timer.
 #[derive(Debug, Clone, Copy)]
@@ -39,6 +42,9 @@ enum Phase {
     /// Counting down. `ends_at_unix_s` is the same instant on the wall clock,
     /// for the displays.
     Armed { deadline: tokio::time::Instant, ends_at_unix_s: u64 },
+    /// `EndOfTrack` past its deadline: waiting for a track boundary
+    /// (`sleep_on_boundary`), at most until `cap`. The volume is untouched.
+    WaitingEndOfTrack { cap: tokio::time::Instant, ends_at_unix_s: u64 },
     /// Ramping mpv's volume from `from` down to zero, one step every
     /// `FADE_STEP`. `step` is the number of steps already applied.
     ///
@@ -66,7 +72,7 @@ impl SleepTimer {
     fn restore_volume(&self) -> Option<u8> {
         match self.phase {
             Phase::Fading { restore_volume, .. } => Some(restore_volume),
-            Phase::Armed { .. } => None,
+            Phase::Armed { .. } | Phase::WaitingEndOfTrack { .. } => None,
         }
     }
 }
@@ -88,6 +94,7 @@ impl<P: Player> Core<P> {
     pub fn sleep_deadline(&self) -> Option<Instant> {
         self.sleep.map(|t| match t.phase {
             Phase::Armed { deadline, .. } => deadline.into_std(),
+            Phase::WaitingEndOfTrack { cap, .. } => cap.into_std(),
             Phase::Fading { next_step, .. } => next_step.into_std(),
         })
     }
@@ -111,22 +118,20 @@ impl<P: Player> Core<P> {
                 match timer.mode {
                     _ if !playing => self.sleep_into_standby().await,
                     SleepMode::Immediate => self.sleep_into_standby().await,
-                    // Task 3: `EndOfTrack` waits for the track to end first.
-                    SleepMode::Fade | SleepMode::EndOfTrack => {
+                    SleepMode::EndOfTrack if self.has_track_boundaries() => {
                         self.sleep = Some(SleepTimer {
                             mode: timer.mode,
-                            phase: Phase::Fading {
-                                next_step: now + FADE_STEP,
-                                step: 0,
-                                from: self.volume,
-                                restore_volume: self.volume,
-                                ends_at_unix_s: crate::update::now_unix_s()
-                                    + (FADE_STEP * u32::from(FADE_STEPS)).as_secs(),
+                            phase: Phase::WaitingEndOfTrack {
+                                cap: now + END_OF_TRACK_CAP,
+                                ends_at_unix_s: crate::update::now_unix_s() + END_OF_TRACK_CAP.as_secs(),
                             },
                         });
                     }
+                    // Nothing will ever say the track ended: fade now.
+                    SleepMode::Fade | SleepMode::EndOfTrack => self.start_fade(timer.mode),
                 }
             }
+            Phase::WaitingEndOfTrack { cap, .. } if now >= cap => self.start_fade(timer.mode),
             Phase::Fading { next_step, step, from, restore_volume, ends_at_unix_s } if now >= next_step => {
                 let step = step + 1;
                 // Straight to mpv: see the module's doc.
@@ -145,6 +150,72 @@ impl<P: Player> Core<P> {
             _ => return,
         }
         self.publish_state();
+    }
+
+    /// Can the playing content say when its track ends? Finite content (a
+    /// disc, a file list) always can: `TrackChanged`, its end. A stream only
+    /// through its titles: one announced since it started playing (its own
+    /// ICY, or a title from its tags or a `metadata` plugin — the slate is
+    /// cleared at every new play, and the published title is drawn from
+    /// those three) is taken as the promise of a next one. Decided at the
+    /// deadline, not when the timer is armed: the source may have changed in
+    /// between.
+    fn has_track_boundaries(&self) -> bool {
+        !self.expecting_stream || self.metadata.title().is_some()
+    }
+
+    fn start_fade(&mut self, mode: SleepMode) {
+        self.sleep = Some(SleepTimer {
+            mode,
+            phase: Phase::Fading {
+                next_step: tokio::time::Instant::now() + FADE_STEP,
+                step: 0,
+                from: self.volume,
+                restore_volume: self.volume,
+                ends_at_unix_s: crate::update::now_unix_s() + (FADE_STEP * u32::from(FADE_STEPS)).as_secs(),
+            },
+        });
+    }
+
+    /// Is the timer past its deadline, waiting for the track to end?
+    pub(super) fn waiting_end_of_track(&self) -> bool {
+        matches!(self.sleep, Some(SleepTimer { phase: Phase::WaitingEndOfTrack { .. }, .. }))
+    }
+
+    /// A track ended (or a stream announced its next title): a timer waiting
+    /// for it starts its fade. Nothing otherwise, so every boundary calls it
+    /// unconditionally.
+    ///
+    /// Synchronous, unlike most of this file: starting a fade touches
+    /// nothing but the timer (its first step is `on_sleep_deadline`'s), and
+    /// the metadata handlers that see a stream's titles are synchronous.
+    pub(super) fn sleep_on_boundary(&mut self) {
+        if let Some(timer) = self.sleep
+            && self.waiting_end_of_track()
+        {
+            self.start_fade(timer.mode);
+            self.publish_state();
+        }
+    }
+
+    /// The published title, when a timer waits for it to change: what a
+    /// metadata handler reads before applying its frame and hands back to
+    /// `sleep_on_title_change` after. `None` otherwise, so the composed text
+    /// is not rebuilt for every frame of every evening.
+    pub(super) fn title_before_frame(&self) -> Option<String> {
+        if self.waiting_end_of_track() { self.metadata.title() } else { None }
+    }
+
+    /// A boundary when the published title moved from one title to another.
+    /// The same title restated is not one (mpv and the plugins repeat
+    /// themselves), and neither is a first title: on a stream just switched
+    /// to, it names the track already playing, whose end is still to come.
+    pub(super) fn sleep_on_title_change(&mut self, before: Option<String>) {
+        if let Some(before) = before
+            && self.metadata.title().is_some_and(|t| t != before)
+        {
+            self.sleep_on_boundary();
+        }
     }
 
     async fn sleep_into_standby(&mut self) {
@@ -172,7 +243,8 @@ impl<P: Player> Core<P> {
                     phase: Phase::Armed { deadline: deadline + span, ends_at_unix_s: ends_at_unix_s + span.as_secs() },
                 });
             }
-            Phase::Fading { .. } => self.arm_sleep_timer(minutes, timer.mode).await,
+            // Past the deadline: "+15 min" counts from now.
+            Phase::Fading { .. } | Phase::WaitingEndOfTrack { .. } => self.arm_sleep_timer(minutes, timer.mode).await,
         }
     }
 
@@ -210,12 +282,14 @@ impl<P: Player> Core<P> {
         }
     }
 
-    /// Pause and Stop during a fade send the device to standby at once
-    /// (Power does too, through its own arm). Every other command applies as
-    /// usual and the fade goes on — the owner's decision: only the timer's
-    /// own menu stops an extinction.
-    pub(super) fn ends_fade(&self, cmd: &Command) -> bool {
-        matches!(self.sleep, Some(SleepTimer { phase: Phase::Fading { .. }, .. }))
+    /// Pause and Stop during a fade, or while waiting for the end of the
+    /// track, send the device to standby at once (Power does too, through
+    /// its own arm). Every other command applies as usual and the timer goes
+    /// on — the owner's decision: only the timer's own menu stops an
+    /// extinction. A source switch while waiting keeps waiting, on the new
+    /// source, under the same cap.
+    pub(super) fn ends_sleep_wind_down(&self, cmd: &Command) -> bool {
+        matches!(self.sleep, Some(SleepTimer { phase: Phase::Fading { .. } | Phase::WaitingEndOfTrack { .. }, .. }))
             && matches!(cmd, Command::PlayPause | Command::Stop)
     }
 
@@ -224,6 +298,7 @@ impl<P: Player> Core<P> {
         self.sleep.map(|t| {
             let (phase, ends_at_unix_s) = match t.phase {
                 Phase::Armed { ends_at_unix_s, .. } => (SleepPhase::Armed, ends_at_unix_s),
+                Phase::WaitingEndOfTrack { ends_at_unix_s, .. } => (SleepPhase::WaitingEndOfTrack, ends_at_unix_s),
                 Phase::Fading { ends_at_unix_s, .. } => (SleepPhase::Fading, ends_at_unix_s),
             };
             SleepTimerState { ends_at_unix_s, mode: t.mode, phase }
@@ -570,5 +645,249 @@ mod tests {
         let state = rx.borrow_and_update().clone();
         assert!(state.standby);
         assert_eq!(state.sleep_timer, None);
+    }
+
+    // --- End of track ---
+
+    /// The core switched to the disc (finite content), which mpv confirms
+    /// is sounding.
+    async fn on_the_disc(core: &mut Core<FakePlayer>) {
+        core.handle_command(Command::SelectSource("cd".into())).await.unwrap();
+        core.handle_event(Event::PlaybackActive).await;
+        assert!(core.playback && !core.expecting_stream);
+    }
+
+    async fn icy(core: &mut Core<FakePlayer>, title: &str) {
+        core.handle_event(Event::IcyTitle(title.into())).await;
+    }
+
+    /// Arms a one-minute `EndOfTrack` timer and reaches its deadline.
+    async fn end_of_track_deadline(core: &mut Core<FakePlayer>) {
+        arm(core, 1, SleepMode::EndOfTrack).await;
+        after(core, Duration::from_secs(60)).await;
+    }
+
+    async fn waiting(core: &mut Core<FakePlayer>) {
+        end_of_track_deadline(core).await;
+        assert_eq!(phase(core), Some(SleepPhase::WaitingEndOfTrack));
+    }
+
+    /// The radio announcing its titles through its tags (an Ogg stream).
+    fn tags_titled(title: &str, album: &str) -> Event {
+        let track = ritornello_proto::Track { title: Some(title.into()), album: Some(album.into()), ..Default::default() };
+        Event::FileTags { track: Some(Box::new(track)), lyrics: None }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn end_of_track_waits_for_track_change_then_fades() {
+        let (mut core, calls, _sc, mut rx, _d) = playing_at(40).await;
+        on_the_disc(&mut core).await;
+        calls.lock().unwrap().clear();
+        let wall = crate::update::now_unix_s();
+        // Finite content needs no title to have track boundaries.
+        waiting(&mut core).await;
+        let st = rx.borrow_and_update().sleep_timer.unwrap();
+        assert_eq!((st.phase, st.mode), (SleepPhase::WaitingEndOfTrack, SleepMode::EndOfTrack));
+        assert!(st.ends_at_unix_s.abs_diff(wall + 300) <= 2, "the cap: {st:?} vs {wall}");
+        assert!(volumes(&calls).is_empty(), "the volume is untouched while waiting");
+        core.handle_event(Event::TrackChanged(2)).await;
+        assert_eq!(phase(&core), Some(SleepPhase::Fading));
+        assert_eq!(rx.borrow_and_update().sleep_timer.map(|s| s.phase), Some(SleepPhase::Fading), "published");
+        fade_steps(&mut core, FADE_STEPS).await;
+        assert!(core.standby);
+        let v = volumes(&calls);
+        let (restore, ramp) = v.split_last().unwrap();
+        assert_eq!(ramp.len(), usize::from(FADE_STEPS), "{v:?}");
+        assert_eq!(*restore, 40);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn end_of_track_waits_for_icy_title_change_on_a_stream() {
+        let (mut core, _calls, _sc, _rx, _d) = playing_at(40).await;
+        icy(&mut core, "Song A").await;
+        waiting(&mut core).await;
+        icy(&mut core, "Song B").await;
+        assert_eq!(phase(&core), Some(SleepPhase::Fading));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn same_icy_title_is_not_a_boundary() {
+        let (mut core, _calls, _sc, _rx, _d) = playing_at(40).await;
+        icy(&mut core, "Song A").await;
+        waiting(&mut core).await;
+        // Icecast repeats the header throughout a track.
+        icy(&mut core, "Song A").await;
+        assert_eq!(phase(&core), Some(SleepPhase::WaitingEndOfTrack));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn end_of_track_without_any_title_fades_immediately() {
+        let (mut core, _calls, _sc, _rx, _d) = playing_at(40).await;
+        assert!(core.expecting_stream, "a stream that never announced a title");
+        end_of_track_deadline(&mut core).await;
+        assert_eq!(phase(&core), Some(SleepPhase::Fading));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn end_of_track_cap_fades_after_five_minutes() {
+        let (mut core, calls, _sc, _rx, _d) = playing_at(40).await;
+        icy(&mut core, "Song A").await;
+        waiting(&mut core).await;
+        let cap = core.sleep_deadline().unwrap();
+        after(&mut core, END_OF_TRACK_CAP - Duration::from_secs(1)).await;
+        assert_eq!(phase(&core), Some(SleepPhase::WaitingEndOfTrack));
+        after(&mut core, Duration::from_secs(1)).await;
+        assert_eq!(phase(&core), Some(SleepPhase::Fading));
+        assert!(core.sleep_deadline().unwrap() > cap, "now the fade's steps");
+        fade_steps(&mut core, FADE_STEPS).await;
+        assert!(core.standby);
+        assert_eq!(volumes(&calls).last(), Some(&40));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pause_while_waiting_enters_standby() {
+        // Pause, Stop and Power alike: each is its own branch.
+        for cmd in [Command::PlayPause, Command::Stop, Command::Power] {
+            let (mut core, calls, _sc, _rx, _d) = playing_at(40).await;
+            icy(&mut core, "Song A").await;
+            waiting(&mut core).await;
+            core.handle_command(cmd.clone()).await.unwrap();
+            assert!(core.standby, "{cmd:?}");
+            assert_eq!(core.sleep_timer_state(), None, "{cmd:?}");
+            let log = calls.lock().unwrap().clone();
+            assert!(!log.contains(&"pause".to_string()), "{cmd:?}: {log:?}");
+            assert!(volumes(&calls).is_empty(), "{cmd:?}: nothing to restore {log:?}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn end_of_content_while_waiting_enters_standby() {
+        let (mut core, calls, _sc, mut rx, _d) = playing_at(40).await;
+        on_the_disc(&mut core).await;
+        calls.lock().unwrap().clear();
+        waiting(&mut core).await;
+        // The disc ran out; the cd source plays nothing after it.
+        core.handle_event(Event::PlaybackIdle).await;
+        assert!(core.standby);
+        assert_eq!(core.sleep_timer_state(), None);
+        assert!(volumes(&calls).is_empty(), "no fade on silence: {:?}", calls.lock().unwrap());
+        let state = rx.borrow_and_update().clone();
+        assert!(state.standby && state.sleep_timer.is_none(), "published");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn end_of_content_with_another_pass_while_waiting_fades() {
+        let (mut core, _calls, _sc, _rx, _d) = playing_at(40).await;
+        // The radio fake answers an ending with another (finite) pass.
+        core.expecting_stream = false;
+        core.handle_event(Event::PlaybackActive).await;
+        waiting(&mut core).await;
+        core.handle_event(Event::PlaybackIdle).await;
+        assert!(core.playback, "the next pass plays");
+        assert!(!core.standby);
+        assert_eq!(phase(&core), Some(SleepPhase::Fading));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn end_of_track_waits_for_tag_title_change_on_a_stream() {
+        let (mut core, _calls, _sc, _rx, _d) = playing_at(40).await;
+        core.handle_event(tags_titled("Song A", "One")).await;
+        // The tags' title is a title source: no ICY needed to wait.
+        waiting(&mut core).await;
+        // New tags, same title: not a boundary.
+        core.handle_event(tags_titled("Song A", "Two")).await;
+        assert_eq!(phase(&core), Some(SleepPhase::WaitingEndOfTrack));
+        core.handle_event(tags_titled("Song B", "Two")).await;
+        assert_eq!(phase(&core), Some(SleepPhase::Fading));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn end_of_track_waits_for_metadata_title_change() {
+        let (mut core, _np, _rx, _d) = setup_metadata(vec!["p".into()]);
+        core.resume().await.unwrap();
+        let id = serde_json::json!({"url": "fip"});
+        core.handle_source_update("radio", plays(id.clone()));
+        core.handle_enrichment("p", enrichment(id.clone(), "Artist", "Song A"));
+        assert_eq!(core.metadata.icy(), None, "no ICY: the plugin's title alone");
+        waiting(&mut core).await;
+        // Another answer naming the same song: not a boundary.
+        core.handle_enrichment("p", enrichment(id.clone(), "Other artist", "Song A"));
+        assert_eq!(phase(&core), Some(SleepPhase::WaitingEndOfTrack));
+        core.handle_enrichment("p", enrichment(id, "Artist", "Song B"));
+        assert_eq!(phase(&core), Some(SleepPhase::Fading));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn icy_change_under_a_plugin_title_is_a_boundary() {
+        // The plugin outranks the ICY on screen; a plugin that has stopped
+        // answering must not hide the stream's own announcement.
+        let (mut core, _np, _rx, _d) = setup_metadata(vec!["p".into()]);
+        core.resume().await.unwrap();
+        let id = serde_json::json!({"url": "fip"});
+        core.handle_source_update("radio", plays(id.clone()));
+        core.handle_enrichment("p", enrichment(id, "Artist", "Song A"));
+        icy(&mut core, "Song A - Artist").await;
+        waiting(&mut core).await;
+        icy(&mut core, "Song B - Artist").await;
+        assert_eq!(core.metadata.title().as_deref(), Some("Song A"), "the screen did not move");
+        assert_eq!(phase(&core), Some(SleepPhase::Fading));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn source_switch_while_waiting_keeps_waiting_under_the_same_cap() {
+        let (mut core, _calls, _sc, _rx, _d) = playing_at(40).await;
+        icy(&mut core, "Song A").await;
+        waiting(&mut core).await;
+        let cap = (core.sleep_deadline(), core.sleep_timer_state().unwrap().ends_at_unix_s);
+        core.handle_command(Command::SelectSource("cd".into())).await.unwrap();
+        assert_eq!(core.active_source, "cd");
+        assert_eq!(phase(&core), Some(SleepPhase::WaitingEndOfTrack));
+        // mpv's notification while opening the disc, before it sounds:
+        // the track about to start, not the end of one.
+        core.handle_event(Event::TrackChanged(1)).await;
+        assert_eq!(phase(&core), Some(SleepPhase::WaitingEndOfTrack));
+        assert_eq!((core.sleep_deadline(), core.sleep_timer_state().unwrap().ends_at_unix_s), cap);
+        core.handle_event(Event::PlaybackActive).await;
+        core.handle_event(Event::TrackChanged(2)).await;
+        assert_eq!(phase(&core), Some(SleepPhase::Fading));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn first_title_after_a_switch_is_not_a_boundary() {
+        // A plugin, then ICY: each path's "before" must be a title.
+        let (mut core, _np, _rx, _d) = setup_metadata(vec!["p".into()]);
+        core.resume().await.unwrap();
+        core.handle_command(Command::SelectSource("cd".into())).await.unwrap();
+        core.handle_event(Event::PlaybackActive).await;
+        waiting(&mut core).await;
+        core.handle_command(Command::SelectSource("radio".into())).await.unwrap();
+        assert!(core.expecting_stream);
+        let id = serde_json::json!({"url": "fip"});
+        core.handle_source_update("radio", plays(id.clone()));
+        core.handle_enrichment("p", enrichment(id, "Artist", "Song A"));
+        assert_eq!(phase(&core), Some(SleepPhase::WaitingEndOfTrack), "plugin");
+        icy(&mut core, "Song A").await;
+        assert_eq!(phase(&core), Some(SleepPhase::WaitingEndOfTrack), "ICY");
+        icy(&mut core, "Song B").await;
+        assert_eq!(phase(&core), Some(SleepPhase::Fading));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn extend_or_cancel_while_waiting() {
+        let (mut core, calls, _sc, _rx, _d) = playing_at(40).await;
+        icy(&mut core, "Song A").await;
+        waiting(&mut core).await;
+        core.handle_command(Command::ExtendSleepTimer(EXTEND_MINUTES)).await.unwrap();
+        assert_eq!(phase(&core), Some(SleepPhase::Armed), "+15 min counts from now");
+        after(&mut core, Duration::from_secs(15 * 60 - 1)).await;
+        assert_eq!(phase(&core), Some(SleepPhase::Armed));
+        after(&mut core, Duration::from_secs(1)).await;
+        assert_eq!(phase(&core), Some(SleepPhase::WaitingEndOfTrack));
+        core.handle_command(Command::CancelSleepTimer).await.unwrap();
+        assert_eq!(core.sleep_timer_state(), None);
+        assert!(volumes(&calls).is_empty(), "nothing to restore: {:?}", calls.lock().unwrap());
+        icy(&mut core, "Song B").await;
+        assert_eq!(core.sleep_timer_state(), None, "a boundary without a timer does nothing");
+        assert!(!core.standby);
     }
 }
