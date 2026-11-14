@@ -2458,8 +2458,9 @@ async fn main() -> Result<()> {
     // player was doing, and the rollback's own core must still find it
     // afterwards. Read here rather than inside `core`, which has no business
     // knowing about `/var/lib/ritornello-update`.
-    let startup_over = update::startup_instruction(Path::new("/"), update::now_unix_s());
-    if startup_over == update::StartupOverride::Previous {
+    let startup_now = update::now_unix_s();
+    let startup_over = update::startup_instruction(Path::new("/"), startup_now);
+    if matches!(startup_over, update::StartupOverride::Previous { .. }) {
         tracing::info!(
             "a fresh install marker is on disk: starting in whatever state the device was left in, ignoring the startup power setting for this start only"
         );
@@ -2469,7 +2470,7 @@ async fn main() -> Result<()> {
     // `settings.startup_power` unless the marker overrides it; its standby
     // branch skips the source wake but still configures mpv, so the first
     // `Power` starts right.
-    if let Err(e) = core.startup(startup_over).await {
+    if let Err(e) = core.startup(startup_over, startup_now).await {
         tracing::warn!("startup wake: {e}");
     }
 

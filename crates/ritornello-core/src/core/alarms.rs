@@ -21,6 +21,11 @@ const WEEK: [Weekday; 7] = [
 
 const MINUTES_PER_DAY: i64 = 24 * 60;
 
+/// How far back the restart an update provoked looks for alarms it made the
+/// device miss (`catch_up_alarms`): an update stuck for an hour must not ring
+/// an alarm an hour late.
+const ALARM_CATCH_UP: i64 = 15 * 60;
+
 fn index(day: Weekday) -> i64 {
     WEEK.iter().position(|d| *d == day).expect("WEEK lists every weekday") as i64
 }
@@ -62,7 +67,21 @@ pub fn local_minute(at: &LocalNow) -> LocalMinute {
 ///   change repeats an hour, so one local minute spans two UTC minutes an
 ///   hour apart: without this, an alarm in that hour would ring twice.
 pub fn minute_is_new(minute: i64, at: &LocalNow, last_minute: Option<i64>, last_local: Option<LocalMinute>) -> bool {
-    let utc_new = last_minute.is_none_or(|last| minute > last || last > minute + 1);
+    minute_is_new_as_of(minute, minute, at, last_minute, last_local)
+}
+
+/// `minute_is_new` for a minute checked later than it fell, at `now_minute`
+/// — the catch-up after an update restart. The same two rules; only
+/// staleness is judged against the present: a last firing a few minutes
+/// after a missed minute but not ahead of now is a real one, and blocks.
+fn minute_is_new_as_of(
+    minute: i64,
+    now_minute: i64,
+    at: &LocalNow,
+    last_minute: Option<i64>,
+    last_local: Option<LocalMinute>,
+) -> bool {
+    let utc_new = last_minute.is_none_or(|last| minute > last || last > now_minute + 1);
     let local_new = last_local.is_none_or(|last| last != local_minute(at));
     utc_new && local_new
 }
@@ -112,7 +131,8 @@ impl<P: Player> Core<P> {
     /// an alarm fired in: a check that runs twice in one minute (a late
     /// wake-up, then the regular one) rings nothing twice, and one that runs
     /// 40 s into its minute still rings. Only the current minute: no catch-up
-    /// of minutes the device slept through.
+    /// of minutes the device slept through — except after the restart an
+    /// update provoked, which `catch_up_alarms` answers once at startup.
     ///
     /// Several alarms due in the same minute: the first in the list rings,
     /// the others are that same minute's, already answered.
@@ -136,6 +156,40 @@ impl<P: Player> Core<P> {
             self.fire_alarm(&alarm).await;
         }
         self.next_alarm = local.and_then(|at| next_alarm(&self.settings.alarms, &at));
+        self.publish_state();
+    }
+
+    /// After the restart an update provoked: the alarm whose minute fell
+    /// while the device was being updated rings now, once.
+    ///
+    /// The minutes looked at run from the update's own instant (`since`, the
+    /// marker's or the rollback report's), but never more than
+    /// `ALARM_CATCH_UP` back, up to the current one. Each passes the same
+    /// deduplication as the minute check (`minute_is_new`, judged as of
+    /// now), so a minute that already rang before the update is not rung
+    /// again, and the regular check that follows does not ring this one
+    /// twice. Several minutes due: the latest rings, alone — one firing in
+    /// all, recorded as that minute's. A clock that went back (`since` ahead
+    /// of now) looks at nothing.
+    pub(super) async fn catch_up_alarms(&mut self, since_unix_s: u64, now_unix_s: u64) {
+        let now = now_unix_s as i64;
+        let from = (since_unix_s as i64).max(now - ALARM_CATCH_UP);
+        let now_minute = minute_index(now);
+        for minute in (minute_index(from)..=now_minute).rev() {
+            let Some(at) = crate::update::schedule::local_now(minute * 60) else { continue };
+            if !minute_is_new_as_of(minute, now_minute, &at, self.last_alarm_minute, self.last_alarm_local) {
+                continue;
+            }
+            let Some(alarm) = due_at(&self.settings.alarms, &at).first().map(|a| (*a).clone()) else { continue };
+            tracing::info!("alarm {} missed during the update: ringing it now", alarm.id);
+            // Written before the alarm acts, as in `check_alarms`.
+            self.last_alarm_minute = Some(minute);
+            self.last_alarm_local = Some(local_minute(&at));
+            self.persist();
+            self.fire_alarm(&alarm).await;
+            break;
+        }
+        self.refresh_next_alarm(now);
         self.publish_state();
     }
 
@@ -514,7 +568,7 @@ mod tests {
 
     #[tokio::test]
     async fn alarm_with_sleep_after_arms_timer() {
-        let (mut core, _pc, _sc, rx, _d) = in_standby().await;
+        let (mut core, _pc, _sc, rx, d) = in_standby().await;
         let mut alarm = ringing_at(T, AlarmTarget::Resume, 35);
         alarm.sleep_after = Some(crate::state::AlarmSleep { minutes: 30, mode: SleepMode::Fade });
         with_alarms(&mut core, vec![alarm]);
@@ -524,6 +578,10 @@ mod tests {
         let st = rx.borrow().sleep_timer.expect("the alarm's timer is published");
         assert_eq!((st.phase, st.mode), (SleepPhase::Armed, SleepMode::Fade));
         assert!(st.ends_at_unix_s.abs_diff(wall + 30 * 60) <= 2, "{st:?} vs {wall}");
+        // Written too, though nothing after the arming persists on this
+        // path: an update restart keeps the alarm's timer as any other.
+        let written = on_disk(&d).sleep_timer.expect("the alarm's timer is written");
+        assert_eq!((written.ends_at_unix_s, written.mode), (st.ends_at_unix_s, SleepMode::Fade));
     }
 
     #[tokio::test]
@@ -611,5 +669,134 @@ mod tests {
         assert_eq!(rx.borrow_and_update().next_alarm, None);
         with_alarms(&mut core, alarms);
         assert!(rx.borrow_and_update().next_alarm.is_some());
+    }
+
+    // --- Catch-up after an update restart ---
+
+    use crate::update::StartupOverride;
+
+    /// A device whose state file says it was in standby with `alarms` set,
+    /// the Startup setting at `standby` so that only an alarm can wake it.
+    fn asleep_with(alarms: Vec<Alarm>) -> PersistedState {
+        let settings = crate::state::Settings {
+            alarms,
+            startup_power: crate::state::StartupPower::Standby,
+            ..Default::default()
+        };
+        PersistedState { standby: true, volume: 20, settings, ..Default::default() }
+    }
+
+    /// Starts a core from `persisted` as the restart an update provoked at
+    /// `since`, the clock now reading `now`.
+    async fn restart_after_update(persisted: PersistedState, since: i64, now: i64) -> Rig {
+        let rig = setup_persisted(persisted);
+        let (mut core, pc, sc, rx, d) = rig;
+        core.startup(StartupOverride::Previous { since_unix_s: since as u64 }, now as u64).await.unwrap();
+        (core, pc, sc, rx, d)
+    }
+
+    #[tokio::test]
+    async fn alarm_missed_during_update_restart_fires_once_at_startup() {
+        // The update stopped the core a minute before the alarm, and it is
+        // back two minutes after.
+        let persisted = asleep_with(vec![ringing_at(T, AlarmTarget::Resume, 35)]);
+        let (mut core, _pc, sc, _rx, d) = restart_after_update(persisted, T - 60, T + 120).await;
+        assert!(!core.standby, "the alarm missed during the update did not ring");
+        assert!(has(&sc, "radio:Wake"), "{:?}", sc.lock().unwrap());
+        assert_eq!(core.volume, 35);
+        let disk = on_disk(&d);
+        assert_eq!(disk.last_alarm_minute, Some(minute_index(T)));
+        let at_t = crate::update::schedule::local_now(T).unwrap();
+        assert_eq!(disk.last_alarm_local, Some(local_minute(&at_t)));
+        // Once: switched off, the regular checks that follow ring nothing.
+        core.handle_command(Command::Power).await.unwrap();
+        clear(&sc);
+        core.check_alarms(T + 125).await;
+        core.check_alarms(T + 181).await;
+        assert!(core.standby, "the caught-up alarm rang again");
+        assert!(sc.lock().unwrap().is_empty(), "{:?}", sc.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn several_missed_minutes_ring_only_the_latest() {
+        let early = ringing_at(T, AlarmTarget::Resume, 35);
+        let late = Alarm { id: 2, ..ringing_at(T + 60, AlarmTarget::Resume, 45) };
+        let persisted = asleep_with(vec![early, late]);
+        let (core, pc, _sc, _rx, d) = restart_after_update(persisted, T - 60, T + 180).await;
+        assert!(!core.standby);
+        assert_eq!(core.volume, 45, "the latest minute rings");
+        let unmutes = pc.lock().unwrap().iter().filter(|c| *c == "mute false").count();
+        assert_eq!(unmutes, 1, "one firing in all: {:?}", pc.lock().unwrap());
+        assert!(!has(&pc, "vol 35"), "{:?}", pc.lock().unwrap());
+        assert_eq!(on_disk(&d).last_alarm_minute, Some(minute_index(T + 60)));
+    }
+
+    #[tokio::test]
+    async fn alarm_missed_more_than_15_min_ago_is_not_caught_up() {
+        // An update that stopped the core before the alarm and took sixteen
+        // minutes: the alarm is too old to ring now.
+        let persisted = asleep_with(vec![ringing_at(T, AlarmTarget::Resume, 35)]);
+        let (core, _pc, sc, _rx, d) = restart_after_update(persisted.clone(), T - 60, T + 16 * 60).await;
+        assert!(core.standby, "an alarm sixteen minutes old rang");
+        assert!(sc.lock().unwrap().is_empty(), "{:?}", sc.lock().unwrap());
+        assert_eq!(on_disk(&d).last_alarm_minute, None);
+        // Fifteen minutes on the dot is still inside the window.
+        let (core, _pc, _sc, _rx, _d) = restart_after_update(persisted, T - 60, T + 15 * 60).await;
+        assert!(!core.standby, "an alarm fifteen minutes old did not ring");
+    }
+
+    #[tokio::test]
+    async fn alarm_already_fired_before_update_is_not_fired_again() {
+        // The real path: it rang at its minute, was switched off, and an
+        // update stopped the core a few seconds later, inside that minute.
+        let (mut core, _pc, _sc, _rx, d) = in_standby().await;
+        with_alarms(&mut core, vec![ringing_at(T, AlarmTarget::Resume, 35)]);
+        core.check_alarms(T).await;
+        assert!(!core.standby);
+        core.handle_command(Command::Power).await.unwrap();
+        let (core, _pc, sc, _rx, _d) = restart_after_update(on_disk(&d), T + 20, T + 90).await;
+        assert!(core.standby, "the alarm rang twice across the update");
+        assert!(sc.lock().unwrap().is_empty(), "{:?}", sc.lock().unwrap());
+
+        // The UTC rule alone, without the local minute to back it up.
+        let persisted = PersistedState {
+            last_alarm_minute: Some(minute_index(T)),
+            last_alarm_local: None,
+            ..asleep_with(vec![ringing_at(T, AlarmTarget::Resume, 35)])
+        };
+        let (core, _pc, sc, _rx, _d) = restart_after_update(persisted, T - 30, T + 60).await;
+        assert!(core.standby, "a minute recorded as rung rang again");
+        assert!(sc.lock().unwrap().is_empty(), "{:?}", sc.lock().unwrap());
+
+        // A second restart inside the marker's window: the last firing is a
+        // later minute than the missed one, and not ahead of now. It blocks,
+        // where the minute check's own staleness rule (judged as of the
+        // missed minute) would have taken it for a wrong clock.
+        let persisted = PersistedState {
+            last_alarm_minute: Some(minute_index(T) + 3),
+            last_alarm_local: None,
+            ..asleep_with(vec![ringing_at(T, AlarmTarget::Resume, 35)])
+        };
+        let (core, _pc, _sc, _rx, _d) = restart_after_update(persisted, T - 30, T + 240).await;
+        assert!(core.standby, "a minute before the last firing rang");
+    }
+
+    #[tokio::test]
+    async fn no_alarm_catch_up_after_plain_restart() {
+        let persisted = asleep_with(vec![ringing_at(T, AlarmTarget::Resume, 35)]);
+        let (mut core, _pc, sc, _rx, d) = setup_persisted(persisted);
+        core.startup(StartupOverride::AsConfigured, (T + 120) as u64).await.unwrap();
+        assert!(core.standby, "a plain restart caught up an alarm");
+        assert!(sc.lock().unwrap().is_empty(), "{:?}", sc.lock().unwrap());
+        assert_eq!(on_disk(&d).last_alarm_minute, None);
+    }
+
+    /// A clock that went back across the restart (`since` ahead of now)
+    /// looks at nothing rather than at a reversed window.
+    #[tokio::test]
+    async fn no_catch_up_when_the_update_is_dated_after_now() {
+        let persisted = asleep_with(vec![ringing_at(T, AlarmTarget::Resume, 35)]);
+        let (core, _pc, _sc, _rx, _d) = restart_after_update(persisted, T + 300, T).await;
+        assert!(core.standby);
     }
 }

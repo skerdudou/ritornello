@@ -54,7 +54,11 @@ use tokio::sync::{mpsc, RwLock};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartupOverride {
     /// Whatever the device was doing when it last wrote its state.
-    Previous,
+    ///
+    /// `since_unix_s` is when the update stopped the core: the dated file
+    /// that authorised this start (the earlier of the two if both are
+    /// fresh). The alarm catch-up looks back to it (`Core::startup`).
+    Previous { since_unix_s: u64 },
     AsConfigured,
 }
 
@@ -80,14 +84,17 @@ pub fn startup_override(
     rollback: Option<&ritornello_updater::rollback::Report>,
     now_unix_s: u64,
 ) -> StartupOverride {
-    let after_an_install =
-        marker.is_some_and(|m| ritornello_updater::marker::is_fresh(&m, now_unix_s));
-    let after_a_rollback =
-        rollback.is_some_and(|r| ritornello_updater::rollback::is_fresh(r, now_unix_s));
-    if after_an_install || after_a_rollback {
-        StartupOverride::Previous
-    } else {
-        StartupOverride::AsConfigured
+    let after_an_install = marker
+        .filter(|m| ritornello_updater::marker::is_fresh(m, now_unix_s))
+        .map(|m| m.at_unix_s);
+    let after_a_rollback = rollback
+        .filter(|r| ritornello_updater::rollback::is_fresh(r, now_unix_s))
+        .map(|r| r.at_unix_s);
+    // Both fresh: a rollback that followed an install. The earlier is when
+    // the core was first stopped, and so where missed alarms start.
+    match after_an_install.into_iter().chain(after_a_rollback).min() {
+        Some(since_unix_s) => StartupOverride::Previous { since_unix_s },
+        None => StartupOverride::AsConfigured,
     }
 }
 
@@ -3846,7 +3853,35 @@ mod tests {
     /// asked for.
     #[test]
     fn a_restart_right_after_an_install_preserves_whatever_the_player_was_doing() {
-        assert_eq!(startup_override(Some(marker(1_000)), None, 1_002), StartupOverride::Previous);
+        assert_eq!(
+            startup_override(Some(marker(1_000)), None, 1_002),
+            StartupOverride::Previous { since_unix_s: 1_000 }
+        );
+    }
+
+    /// The instant the alarm catch-up looks back to: the fresh file's own
+    /// date, and the earlier of the two when both are fresh (a rollback that
+    /// followed an install: the core was first stopped by the install). A
+    /// stale one is not an instant of this restart at all.
+    #[test]
+    fn startup_override_previous_carries_marker_time() {
+        let previous = |since_unix_s| StartupOverride::Previous { since_unix_s };
+        assert_eq!(startup_override(Some(marker(1_000)), None, 1_040), previous(1_000));
+        assert_eq!(startup_override(None, Some(&report(1_030)), 1_040), previous(1_030));
+        assert_eq!(startup_override(Some(marker(1_000)), Some(&report(1_030)), 1_040), previous(1_000));
+        assert_eq!(startup_override(Some(marker(1_030)), Some(&report(1_000)), 1_040), previous(1_000));
+        let window = ritornello_updater::marker::MARKER_WINDOW_S;
+        let now = 10_000 + window;
+        assert_eq!(
+            startup_override(Some(marker(9_000)), Some(&report(10_000)), now),
+            previous(10_000),
+            "a stale marker must not drag the catch-up back to its own date"
+        );
+        assert_eq!(
+            startup_override(Some(marker(10_000)), Some(&report(9_000)), now),
+            previous(10_000),
+            "nor a stale rollback report"
+        );
     }
 
     #[test]
@@ -3869,7 +3904,10 @@ mod tests {
     /// core boots, the marker is gone.
     #[test]
     fn a_restart_right_after_a_rollback_preserves_it_too_with_no_marker_left() {
-        assert_eq!(startup_override(None, Some(&report(1_000)), 1_002), StartupOverride::Previous);
+        assert_eq!(
+            startup_override(None, Some(&report(1_000)), 1_002),
+            StartupOverride::Previous { since_unix_s: 1_000 }
+        );
         let stale = 1_000 + ritornello_updater::marker::MARKER_WINDOW_S + 1;
         assert_eq!(
             startup_override(None, Some(&report(1_000)), stale),
@@ -3914,7 +3952,7 @@ mod tests {
         ritornello_updater::marker::arm(prefix, &applied, 1_000).unwrap();
         assert_eq!(
             startup_instruction(prefix, 1_002),
-            StartupOverride::Previous,
+            StartupOverride::Previous { since_unix_s: 1_000 },
             "the core that was just installed keeps the device as it was"
         );
 
@@ -3935,7 +3973,7 @@ mod tests {
         // the device was asleep.
         assert_eq!(
             startup_instruction(prefix, 1_031),
-            StartupOverride::Previous,
+            StartupOverride::Previous { since_unix_s: 1_030 },
             "the core the rollback put back must not wake a device that was in standby"
         );
     }

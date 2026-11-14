@@ -1,7 +1,10 @@
 //! The sleep timer: a countdown to standby, ended at once or by a fade.
 //!
-//! One timer at a time, never persisted (a restart loses it, by the owner's
-//! decision). At the deadline the device goes to standby exactly as the
+//! One timer at a time. A restart loses it, by the owner's decision —
+//! except the restart an update provokes, so that an automatic update at
+//! 3 a.m. does not leave the device playing all night: the timer is written
+//! to `state.json` on every change (`persisted_sleep`), and `restore_sleep`
+//! puts it back after that restart only. At the deadline the device goes to standby exactly as the
 //! Power key puts it there (`enter_standby`); `Fade` first ramps mpv's
 //! volume down to zero; `EndOfTrack` first waits for the playing track to
 //! end (`sleep_on_boundary`), five minutes at most, then fades.
@@ -68,6 +71,13 @@ impl SleepTimer {
         }
     }
 
+    /// A timer restored after an update restart, `ends_at_unix_s` still
+    /// ahead of `now_unix_s`: armed for what was left of it.
+    fn restored(ends_at_unix_s: u64, now_unix_s: u64, mode: SleepMode) -> Self {
+        let left = Duration::from_secs(ends_at_unix_s.saturating_sub(now_unix_s));
+        SleepTimer { mode, phase: Phase::Armed { deadline: tokio::time::Instant::now() + left, ends_at_unix_s } }
+    }
+
     /// The volume mpv must get back, if this timer was fading.
     fn restore_volume(&self) -> Option<u8> {
         match self.phase {
@@ -126,6 +136,7 @@ impl<P: Player> Core<P> {
                                 ends_at_unix_s: crate::update::now_unix_s() + END_OF_TRACK_CAP.as_secs(),
                             },
                         });
+                        self.persist();
                     }
                     // Nothing will ever say the track ended: fade now.
                     SleepMode::Fade | SleepMode::EndOfTrack => self.start_fade(timer.mode),
@@ -183,6 +194,7 @@ impl<P: Player> Core<P> {
                 ends_at_unix_s: crate::update::now_unix_s() + (FADE_STEP * u32::from(FADE_STEPS)).as_secs(),
             },
         });
+        self.persist();
     }
 
     /// Is the timer past its deadline, waiting for the track to end?
@@ -260,6 +272,7 @@ impl<P: Player> Core<P> {
     pub(super) async fn arm_sleep_timer(&mut self, minutes: u16, mode: SleepMode) {
         self.restore_after_fade(self.sleep).await;
         self.sleep = Some(SleepTimer::armed(minutes, mode));
+        self.persist();
     }
 
     /// Pushes the deadline back by `minutes`. A fade is abandoned — volume
@@ -273,6 +286,7 @@ impl<P: Player> Core<P> {
                     mode: timer.mode,
                     phase: Phase::Armed { deadline: deadline + span, ends_at_unix_s: ends_at_unix_s + span.as_secs() },
                 });
+                self.persist();
             }
             // Past the deadline: "+15 min" counts from now.
             Phase::Fading { .. } | Phase::WaitingEndOfTrack { .. } => self.arm_sleep_timer(minutes, timer.mode).await,
@@ -284,6 +298,9 @@ impl<P: Player> Core<P> {
     pub(super) async fn cancel_sleep_timer(&mut self) {
         let timer = self.sleep.take();
         self.restore_after_fade(timer).await;
+        if timer.is_some() {
+            self.persist();
+        }
     }
 
     async fn restore_after_fade(&mut self, timer: Option<SleepTimer>) {
@@ -296,7 +313,7 @@ impl<P: Player> Core<P> {
 
     /// Clears the timer and returns the volume mpv must get back, if it was
     /// fading. For `enter_standby`, which restores it once the player is
-    /// stopped.
+    /// stopped, and persists the cleared timer with the standby flag.
     pub(super) fn take_sleep_timer(&mut self) -> Option<u8> {
         self.sleep.take().and_then(|t| t.restore_volume())
     }
@@ -322,6 +339,37 @@ impl<P: Player> Core<P> {
     pub(super) fn ends_sleep_wind_down(&self, cmd: &Command) -> bool {
         matches!(self.sleep, Some(SleepTimer { phase: Phase::Fading { .. } | Phase::WaitingEndOfTrack { .. }, .. }))
             && matches!(cmd, Command::PlayPause | Command::Stop)
+    }
+
+    /// The timer as `state.json` keeps it. A timer past its deadline —
+    /// waiting for the end of the track, or fading — is written with the
+    /// moment of writing as its deadline, never with its cap or its fade's
+    /// end: the restore after an update must read it as expired (the spec
+    /// treats both phases as a deadline already passed), and a restart
+    /// quicker than the fade or the cap would otherwise re-arm it.
+    pub(super) fn persisted_sleep(&self) -> Option<crate::state::PersistedSleep> {
+        self.sleep.map(|t| {
+            let ends_at_unix_s = match t.phase {
+                Phase::Armed { ends_at_unix_s, .. } => ends_at_unix_s,
+                Phase::WaitingEndOfTrack { .. } | Phase::Fading { .. } => crate::update::now_unix_s(),
+            };
+            crate::state::PersistedSleep { ends_at_unix_s, mode: t.mode }
+        })
+    }
+
+    /// After the restart an update provoked, on a device awake again: the
+    /// timer `state.json` held at launch, armed for what is left of it. Only
+    /// a deadline still ahead reaches here — `startup` sends a device whose
+    /// timer expired meanwhile straight to standby — and nothing happens on
+    /// a device that starts in standby: a timer never survives an entry into
+    /// standby, so one found there is a stale file, not a running timer.
+    pub(super) fn restore_sleep(&mut self, persisted: crate::state::PersistedSleep, now_unix_s: u64) {
+        if self.standby || persisted.ends_at_unix_s <= now_unix_s {
+            return;
+        }
+        self.sleep = Some(SleepTimer::restored(persisted.ends_at_unix_s, now_unix_s, persisted.mode));
+        self.persist();
+        self.publish_state();
     }
 
     /// The timer as displays see it.
@@ -989,6 +1037,135 @@ mod tests {
         assert!(volumes(&calls).is_empty(), "nothing to restore: {:?}", calls.lock().unwrap());
         icy(&mut core, "Song B").await;
         assert_eq!(core.sleep_timer_state(), None, "a boundary without a timer does nothing");
+        assert!(!core.standby);
+    }
+
+    // --- Surviving an update restart ---
+
+    use crate::state::PersistedSleep;
+    use crate::update::StartupOverride;
+
+    fn disk_sleep(dir: &tempfile::TempDir) -> Option<PersistedSleep> {
+        crate::state::load(&dir.path().join("state.json")).sleep_timer
+    }
+
+    /// The restart an update provoked, `since` a few seconds ago.
+    fn after_update(now: u64) -> StartupOverride {
+        StartupOverride::Previous { since_unix_s: now - 5 }
+    }
+
+    /// A core restarted from a state file written awake on the radio at
+    /// volume 40, carrying `sleep`.
+    fn restarted_with(sleep: Option<PersistedSleep>) -> Rig {
+        setup_persisted(PersistedState { volume: 40, sleep_timer: sleep, ..Default::default() })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timer_is_written_on_every_change() {
+        let (mut core, _calls, _sc, _rx, dir) = playing_at(40).await;
+        assert_eq!(disk_sleep(&dir), None);
+        arm(&mut core, 30, SleepMode::EndOfTrack).await;
+        let armed = core.sleep_timer_state().unwrap().ends_at_unix_s;
+        assert_eq!(disk_sleep(&dir), Some(PersistedSleep { ends_at_unix_s: armed, mode: SleepMode::EndOfTrack }));
+        core.handle_command(Command::ExtendSleepTimer(EXTEND_MINUTES)).await.unwrap();
+        assert_eq!(disk_sleep(&dir).map(|t| t.ends_at_unix_s), Some(armed + 15 * 60));
+        core.handle_command(Command::CancelSleepTimer).await.unwrap();
+        assert_eq!(disk_sleep(&dir), None);
+        // Expiry: the timer ends with the standby it brings.
+        arm(&mut core, 1, SleepMode::Immediate).await;
+        assert!(disk_sleep(&dir).is_some());
+        after(&mut core, Duration::from_secs(60)).await;
+        assert!(core.standby);
+        assert_eq!(disk_sleep(&dir), None);
+    }
+
+    /// Past its deadline, a timer is written as expired, never with its cap
+    /// or its fade's end: a restart quicker than either would re-arm it.
+    #[tokio::test(start_paused = true)]
+    async fn a_timer_winding_down_is_written_as_expired() {
+        let (mut core, _calls, _sc, _rx, dir) = playing_at(40).await;
+        icy(&mut core, "Song A").await;
+        waiting(&mut core).await;
+        let written = disk_sleep(&dir).expect("the wait is written");
+        assert!(written.ends_at_unix_s <= crate::update::now_unix_s(), "{written:?}");
+        assert!(written.ends_at_unix_s < core.sleep_timer_state().unwrap().ends_at_unix_s);
+        let (mut core, _calls, _sc, _rx, dir) = playing_at(40).await;
+        fading(&mut core).await;
+        let written = disk_sleep(&dir).expect("the fade is written");
+        assert!(written.ends_at_unix_s <= crate::update::now_unix_s(), "{written:?}");
+        assert_eq!(written.mode, SleepMode::Fade);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timer_survives_update_restart_with_remaining_time() {
+        let now = crate::update::now_unix_s();
+        let sleep = PersistedSleep { ends_at_unix_s: now + 600, mode: SleepMode::Fade };
+        let (mut core, _calls, sc, rx, dir) = restarted_with(Some(sleep));
+        core.startup(after_update(now), now).await.unwrap();
+        assert!(!core.standby);
+        assert!(sc.lock().unwrap().iter().any(|c| c == "radio:Wake"), "the device is restored first");
+        let st = rx.borrow().sleep_timer.expect("the restored timer is published");
+        assert_eq!((st.phase, st.mode, st.ends_at_unix_s), (SleepPhase::Armed, SleepMode::Fade, now + 600));
+        assert_eq!(disk_sleep(&dir), Some(sleep));
+        // Armed for what was left of it, not for a fresh span.
+        after(&mut core, Duration::from_secs(599)).await;
+        assert_eq!(phase(&core), Some(SleepPhase::Armed));
+        after(&mut core, Duration::from_secs(1)).await;
+        assert_eq!(phase(&core), Some(SleepPhase::Fading));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_timer_after_update_restart_enters_standby() {
+        let now = crate::update::now_unix_s();
+        for ends_at_unix_s in [now - 30, now] {
+            let sleep = PersistedSleep { ends_at_unix_s, mode: SleepMode::Fade };
+            let (mut core, _calls, sc, rx, dir) = restarted_with(Some(sleep));
+            core.startup(after_update(now), now).await.unwrap();
+            assert!(core.standby, "{ends_at_unix_s}");
+            assert!(rx.borrow().standby);
+            // Straight to standby: the source is not woken for an instant.
+            assert!(sc.lock().unwrap().is_empty(), "{:?}", sc.lock().unwrap());
+            assert_eq!(core.sleep_timer_state(), None);
+            let disk = crate::state::load(&dir.path().join("state.json"));
+            assert_eq!((disk.standby, disk.sleep_timer), (true, None));
+        }
+    }
+
+    /// The real path: a fade under way, a volume key during it, the state
+    /// file it leaves, and a core started from that file.
+    #[tokio::test(start_paused = true)]
+    async fn fading_timer_after_update_restart_enters_standby_at_restore_volume() {
+        let (mut core, _calls, _sc, _rx, dir) = playing_at(40).await;
+        fading(&mut core).await;
+        fade_steps(&mut core, 8).await;
+        core.handle_command(Command::VolumeUp).await.unwrap();
+        fade_steps(&mut core, 2).await;
+        let left = crate::state::load(&dir.path().join("state.json"));
+        let now = crate::update::now_unix_s();
+        let (mut core, calls, sc, _rx, dir) = setup_persisted(left);
+        core.startup(after_update(now), now).await.unwrap();
+        assert!(core.standby);
+        assert!(sc.lock().unwrap().is_empty(), "{:?}", sc.lock().unwrap());
+        assert_eq!(volumes(&calls), vec![45], "{:?}", calls.lock().unwrap());
+        assert_eq!(core.sleep_timer_state(), None);
+        let disk = crate::state::load(&dir.path().join("state.json"));
+        assert_eq!((disk.volume, disk.standby, disk.sleep_timer), (45, true, None));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timer_dropped_after_plain_restart() {
+        let now = crate::update::now_unix_s();
+        let sleep = PersistedSleep { ends_at_unix_s: now + 600, mode: SleepMode::Fade };
+        let (mut core, _calls, _sc, _rx, dir) = restarted_with(Some(sleep));
+        core.startup(StartupOverride::AsConfigured, now).await.unwrap();
+        assert!(!core.standby, "the default Startup setting wakes");
+        assert_eq!(core.sleep_timer_state(), None);
+        assert_eq!(core.sleep_deadline(), None);
+        assert_eq!(disk_sleep(&dir), None, "and the file forgets it");
+        // An expired one does not send it to standby either.
+        let sleep = PersistedSleep { ends_at_unix_s: now - 30, mode: SleepMode::Fade };
+        let (mut core, _calls, _sc, _rx, _dir) = restarted_with(Some(sleep));
+        core.startup(StartupOverride::AsConfigured, now).await.unwrap();
         assert!(!core.standby);
     }
 }

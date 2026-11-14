@@ -513,10 +513,14 @@ pub struct Core<P: Player> {
     /// the reason `cover_archive_task` gives.
     #[cfg(test)]
     lyrics_archive_task: Option<tokio::task::JoinHandle<()>>,
-    /// The running sleep timer, if any (see `sleep_timer.rs`). Never
-    /// persisted: a restart loses it, by the owner's decision. Cleared by
-    /// every entry into standby (`enter_standby`).
+    /// The running sleep timer, if any (see `sleep_timer.rs`). Persisted,
+    /// but read back only by the restart an update provokes: any other
+    /// restart loses it, by the owner's decision. Cleared by every entry
+    /// into standby (`enter_standby`).
     sleep: Option<sleep_timer::SleepTimer>,
+    /// The timer `state.json` held at launch, a snapshot for the reason
+    /// `persisted_standby` gives. Consumed by `startup`.
+    persisted_sleep: Option<crate::state::PersistedSleep>,
     /// The track mpv is on, as far as the sleep timer's "end of track" is
     /// concerned: the first `TrackChanged` since the last `Play`, moved by
     /// every later one and by a `PlayerChapter` the core applies. `None`
@@ -687,6 +691,7 @@ impl<P: Player> Core<P> {
             #[cfg(test)]
             lyrics_archive_task: None,
             sleep: None,
+            persisted_sleep: persisted.sleep_timer,
             track_ref: None,
             last_alarm_minute: persisted.last_alarm_minute,
             last_alarm_local: persisted.last_alarm_local,

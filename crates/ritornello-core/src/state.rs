@@ -463,6 +463,31 @@ pub struct PersistedState {
     /// the hour repeated by the autumn change from ringing twice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_alarm_local: Option<LocalMinute>,
+    /// The running sleep timer, written on every arm, extend, cancel and
+    /// expiry. Read back only by the restart an update provokes
+    /// (`Core::startup` with `StartupOverride::Previous`); every other start
+    /// drops it. Lenient at load: see `lenient_sleep`.
+    #[serde(default, deserialize_with = "lenient_sleep", skip_serializing_if = "Option::is_none")]
+    pub sleep_timer: Option<PersistedSleep>,
+}
+
+/// A sleep timer as `state.json` keeps it: its deadline on the wall clock and
+/// how it ends. A timer already past its deadline -- waiting for the end of
+/// the track, or fading -- is written with a deadline no later than the
+/// moment it was written (`Core::persisted_sleep`), so the restore reads it
+/// as expired: the spec treats both phases as a deadline already passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedSleep {
+    pub ends_at_unix_s: u64,
+    pub mode: ritornello_proto::SleepMode,
+}
+
+/// A timer that does not read as one is no timer at all, never a reason to
+/// take `load`'s all-or-nothing path (`PersistedState.fallback`'s doc
+/// measured why).
+fn lenient_sleep<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<PersistedSleep>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).ok())
 }
 
 /// The operator's choice of `pack` (a pack id) for `module` in `language`.
@@ -547,6 +572,7 @@ impl Default for PersistedState {
             pack_preferences: Vec::new(),
             last_alarm_minute: None,
             last_alarm_local: None,
+            sleep_timer: None,
         }
     }
 }
@@ -741,6 +767,7 @@ mod tests {
             pack_preferences: Vec::new(),
             last_alarm_minute: Some(28_333_333),
             last_alarm_local: Some(LocalMinute { day_key: 123_317, hour: 7, minute: 30 }),
+            sleep_timer: Some(PersistedSleep { ends_at_unix_s: 1_700_000_000, mode: ritornello_proto::SleepMode::EndOfTrack }),
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
@@ -776,6 +803,7 @@ mod tests {
             pack_preferences: Vec::new(),
             last_alarm_minute: None,
             last_alarm_local: None,
+            sleep_timer: None,
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
@@ -804,6 +832,7 @@ mod tests {
             pack_preferences: Vec::new(),
             last_alarm_minute: None,
             last_alarm_local: None,
+            sleep_timer: None,
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
@@ -1007,6 +1036,20 @@ mod tests {
         }
         std::fs::write(&path, r#"{"active_source":"cd","volume":41,"update_sources":[1,"a/b",null,"c/d"]}"#).unwrap();
         assert_eq!(load(&path).update_sources, vec!["a/b".to_string(), "c/d".to_string()]);
+    }
+
+    /// A sleep timer that does not read as one is no timer, never a reset of
+    /// the other settings. **[MUTATION]** drop the `deserialize_with`: every
+    /// shape below resets the volume, red.
+    #[test]
+    fn a_malformed_sleep_timer_never_resets_the_other_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        for bad in ["42", "\"x\"", "{\"ends_at_unix_s\":-1,\"mode\":\"fade\"}", "{\"ends_at_unix_s\":5,\"mode\":\"never\"}"] {
+            std::fs::write(&path, format!(r#"{{"active_source":"cd","volume":41,"sleep_timer":{bad}}}"#)).unwrap();
+            let st = load(&path);
+            assert_eq!((st.active_source.as_str(), st.volume, st.sleep_timer), ("cd", 41, None), "{bad}");
+        }
     }
 
     /// A malformed preference list must cost the preferences only, never the
