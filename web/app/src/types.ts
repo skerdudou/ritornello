@@ -514,6 +514,11 @@ export interface SettingsPayload {
    * never something a device starts installing on its own.
    */
   update_prereleases: boolean
+  /**
+   * The end mode the sleep timer menu opens on: the last one used, which the
+   * core remembers on each `SetSleepTimer` and keeps across a `PUT`.
+   */
+  sleep_timer_mode: SleepMode
 }
 /**
  * State of the player, as pushed by `/api/player`: everything that is volatile.
@@ -665,12 +670,45 @@ export interface PlayerPayload {
    * was already travelling without being read.
    */
   playback?: Playback
+  /** The sleep timer, while one runs; absent otherwise. See `SleepTimerState`. */
+  sleep_timer?: SleepTimerState
+  /** The next alarm to fire, absent when none is enabled. See `NextAlarm`. */
+  next_alarm?: NextAlarm
+}
+/** What a sleep timer does when its time is up. Mirrors `ritornello_proto::SleepMode`. */
+export type SleepMode = 'immediate' | 'fade' | 'end_of_track'
+/** Where a running sleep timer stands. Mirrors `ritornello_proto::SleepPhase`. */
+export type SleepPhase = 'armed' | 'waiting_end_of_track' | 'fading'
+/**
+ * A running sleep timer, mirroring `ritornello_proto::SleepTimerState`.
+ *
+ * `ends_at_unix_s` is the device's wall-clock deadline (while waiting for
+ * the end of a track: the cap; while fading: the end of the fade). The core
+ * does not republish every second: the page counts down by itself.
+ */
+export interface SleepTimerState {
+  ends_at_unix_s: number
+  mode: SleepMode
+  phase: SleepPhase
 }
 /**
- * `arg` also carries a boolean (`SetRandom`), a repeat value (`SetRepeat`) or
- * a source name (`SelectSource`).
+ * The next alarm to fire, in the device's local time. Mirrors
+ * `ritornello_proto::NextAlarm`, whose weekday names are the same as
+ * `update::schedule::Weekday`'s (`Weekday` above).
  */
-export type Command = { cmd: string; arg?: number | boolean | Repeat | string }
+export interface NextAlarm {
+  weekday: Weekday
+  hour: number
+  minute: number
+}
+/** The argument of `SetSleepTimer`. */
+export interface SleepTimerArg { minutes: number; mode: SleepMode }
+/**
+ * `arg` also carries a boolean (`SetRandom`), a repeat value (`SetRepeat`),
+ * a source name (`SelectSource`) or a duration and an end mode
+ * (`SetSleepTimer`).
+ */
+export type Command = { cmd: string; arg?: number | boolean | Repeat | string | SleepTimerArg }
 /** The repeat setting of the device. */
 export type Repeat = 'off' | 'all' | 'one'
 /** What the player is doing. Absent from the frame when it is stopped (`seekable` idiom). */

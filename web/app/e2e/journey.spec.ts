@@ -832,7 +832,7 @@ test('the source keys follow the width of the Player card', async ({ page }) => 
   await other.click()
   await expect(page.locator(`[data-source-key="${name}"]`)).toHaveAttribute('aria-pressed', 'true')
 
-  // A phone's card still holds two keys: they need 104 px of a header about
+  // A phone's card still holds two keys: they need 140 px of a header about
   // 290 px wide, so the cycle key stays away. It only comes back with enough
   // sources to overflow the row (`headerMode.test.ts` covers that arithmetic,
   // and the harness cannot declare that many plugins).

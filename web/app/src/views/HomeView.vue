@@ -3,6 +3,7 @@ import { api, Button, toast } from '@ritornello/ui'
 import { LoopIcon } from '@radix-icons/vue'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import PresetGrid from '../components/PresetGrid.vue'
+import SleepTimerKey from '../components/SleepTimerKey.vue'
 import SourceKeys from '../components/SourceKeys.vue'
 import StandbyIcon from '../components/icons/StandbyIcon.vue'
 import PlayerCard from '../components/PlayerCard.vue'
@@ -12,7 +13,7 @@ import { useCatalog } from '../composables/useCatalog'
 import { usePlayer } from '../composables/usePlayer'
 import { usePresets } from '../composables/usePresets'
 import type { Command, SettingsPayload } from '../types'
-import { headerMode } from './headerMode'
+import { headerMode, KEY } from './headerMode'
 import { unavailable, REMOTE_MUTE, REMOTE_POWER, REMOTE_SOURCE } from './remoteCommands'
 
 const { t } = useCatalog()
@@ -43,6 +44,11 @@ watch(() => state.value?.source, (after, before) => {
 const playerCard = ref<{ headerElement: () => HTMLElement | null } | null>(null)
 const available = ref<number | null>(null)
 let observer: ResizeObserver | null = null
+// The sleep timer key shares the row and changes width as it counts down:
+// measured too, its border box (padding included), a bare moon until then.
+const sleepKeyBox = ref<HTMLElement | null>(null)
+const sleepKey = ref(KEY)
+let sleepObserver: ResizeObserver | null = null
 onMounted(() => {
   const header = playerCard.value?.headerElement()
   if (!header) return
@@ -52,14 +58,24 @@ onMounted(() => {
     if (entry) available.value = entry.contentRect.width
   })
   observer.observe(header)
+  const box = sleepKeyBox.value
+  if (!box) return
+  sleepObserver = new ResizeObserver(() => {
+    sleepKey.value = box.getBoundingClientRect().width || KEY
+  })
+  sleepObserver.observe(box)
 })
-onUnmounted(() => observer?.disconnect())
+onUnmounted(() => {
+  observer?.disconnect()
+  sleepObserver?.disconnect()
+})
 const mode = computed(() =>
   headerMode({
     sources: sources.value.length,
     listRead: listRead.value,
     available: available.value,
     standby: state.value?.standby ?? false,
+    sleepKey: sleepKey.value,
     activeListed: !state.value?.source || sources.value.includes(state.value.source),
   }),
 )
@@ -87,6 +103,7 @@ const settings = ref<SettingsPayload>({
   update_hour: 3,
   update_cadence: { kind: 'daily' },
   update_prereleases: false,
+  sleep_timer_mode: 'fade',
 })
 onMounted(async () => {
   settings.value = await api.get<SettingsPayload>('/api/settings').catch(() => settings.value)
@@ -130,6 +147,10 @@ onMounted(async () => {
             <LoopIcon class="size-4" />
             {{ t(REMOTE_SOURCE.key) }}
           </Button>
+          <!-- Beside standby: the sleep timer acts on the whole device too. -->
+          <span ref="sleepKeyBox" class="inline-flex">
+            <SleepTimerKey :state="state" :mode="settings.sleep_timer_mode" @command="send" />
+          </span>
           <Button variant="outline" size="icon-sm" data-remote-power :aria-label="t(REMOTE_POWER.key)" :title="t(REMOTE_POWER.key)" @click="send(REMOTE_POWER.cmd)">
             <StandbyIcon class="size-4" />
           </Button>

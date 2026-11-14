@@ -81,6 +81,9 @@ const settings = ref<SettingsPayload>({
   update_hour: 3,
   update_cadence: { kind: 'daily' },
   update_prereleases: false,
+  // Not edited on this page; sent back as read, and the core keeps its own
+  // value across a PUT anyway.
+  sleep_timer_mode: 'fade',
 })
 
 /**

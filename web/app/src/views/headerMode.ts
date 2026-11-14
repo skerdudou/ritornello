@@ -42,6 +42,12 @@ export function headerMode(input: {
   /** The standby badge shares the header's row with the keys. */
   standby: boolean
   /**
+   * The sleep timer key's rendered width in px, which also closes the row.
+   * Measured rather than a constant: a bare moon at rest (`KEY`), wider
+   * while it reads the time left or what the device is doing.
+   */
+  sleepKey: number
+  /**
    * Whether the active source is empty or in the list. The core keeps the
    * active source while mpv plays after its plugin died, so after a reload the
    * active one can be absent from the list: no icon key would be pressed and
@@ -49,13 +55,14 @@ export function headerMode(input: {
    */
   activeListed: boolean
 }): HeaderMode {
-  const { sources, listRead, available, standby, activeListed } = input
+  const { sources, listRead, available, standby, sleepKey, activeListed } = input
   if (listRead && sources <= 1) return 'none'
   if (!listRead || available === null) return 'cycle'
   if (!activeListed) return 'cycle'
-  // The keys and the gaps between them, then the gap and the standby key that
-  // always close the row, then the standby badge when it shows.
-  let needed = sources * KEY + (sources - 1) * GAP + GAP + KEY
+  // The keys and the gaps between them, then the sleep timer and standby
+  // keys that always close the row, each after its gap, then the standby
+  // badge when it shows.
+  let needed = sources * KEY + (sources - 1) * GAP + GAP + sleepKey + GAP + KEY
   if (standby) needed += STANDBY_BADGE + GAP
   return needed <= available ? 'icons' : 'cycle'
 }

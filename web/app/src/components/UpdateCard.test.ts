@@ -145,6 +145,7 @@ function settings(over: Partial<SettingsPayload> = {}): SettingsPayload {
     update_hour: 3,
     update_cadence: { kind: 'daily' },
     update_prereleases: false,
+    sleep_timer_mode: 'fade',
     ...over,
   }
 }
