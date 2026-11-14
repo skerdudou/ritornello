@@ -519,6 +519,30 @@ export interface SettingsPayload {
    * core remembers on each `SetSleepTimer` and keeps across a `PUT`.
    */
   sleep_timer_mode: SleepMode
+  /**
+   * The alarm clocks. Part of the full replace a `PUT /api/settings` is: a
+   * body without them empties the list.
+   */
+  alarms: Alarm[]
+}
+/** What an alarm plays. Mirrors `state::AlarmTarget` (tagged by `kind`). */
+export type AlarmTarget = { kind: 'resume' } | { kind: 'source'; name: string }
+/** The sleep timer an alarm arms when it fires. Mirrors `state::AlarmSleep`. */
+export interface AlarmSleep { minutes: number; mode: SleepMode }
+/**
+ * One alarm clock. Mirrors `state::Alarm`. `id` is assigned by this page
+ * (highest + 1) and only identifies the alarm within the list; `sleep_after`
+ * is absent, never `null`, when the alarm arms no sleep timer.
+ */
+export interface Alarm {
+  id: number
+  enabled: boolean
+  hour: number
+  minute: number
+  days: Weekday[]
+  target: AlarmTarget
+  volume: number
+  sleep_after?: AlarmSleep
 }
 /**
  * State of the player, as pushed by `/api/player`: everything that is volatile.

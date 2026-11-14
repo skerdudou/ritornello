@@ -10,6 +10,7 @@ import {
 import { computed, onMounted, onUnmounted, ref, type Component } from 'vue'
 import { RouterLink } from 'vue-router'
 import AddLanguageDialog from '../components/AddLanguageDialog.vue'
+import AlarmList from '../components/AlarmList.vue'
 import CoverCacheDetails from '../components/CoverCacheDetails.vue'
 import InstallablesDialog from '../components/InstallablesDialog.vue'
 import SourcesDialog from '../components/SourcesDialog.vue'
@@ -24,7 +25,7 @@ import { packSourceLabel } from '../composables/packSource'
 import { useCatalog } from '../composables/useCatalog'
 import { usePlugins } from '../composables/usePlugins'
 import type {
-  AudioPayload, ContractGap, LanguageBusy, LanguagePackRow, LocalePayload,
+  Alarm, AudioPayload, ContractGap, LanguageBusy, LanguagePackRow, LocalePayload,
   Refusal, SettingsPayload, UpdatePayload,
 } from '../types'
 
@@ -84,6 +85,7 @@ const settings = ref<SettingsPayload>({
   // Not edited on this page; sent back as read, and the core keeps its own
   // value across a PUT anyway.
   sleep_timer_mode: 'fade',
+  alarms: [],
 })
 
 /**
@@ -851,6 +853,32 @@ async function saveSettings() {
 }
 
 /**
+ * The Alarms card's single write (`AlarmList`'s `persist`): the whole
+ * settings body with the next alarm list in it, since the route is a full
+ * replace. The list on the page moves only once the core accepted it, so a
+ * refused write (422, its message in the usual toast) leaves every line, and
+ * every switch, as it was.
+ */
+async function persistAlarms(next: Alarm[]): Promise<boolean> {
+  const err = await api.put('/api/settings', { ...settingsPayload(), alarms: next })
+  if (err) {
+    toast.error(err)
+    return false
+  }
+  settings.value.alarms = next
+  toast.success(t.value('ok'))
+  return true
+}
+
+/**
+ * What an alarm may play, besides "Resume": every source plugin the plugin
+ * table lists, by name, in its order — the names `wake_on` takes.
+ */
+const alarmSources = computed(() =>
+  plugins.value.filter((p) => p.kinds.includes('source')).map((p) => p.name),
+)
+
+/**
  * The two update gestures. Neither refreshes `/api/update` a single time
  * after its `POST` resolves: the worker acts asynchronously, so a lone
  * reload right after would very often still read the pre-gesture state —
@@ -1299,6 +1327,7 @@ const SECTIONS = [
   { id: 'audio', key: 'audio_output' },
   { id: 'display', key: 'display_card_title' },
   { id: 'startup', key: 'startup_title' },
+  { id: 'alarms', key: 'alarms_title' },
   { id: 'player', key: 'player_card_title' },
   { id: 'covers', key: 'cover_card_title' },
 ] as const
@@ -2022,6 +2051,21 @@ function goTo(id: string) {
               </SelectContent>
             </Select>
             <Button data-startup-change @click="saveSettings">{{ t('save') }}</Button>
+          </CardContent>
+        </Card>
+      </section>
+
+      <!-- Alarms: no Save button, each gesture writes at once (`persistAlarms`). -->
+      <section id="alarms" class="scroll-mt-6">
+        <Card>
+          <CardHeader><CardTitle>{{ t('alarms_title') }}</CardTitle></CardHeader>
+          <CardContent>
+            <AlarmList
+              :alarms="settings.alarms ?? []"
+              :sources="alarmSources"
+              :clock24h="settings.clock_24h"
+              :persist="persistAlarms"
+            />
           </CardContent>
         </Card>
       </section>

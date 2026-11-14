@@ -104,6 +104,7 @@ const settings = ref<SettingsPayload>({
   update_cadence: { kind: 'daily' },
   update_prereleases: false,
   sleep_timer_mode: 'fade',
+  alarms: [],
 })
 onMounted(async () => {
   settings.value = await api.get<SettingsPayload>('/api/settings').catch(() => settings.value)

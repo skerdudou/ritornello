@@ -78,6 +78,7 @@ const CATALOGUE = {
   cover_max_pixels_label: 'Plafond de décodage (Mpx)',
   cover_max_pixels_help: 'Lu dans l’en-tête.',
   toc_label: 'sections',
+  alarms_title: 'Réveils',
   update_title: 'Mises à jour',
   update_check: 'Vérifier',
   update_install: 'Installer',
@@ -2092,6 +2093,84 @@ describe('ConfigView — settings', () => {
   })
 })
 
+describe('ConfigView — alarms', () => {
+  beforeEach(() => {
+    resetMocks()
+    globalThis.ResizeObserver ??= class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+  })
+
+  const ALARMS = [
+    { id: 1, enabled: true, hour: 7, minute: 0, days: ['monday'], target: { kind: 'resume' }, volume: 30 },
+    {
+      id: 2, enabled: true, hour: 8, minute: 15, days: ['saturday', 'sunday'],
+      target: { kind: 'source', name: 'radio' }, volume: 50,
+      sleep_after: { minutes: 60, mode: 'fade' },
+    },
+  ]
+
+  function withAlarms(over: Record<string, unknown> = {}) {
+    return { '/api/settings': { ...(payloads()['/api/settings'] as object), alarms: ALARMS, ...over } }
+  }
+
+  it('the switch on a line PUTs the whole settings with only that alarm flipped', async () => {
+    const { w, puts } = await mountView(withAlarms())
+    await w.get('[data-alarm-enabled="2"]').trigger('click')
+    await flushPromises()
+    const expected = structuredClone(ALARMS)
+    expected[1]!.enabled = false
+    expect(puts).toEqual([
+      {
+        url: '/api/settings',
+        body: {
+          volume_repeat_initial_ms: 1000, volume_repeat_interval_ms: 500, startup_power: 'on',
+          overlay_ms: 5000, tens_window_ms: 5000, seek_step_s: 10,
+          cover_cache_budget_mio: 50, cover_download_max_mio: 2,
+          cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
+          cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16, cover_rendition: true,
+          update_policy: 'off', update_hour: 3, update_cadence: { kind: 'daily' },
+          update_prereleases: false,
+          alarms: expected,
+        },
+      },
+    ])
+    expect(toast.success).toHaveBeenCalledWith('OK')
+    expect(w.get('[data-alarm-enabled="2"]').attributes('aria-checked')).toBe('false')
+    // The next write starts from the accepted list, not from the one first read.
+    await w.get('[data-alarm-enabled="1"]').trigger('click')
+    await flushPromises()
+    expect((puts[1]!.body as { alarms: { enabled: boolean }[] }).alarms.map((a) => a.enabled))
+      .toEqual([false, false])
+  })
+
+  it('a refused write is reported by a toast and leaves the switch as it was', async () => {
+    const { w } = await mountView(withAlarms(), 'Two alarms share the same id')
+    await w.get('[data-alarm-enabled="2"]').trigger('click')
+    await flushPromises()
+    expect(toast.error).toHaveBeenCalledWith('Two alarms share the same id')
+    expect(w.get('[data-alarm-enabled="2"]').attributes('aria-checked')).toBe('true')
+  })
+
+  it('offers the source plugins of the plugin table as targets', async () => {
+    const { w } = await mountView(withAlarms())
+    await w.get('[data-alarm-open="1"]').trigger('click')
+    await flushPromises()
+    const values = w
+      .findAllComponents(SelectItem)
+      .map((i) => String(i.props('value')))
+      .filter((v) => v === 'resume' || v.startsWith('source:'))
+    expect(values).toEqual(['resume', 'source:radio', 'source:cd'])
+  })
+
+  it('writes the alarm times with the device clock setting', async () => {
+    const { w } = await mountView(withAlarms({ clock_24h: false }))
+    expect(w.findAll('[data-alarm-time]').map((e) => e.text())).toEqual(['7:00 AM', '8:15 AM'])
+  })
+})
+
 describe('ConfigView — overlays', () => {
   beforeEach(resetMocks)
 
@@ -3062,10 +3141,11 @@ describe('ConfigView — table of contents', () => {
     // table of contents must not keep an entry pointing at nothing. Ten cards
     // are seven here (task 4): "Langue et affichage" folds in the old
     // "Langue", "Date et heure" and "Incrustations" entries, and "Lecteur"
-    // folds in "Volume maintenu" and "Déplacement".
+    // folds in "Volume maintenu" and "Déplacement". "Réveils" came with the
+    // alarms, an eighth card of its own.
     expect(links.map((l) => l.text())).toEqual([
-      'Mises à jour', 'Plugins', 'Sortie audio', 'Langue et affichage', 'Démarrage', 'Lecteur',
-      "Pochettes d'album",
+      'Mises à jour', 'Plugins', 'Sortie audio', 'Langue et affichage', 'Démarrage', 'Réveils',
+      'Lecteur', "Pochettes d'album",
     ])
     // Hidden on small screens: the column follows the shell width, there is no
     // room for it on mobile.
@@ -3075,7 +3155,7 @@ describe('ConfigView — table of contents', () => {
   it('lists one entry per card, not one per former card', async () => {
     const { w } = await mountView({})
     const entries = w.findAll('[data-toc-link]').map((l) => l.text())
-    expect(entries).toHaveLength(7)
+    expect(entries).toHaveLength(8)
     expect(entries).not.toContain('Incrustations')
   })
 
