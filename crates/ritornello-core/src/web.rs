@@ -96,10 +96,7 @@ pub fn serves_shell(path: &str) -> bool {
     // above; this extends it to the shell's own namespace. `/robots.txt` and
     // `/apple-touch-icon.png` now get an honest 404 too, instead of a page.
     let last = path.rsplit('/').next().unwrap_or(path);
-    if last.contains('.') {
-        return false;
-    }
-    true
+    !last.contains('.')
 }
 
 pub fn inject_theme(html: &str, theme: &str, mode: &str) -> String {
