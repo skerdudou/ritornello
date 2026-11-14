@@ -1674,6 +1674,44 @@ loop; four things remain unobserved:
   answers `state: stop` without a song, and `currentsong` answers the armed
   track; no client has been pointed at it in that state.
 
+**The sleep timer and the alarms have never run on the Pi.** Both are proven
+by tests with a fake player and tokio's paused clock, the console's rendering
+by tests on composed lines; nothing below has been observed on the device:
+
+- the fade's **audibility** on the real output: twenty linear steps of 500 ms
+  on mpv's volume, whether that sounds like a fade or like steps on the Pi's
+  card or a Bluetooth speaker, and whether a step that mpv answers late
+  stretches it;
+- the **order of mpv's events** the end-of-track wait relies on. Two cases
+  are read from the code, not measured: after a Play, if mpv does not notify
+  the initial `playlist-pos`/`chapter`, the first real track change only
+  records the position and one boundary is swallowed (the 5-minute cap then
+  ends the wait); and on a CD resume, a `playlist-pos` 0 arriving before the
+  disc is open could read chapter 0 against the resumed chapter as a
+  boundary and start the fade one track early;
+- **stations whose ICY never changes** — a fixed slogan in place of the
+  title, a stream whose `metadata` plugins stay silent, a third-party source
+  that declares no identity — find no boundary and always reach the
+  5-minute cap before fading;
+- the **alarm catch-up after a real update**, and after a **rollback**. The
+  rollback consumes the installer's marker and the restored core reads the
+  rollback's own report, whose instant is the rollback's, not the original
+  stop's: an alarm whose minute fell between the original stop and the
+  rollback, more than about a minute before the latter, may be missed.
+  Closing that gap needs the updater to carry the first instant, and the
+  updater is outside this feature's bounds;
+- the **marker's freshness window** (ten minutes, see [the update
+  restart](interface.md#automatic-update-policy)): a crash or a manual
+  restart inside it is taken for the update's restart, so the sleep timer
+  is resurrected and missed alarms are caught up, where any other restart
+  would drop the one and catch up nothing;
+- **the Pi's clock before NTP sync.** A Pi has no battery-backed clock;
+  until the network sets it, `fake-hwclock` gives the time the device last
+  saved, and an alarm due meanwhile rings late — or, its minute passed by
+  the time the clock jumps forward, not at all. A firing minute recorded
+  while the clock was far ahead is treated as stale rather than blocking,
+  but that path too is tested, not observed.
+
 **The rollback only recognises "does not start."** It watches the service
 failing to come up — systemd's start-limit plus `OnFailure=` on the unit —
 which is what a marker-and-restart scheme can cheaply detect. A core that

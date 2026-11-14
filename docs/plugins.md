@@ -1740,7 +1740,22 @@ is therefore byte-for-byte the payload that used to travel bare, which is
 what made that migration verifiable.
 
 - `{"frame":"state","data":{…}}` — the `PlayerState`, up to once a second
-  while something plays.
+  while something plays. From `display` contract 1.3 it may carry two more
+  fields, both **absent** rather than `null` when there is nothing to say, so
+  an older frame reads unchanged (see [Sleep timer and
+  alarms](interface.md#sleep-timer-and-alarms) for the behaviour behind
+  them):
+  - `sleep_timer` — `{"ends_at_unix_s":…,"mode":"immediate"|"fade"|"end_of_track","phase":"armed"|"waiting_end_of_track"|"fading"}`,
+    a running sleep timer. `ends_at_unix_s` is a wall-clock instant whose
+    meaning follows the phase: the deadline while `armed`, the 5-minute cap
+    while `waiting_end_of_track`, the end of the fade while `fading`. The
+    **consumer computes the time left** itself: the core republishes when
+    the timer changes (armed, extended, a new phase, cancelled), never a
+    frame per second for the timer alone — a display that shows a countdown
+    needs a clock of its own, as the console's heartbeat is;
+  - `next_alarm` — `{"weekday":"monday","hour":7,"minute":0}`, the next
+    enabled alarm, in the device's local time; it moves at each minute check
+    and with each change of the alarm list.
 - `{"frame":"catalog","data":{…}}` — the declared sources, in
   `SourceCycle` order, and for each one that can enumerate them its named
   presets (see [`ListPresets`](#ritornello-plugin-radio--internet-radio) in
@@ -1865,6 +1880,15 @@ This bundled plugin (`RITORNELLO_CONSOLE_TTY` variable, default
 - third line: `artist — title`, with the same four fallbacks (both, either
   one alone, neither) it always had.
 
+Two additions ride on existing lines, each left out whole when it would pass
+twenty columns: a running sleep timer's minutes at the end of the first line
+(`▶ RADIO  3/12  Z 10m`, computed from `sleep_timer.ends_at_unix_s` and
+rounded up), and in standby the next alarm after the clock on the second
+(`07:12  A Mon 07:00`). Plain letters and English day names, for the reasons
+given in [On the console display](interface.md#on-the-console-display). The
+ten-second heartbeat that advances the standby clock also runs while a timer
+is set, since the core sends no frame for the countdown.
+
 The position that now rides in every `PlayerState` frame finds no line of
 its own here: all three are already spoken for — source and count, name or
 album or status, artist and title — and the core publishes one such frame
@@ -1959,6 +1983,15 @@ Plugins built with the Rust SDK return an `InputMessage` from
 `next_command`; `From<Command>` covers the non-held case, so a plugin that
 never sends held repeats can keep returning a bare `Command` — the wire
 format stays backward compatible either way.
+
+`input` contract 1.1 adds the sleep timer's three commands:
+`SetSleepTimer` (`{"minutes":…,"mode":"immediate"|"fade"|"end_of_track"}`,
+replacing any running timer), `ExtendSleepTimer` (minutes added to the
+running timer; past its deadline, counted from now) and `CancelSleepTimer`.
+The core drops all three in standby. This plugin binds none of them — a
+physical key for the timer is out of scope — but any input plugin may send
+them; the web page's menu does (see [Sleep timer and
+alarms](interface.md#sleep-timer-and-alarms)).
 
 **Updating an existing installation** (old hard-coded-keyboard
 `ritornello-plugin-mce`): the old `deploy.sh` removed the
