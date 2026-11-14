@@ -251,6 +251,11 @@ pub struct Settings {
     /// Written by the core when a timer is armed (`Command::SetSleepTimer`),
     /// never by the config page: `Core::set_settings` keeps the core's own
     /// value over whatever a `PUT /api/settings` carries.
+    ///
+    /// Lenient at load: a mode this core does not know (written by a newer
+    /// one before a rollback) reads as `Fade` instead of taking `load`'s
+    /// all-or-nothing path, which would reset every other setting.
+    #[serde(deserialize_with = "lenient_sleep_mode")]
     pub sleep_timer_mode: ritornello_proto::SleepMode,
 
     /// The alarm clocks, as edited on the config page (`PUT /api/settings`).
@@ -303,13 +308,91 @@ pub struct AlarmSleep {
     pub mode: ritornello_proto::SleepMode,
 }
 
-/// Keeps every array element that reads as an `Alarm` and drops the rest with
-/// a warning; anything but an array reads as no alarm. One malformed alarm
-/// (hand-edited, or written by a future version) must never take `load`'s
-/// all-or-nothing path, which would reset every other setting.
+/// Bounds of a sleep timer, in minutes: the menu's (`Command::SetSleepTimer`,
+/// `Command::ExtendSleepTimer`) and an alarm's `sleep_after` alike. Ten hours
+/// at the top: past that it is no longer a timer to fall asleep with.
+pub const SLEEP_TIMER_MINUTES: std::ops::RangeInclusive<u16> = 1..=600;
+
+/// What is wrong with an alarm list. One list of rules for both readers: a
+/// `PUT /api/settings` refuses the first problem (`validate_alarms`), and
+/// `load` drops the alarm that has it (`lenient_alarms`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlarmProblem {
+    Hour,
+    Minute,
+    NoDays,
+    Volume,
+    DuplicateId,
+    SleepMinutes,
+    EmptySourceName,
+    /// An element of the `alarms` array that does not read as an alarm at all
+    /// (a number out of range for its type, a missing field, an unknown
+    /// target kind), or an `alarms` that is not an array. Only the PUT
+    /// refuses it; `load` drops it instead.
+    Malformed,
+}
+
+impl Alarm {
+    /// The rules one alarm obeys on its own — every rule but the uniqueness
+    /// of its id, which only a list can judge (`alarm_list_problems`). Each
+    /// refuses something that would make an alarm never ring, ring at a time
+    /// that does not exist, or be ambiguous.
+    pub fn problem(&self) -> Option<AlarmProblem> {
+        if self.hour > 23 {
+            return Some(AlarmProblem::Hour);
+        }
+        if self.minute > 59 {
+            return Some(AlarmProblem::Minute);
+        }
+        if self.days.is_empty() {
+            return Some(AlarmProblem::NoDays);
+        }
+        if self.volume > 100 {
+            return Some(AlarmProblem::Volume);
+        }
+        if let Some(sleep) = &self.sleep_after
+            && !SLEEP_TIMER_MINUTES.contains(&sleep.minutes)
+        {
+            return Some(AlarmProblem::SleepMinutes);
+        }
+        if let AlarmTarget::Source { name } = &self.target
+            && name.trim().is_empty()
+        {
+            return Some(AlarmProblem::EmptySourceName);
+        }
+        None
+    }
+}
+
+/// What is wrong with each alarm of `alarms`, in order: its own problem
+/// (`Alarm::problem`), else `DuplicateId` when an earlier **valid** alarm
+/// already holds its id — so dropping every problem keeps the first of two
+/// duplicates, and a broken alarm never shadows a good one's id.
+pub fn alarm_list_problems(alarms: &[Alarm]) -> Vec<Option<AlarmProblem>> {
+    let mut seen = std::collections::HashSet::new();
+    alarms
+        .iter()
+        .map(|a| match a.problem() {
+            Some(p) => Some(p),
+            None if !seen.insert(a.id) => Some(AlarmProblem::DuplicateId),
+            None => None,
+        })
+        .collect()
+}
+
+/// Keeps every array element that reads as an `Alarm` and obeys the alarm
+/// rules (`alarm_list_problems`), and drops the rest with a warning; anything
+/// but an array reads as no alarm. One malformed alarm (hand-edited, or
+/// written by a future version) must never take `load`'s all-or-nothing
+/// path, which would reset every other setting — and one that parses but
+/// breaks a rule must not be kept to ring at a time that does not exist.
+///
+/// `PUT /api/settings` reads through here too, which is why it checks the
+/// raw array strictly first (`check_alarms_parse`): there a dropped alarm
+/// would be silent data loss answered with a success.
 fn lenient_alarms<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Alarm>, D::Error> {
     let v = serde_json::Value::deserialize(d)?;
-    Ok(match v {
+    let parsed: Vec<Alarm> = match v {
         serde_json::Value::Array(items) => items
             .into_iter()
             .filter_map(|i| match serde_json::from_value::<Alarm>(i.clone()) {
@@ -321,7 +404,26 @@ fn lenient_alarms<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Alarm>, 
             })
             .collect(),
         _ => Vec::new(),
-    })
+    };
+    let problems = alarm_list_problems(&parsed);
+    Ok(parsed
+        .into_iter()
+        .zip(problems)
+        .filter_map(|(a, problem)| match problem {
+            None => Some(a),
+            Some(problem) => {
+                tracing::warn!(?problem, alarm = ?a, "dropping an invalid alarm from the settings");
+                None
+            }
+        })
+        .collect())
+}
+
+/// A sleep-timer mode this core cannot read is `Fade`, the default: only the
+/// menu's preselection is lost (`Settings::sleep_timer_mode`).
+fn lenient_sleep_mode<'de, D: serde::Deserializer<'de>>(d: D) -> Result<ritornello_proto::SleepMode, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).unwrap_or(ritornello_proto::SleepMode::Fade))
 }
 
 impl Default for Settings {
@@ -457,17 +559,19 @@ pub struct PersistedState {
     pub pack_preferences: Vec<PackPreference>,
     /// The last minute an alarm fired in (`core::alarms::minute_index`): what
     /// keeps an alarm from ringing twice in one minute, across a restart too.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Lenient at load: see `lenient_option`.
+    #[serde(default, deserialize_with = "lenient_option", skip_serializing_if = "Option::is_none")]
     pub last_alarm_minute: Option<i64>,
     /// The same firing, as the local clock named it: what keeps an alarm in
-    /// the hour repeated by the autumn change from ringing twice.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// the hour repeated by the autumn change from ringing twice. Lenient at
+    /// load: see `lenient_option`.
+    #[serde(default, deserialize_with = "lenient_option", skip_serializing_if = "Option::is_none")]
     pub last_alarm_local: Option<LocalMinute>,
     /// The running sleep timer, written on every arm, extend, cancel and
     /// expiry. Read back only by the restart an update provokes
     /// (`Core::startup` with `StartupOverride::Previous`); every other start
-    /// drops it. Lenient at load: see `lenient_sleep`.
-    #[serde(default, deserialize_with = "lenient_sleep", skip_serializing_if = "Option::is_none")]
+    /// drops it. Lenient at load: see `lenient_option`.
+    #[serde(default, deserialize_with = "lenient_option", skip_serializing_if = "Option::is_none")]
     pub sleep_timer: Option<PersistedSleep>,
 }
 
@@ -482,10 +586,15 @@ pub struct PersistedSleep {
     pub mode: ritornello_proto::SleepMode,
 }
 
-/// A timer that does not read as one is no timer at all, never a reason to
-/// take `load`'s all-or-nothing path (`PersistedState.fallback`'s doc
-/// measured why).
-fn lenient_sleep<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<PersistedSleep>, D::Error> {
+/// A value that does not read as its type is no value at all, never a reason
+/// to take `load`'s all-or-nothing path (`PersistedState.fallback`'s doc
+/// measured why): a timer that does not read as one is no timer, and an
+/// alarm memory that does not is no memory (at worst one more ring).
+fn lenient_option<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
     let v = serde_json::Value::deserialize(d)?;
     Ok(serde_json::from_value(v).ok())
 }
@@ -658,6 +767,92 @@ mod tests {
         assert_eq!(st.settings.overlay_ms, 3000, "another setting must survive the bad alarm");
         assert_eq!(st.settings.alarms.len(), 1);
         assert_eq!(st.settings.alarms[0].id, 2);
+    }
+
+    fn load_text(text: &str) -> PersistedState {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, text).unwrap();
+        load(&path)
+    }
+
+    /// A rollback under a core that knew one more way to end a timer: only
+    /// the menu's preselection goes back to `Fade`, never every setting.
+    #[test]
+    fn a_sleep_timer_mode_this_core_does_not_know_reads_as_fade_and_keeps_every_other_setting() {
+        for wire in [r#""lullaby""#, "7", "null", r#"{"kind":"fade"}"#] {
+            let text = format!(
+                r#"{{"active_source":"cd","volume":33,"settings":{{"overlay_ms":3000,"sleep_timer_mode":{wire}}}}}"#
+            );
+            let st = load_text(&text);
+            assert_eq!((st.volume, st.active_source.as_str()), (33, "cd"), "{wire}");
+            assert_eq!(st.settings.overlay_ms, 3000, "{wire}");
+            assert_eq!(st.settings.sleep_timer_mode, ritornello_proto::SleepMode::Fade, "{wire}");
+        }
+        // A known mode still reads as itself.
+        let st = load_text(r#"{"active_source":"cd","volume":33,"settings":{"sleep_timer_mode":"end_of_track"}}"#);
+        assert_eq!(st.settings.sleep_timer_mode, ritornello_proto::SleepMode::EndOfTrack);
+    }
+
+    /// The alarms' memory of their last firing is no reason to reset the
+    /// state: a value of the wrong shape is no memory at all.
+    #[test]
+    fn a_malformed_alarm_memory_is_dropped_alone() {
+        let base = r#""active_source":"cd","volume":33,"settings":{"overlay_ms":3000}"#;
+        for field in [
+            r#""last_alarm_minute":"yesterday""#,
+            r#""last_alarm_minute":1.5"#,
+            r#""last_alarm_local":"07:30""#,
+            r#""last_alarm_local":{"day_key":1,"hour":300,"minute":0}"#,
+        ] {
+            let st = load_text(&format!("{{{base},{field}}}"));
+            assert_eq!((st.volume, st.active_source.as_str()), (33, "cd"), "{field}");
+            assert_eq!(st.settings.overlay_ms, 3000, "{field}");
+            assert_eq!((st.last_alarm_minute, st.last_alarm_local), (None, None), "{field}");
+        }
+        // Well-formed values still read back.
+        let st = load_text(&format!(
+            r#"{{{base},"last_alarm_minute":42,"last_alarm_local":{{"day_key":1,"hour":7,"minute":30}}}}"#
+        ));
+        assert_eq!(st.last_alarm_minute, Some(42));
+        assert_eq!(st.last_alarm_local, Some(LocalMinute { day_key: 1, hour: 7, minute: 30 }));
+    }
+
+    /// An alarm that parses but breaks one of the PUT's rules is dropped at
+    /// load, alone: the same rules (`Alarm::problem`), one case per rule.
+    #[test]
+    fn an_alarm_that_breaks_a_rule_is_dropped_at_load() {
+        let alarm = |id: u32, extra: &str| {
+            let mut v = serde_json::json!({
+                "id": id, "enabled": true, "hour": 7, "minute": 0, "days": ["monday"],
+                "target": {"kind": "resume"}, "volume": 30
+            });
+            let extra: serde_json::Value = serde_json::from_str(extra).unwrap();
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            v
+        };
+        let alarms = serde_json::json!([
+            alarm(1, "{}"),
+            alarm(2, r#"{"hour": 24}"#),
+            alarm(3, r#"{"minute": 60}"#),
+            alarm(4, r#"{"days": []}"#),
+            alarm(5, r#"{"volume": 101}"#),
+            alarm(6, r#"{"sleep_after": {"minutes": 0, "mode": "fade"}}"#),
+            alarm(7, r#"{"sleep_after": {"minutes": 601, "mode": "fade"}}"#),
+            alarm(8, r#"{"target": {"kind": "source", "name": " "}}"#),
+            // A duplicate: the later one goes.
+            alarm(1, r#"{"hour": 9}"#),
+            // A broken alarm does not shadow a good one's id.
+            alarm(10, r#"{"hour": 99}"#),
+            alarm(10, r#"{"hour": 8, "sleep_after": {"minutes": 600, "mode": "fade"}}"#),
+        ]);
+        let st = load_text(&format!(r#"{{"active_source":"cd","volume":33,"settings":{{"overlay_ms":3000,"alarms":{alarms}}}}}"#));
+        assert_eq!(st.volume, 33);
+        assert_eq!(st.settings.overlay_ms, 3000);
+        let kept: Vec<(u32, u8)> = st.settings.alarms.iter().map(|a| (a.id, a.hour)).collect();
+        assert_eq!(kept, vec![(1, 7), (10, 8)]);
     }
 
     fn customised() -> PersistedState {

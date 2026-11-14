@@ -653,11 +653,15 @@ impl<P: Player> Core<P> {
             }
             // Only reached awake: `handle_command`'s standby gate drops all
             // three, so a timer is never armed on a sleeping device.
+            // Outside `SLEEP_TIMER_MINUTES` (0, or more than ten hours) it is
+            // not a timer the menu can send: ignored, not even remembered.
             Command::SetSleepTimer { minutes, mode } => {
-                self.arm_sleep_timer(minutes, mode).await;
-                // The menu's choice, remembered for the next timer.
-                self.settings.sleep_timer_mode = mode;
-                self.persist();
+                if crate::state::SLEEP_TIMER_MINUTES.contains(&minutes) {
+                    // The menu's choice, remembered for the next timer: set
+                    // before arming, whose own write then carries it.
+                    self.settings.sleep_timer_mode = mode;
+                    self.arm_sleep_timer(minutes, mode).await;
+                }
             }
             Command::ExtendSleepTimer(minutes) => self.extend_sleep_timer(minutes).await,
             Command::CancelSleepTimer => self.cancel_sleep_timer().await,

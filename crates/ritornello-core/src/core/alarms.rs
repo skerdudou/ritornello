@@ -237,13 +237,19 @@ impl<P: Player> Core<P> {
     /// What an alarm does to the device.
     ///
     /// Already playing (awake, not paused, muted or not), it does nothing at
-    /// all: no volume, no source, no timer. Otherwise it unmutes, sets its
-    /// volume (applied and persisted, with no overlay), then plays its
-    /// target: in standby, the waking half of Power (`resume`), or `wake_on`
-    /// its source; awake, paused or stopped, the Play half of Play/Pause
-    /// (never Power, which would put the device to sleep), or a switch to its
-    /// source if another one is active. A source that is not wired falls
-    /// back to "resume". Last, the sleep timer it carries is armed.
+    /// all: no volume, no source, no timer. Otherwise it first cancels any
+    /// running sleep timer (restoring mpv's volume if it was fading: a timer
+    /// set the night before must not put the device back to sleep minutes
+    /// after it woke, nor a fade's ramp go on under the alarm's volume). Then
+    /// it unmutes, sets its volume (applied and persisted, with no overlay),
+    /// and plays its target: in standby, the waking half of Power (`resume`),
+    /// or `wake_on` its source; awake, paused or stopped, the Play half of
+    /// Play/Pause (never Power, which would put the device to sleep), or a
+    /// switch to its source if another one is active. A source that is not
+    /// wired falls back to "resume". If after a wake or a switch nothing
+    /// plays — a source whose arrival plays nothing, the cd by default — it
+    /// is asked to play as the Play key asks it (`play`): an alarm is meant
+    /// to wake its owner to music. Last, the sleep timer it carries is armed.
     ///
     /// Best effort throughout: a step that fails is logged and the next one
     /// still runs, so an mpv that misses the unmute does not cost the wake.
@@ -253,6 +259,7 @@ impl<P: Player> Core<P> {
             return;
         }
         tracing::info!("alarm {} rings", alarm.id);
+        self.cancel_sleep_timer().await;
         // Believed unmuted once mpv agrees, never before.
         match self.player.set_mute(false).await {
             Ok(()) => self.muted = false,
@@ -281,10 +288,17 @@ impl<P: Player> Core<P> {
             (false, Some(name)) if name != self.active_source => {
                 self.cycle_source(Some(name), SourceReq::Activate).await
             }
-            (false, _) => self.play().await,
+            // Already on its source, paused or stopped: the Play key below.
+            (false, _) => Ok(()),
         };
         if let Err(e) = outcome {
             tracing::warn!("alarm wake: {e}");
+        }
+        // The Play key: unpauses, asks a stopped source to play — one whose
+        // wake or arrival played nothing included — and leaves alone a
+        // source that is already playing.
+        if let Err(e) = self.play().await {
+            tracing::warn!("alarm play: {e}");
         }
         if let Some(sleep) = alarm.sleep_after {
             self.arm_sleep_timer(sleep.minutes, sleep.mode).await;
@@ -616,6 +630,90 @@ mod tests {
         // path: an update restart keeps the alarm's timer as any other.
         let written = on_disk(&d).sleep_timer.expect("the alarm's timer is written");
         assert_eq!((written.ends_at_unix_s, written.mode), (st.ends_at_unix_s, SleepMode::Fade));
+    }
+
+    /// The cd answers its wake with nothing (its arrival is "nothing" by
+    /// default): without the Play the alarm would wake a silent device.
+    #[tokio::test]
+    async fn alarm_on_a_source_whose_wake_plays_nothing_asks_it_to_play() {
+        let (mut core, pc, sc, _rx, _d) =
+            setup_persisted(PersistedState { volume: 20, active_source: "cd".into(), ..Default::default() });
+        core.start_in_standby().await.unwrap();
+        clear(&pc);
+        clear(&sc);
+        with_alarms(&mut core, vec![ringing_at(T, AlarmTarget::Resume, 35)]);
+        core.check_alarms(T).await;
+        let log = sc.lock().unwrap().clone();
+        let wake = log.iter().position(|c| c == "cd:Wake").expect("woken first");
+        let play = log.iter().position(|c| c == "cd:Play").expect("then asked to play");
+        assert!(wake < play, "{log:?}");
+        assert!(core.playback, "{log:?}");
+        assert!(has(&pc, "play cdda://"), "{:?}", pc.lock().unwrap());
+    }
+
+    /// A source that does play on its wake gets no second request.
+    #[tokio::test]
+    async fn alarm_on_a_source_whose_wake_plays_sends_no_extra_play() {
+        let (mut core, _pc, sc, _rx, _d) = in_standby().await;
+        with_alarms(&mut core, vec![ringing_at(T, AlarmTarget::Resume, 35)]);
+        core.check_alarms(T).await;
+        assert!(has(&sc, "radio:Wake") && core.playback, "{:?}", sc.lock().unwrap());
+        assert!(!has(&sc, "radio:Play"), "{:?}", sc.lock().unwrap());
+        // Awake and stopped, the Play key's request is sent once.
+        let (mut core, _pc, sc, _rx, _d) = playing().await;
+        core.handle_command(Command::Stop).await.unwrap();
+        clear(&sc);
+        with_alarms(&mut core, vec![ringing_at(T, AlarmTarget::Resume, 35)]);
+        core.check_alarms(T).await;
+        let plays = sc.lock().unwrap().iter().filter(|c| *c == "radio:Play").count();
+        assert_eq!(plays, 1, "{:?}", sc.lock().unwrap());
+    }
+
+    /// A fade whose playback ended before its own end: the alarm takes the
+    /// device over, the fade's ramp does not go on under the alarm's volume.
+    #[tokio::test(start_paused = true)]
+    async fn alarm_during_a_fade_cancels_it_and_keeps_its_own_volume() {
+        let (mut core, pc, _sc, _rx, d) = playing().await;
+        core.handle_command(Command::SetSleepTimer { minutes: 1, mode: SleepMode::Fade }).await.unwrap();
+        tokio::time::advance(Duration::from_secs(60)).await;
+        core.on_sleep_deadline().await;
+        for _ in 0..4 {
+            tokio::time::advance(Duration::from_millis(500)).await;
+            core.on_sleep_deadline().await;
+        }
+        assert_eq!(core.sleep_timer_state().map(|s| s.phase), Some(SleepPhase::Fading));
+        // The content ran out mid-fade.
+        core.playback = false;
+        clear(&pc);
+        with_alarms(&mut core, vec![ringing_at(T, AlarmTarget::Resume, 35)]);
+        core.check_alarms(T).await;
+        assert_eq!(core.sleep_timer_state(), None);
+        assert_eq!(core.sleep_deadline(), None);
+        assert_eq!(core.volume, 35);
+        let vols = || -> Vec<String> { pc.lock().unwrap().iter().filter(|c| c.starts_with("vol ")).cloned().collect() };
+        assert_eq!(vols().last().map(String::as_str), Some("vol 35"), "{:?}", pc.lock().unwrap());
+        // Nothing of the fade is left to step.
+        tokio::time::advance(Duration::from_secs(10)).await;
+        core.on_sleep_deadline().await;
+        assert!(!core.standby);
+        assert_eq!(vols().last().map(String::as_str), Some("vol 35"), "{:?}", pc.lock().unwrap());
+        assert_eq!(on_disk(&d).volume, 35);
+        assert_eq!(on_disk(&d).sleep_timer, None);
+    }
+
+    /// A timer set the night before must not put the device back to sleep
+    /// minutes after the alarm woke it.
+    #[tokio::test(start_paused = true)]
+    async fn alarm_without_sleep_after_cancels_an_armed_timer() {
+        let (mut core, _pc, _sc, _rx, d) = playing().await;
+        core.handle_command(Command::SetSleepTimer { minutes: 30, mode: SleepMode::Immediate }).await.unwrap();
+        core.handle_command(Command::Stop).await.unwrap();
+        assert_eq!(core.sleep_timer_state().map(|s| s.phase), Some(SleepPhase::Armed));
+        with_alarms(&mut core, vec![ringing_at(T, AlarmTarget::Resume, 35)]);
+        core.check_alarms(T).await;
+        assert!(core.playback);
+        assert_eq!(core.sleep_timer_state(), None);
+        assert_eq!(on_disk(&d).sleep_timer, None);
     }
 
     #[tokio::test]

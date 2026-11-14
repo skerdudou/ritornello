@@ -276,21 +276,30 @@ impl<P: Player> Core<P> {
         self.persist();
     }
 
-    /// Pushes the deadline back by `minutes`. A fade is abandoned — volume
-    /// restored — and the timer re-armed from now. No timer: nothing.
+    /// Pushes the deadline back by `minutes`, never past the longest timer
+    /// (`SLEEP_TIMER_MINUTES`) from now. A fade is abandoned — volume
+    /// restored — and the timer re-armed from now. No timer, or zero
+    /// minutes: nothing.
     pub(super) async fn extend_sleep_timer(&mut self, minutes: u16) {
         let Some(timer) = self.sleep else { return };
+        if minutes == 0 {
+            return;
+        }
+        let longest = *crate::state::SLEEP_TIMER_MINUTES.end();
         match timer.phase {
             Phase::Armed { deadline, ends_at_unix_s } => {
-                let span = minutes_span(minutes);
+                let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                let added = (left + minutes_span(minutes)).min(minutes_span(longest)).saturating_sub(left);
                 self.sleep = Some(SleepTimer {
                     mode: timer.mode,
-                    phase: Phase::Armed { deadline: deadline + span, ends_at_unix_s: ends_at_unix_s + span.as_secs() },
+                    phase: Phase::Armed { deadline: deadline + added, ends_at_unix_s: ends_at_unix_s + added.as_secs() },
                 });
                 self.persist();
             }
             // Past the deadline: "+15 min" counts from now.
-            Phase::Fading { .. } | Phase::WaitingEndOfTrack { .. } => self.arm_sleep_timer(minutes, timer.mode).await,
+            Phase::Fading { .. } | Phase::WaitingEndOfTrack { .. } => {
+                self.arm_sleep_timer(minutes.min(longest), timer.mode).await
+            }
         }
     }
 
@@ -692,6 +701,54 @@ mod tests {
         assert_eq!(disk(), SleepMode::EndOfTrack);
         arm(&mut core, 15, SleepMode::Immediate).await;
         assert_eq!(disk(), SleepMode::Immediate);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn set_sleep_timer_outside_its_bounds_is_ignored() {
+        let (mut core, _calls, _sc, _rx, dir) = playing_at(40).await;
+        for minutes in [0, 601, u16::MAX] {
+            arm(&mut core, minutes, SleepMode::Immediate).await;
+            assert_eq!(core.sleep_timer_state(), None, "{minutes}");
+            assert_eq!(core.sleep_timer_mode(), SleepMode::Fade, "{minutes}: not even remembered");
+        }
+        assert_eq!(crate::state::load(&dir.path().join("state.json")).settings.sleep_timer_mode, SleepMode::Fade);
+        // Both ends are timers.
+        for minutes in [1, 600] {
+            arm(&mut core, minutes, SleepMode::Immediate).await;
+            let left = core.sleep_deadline().unwrap() - tokio::time::Instant::now().into_std();
+            assert_eq!(left, minutes_span(minutes), "{minutes}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn extend_never_leaves_more_than_ten_hours() {
+        let (mut core, _calls, _sc, _rx, dir) = playing_at(40).await;
+        let left = |core: &Core<FakePlayer>| core.sleep_deadline().unwrap() - tokio::time::Instant::now().into_std();
+        arm(&mut core, 590, SleepMode::Fade).await;
+        let ends_at = core.sleep_timer_state().unwrap().ends_at_unix_s;
+        core.handle_command(Command::ExtendSleepTimer(EXTEND_MINUTES)).await.unwrap();
+        assert_eq!(left(&core), minutes_span(600));
+        // The wall clock moves with the deadline, by the 10 min granted.
+        assert_eq!(core.sleep_timer_state().unwrap().ends_at_unix_s, ends_at + 600);
+        let disk = crate::state::load(&dir.path().join("state.json")).sleep_timer.unwrap();
+        assert_eq!(disk.ends_at_unix_s, ends_at + 600);
+        // Already at the ceiling: nothing more.
+        core.handle_command(Command::ExtendSleepTimer(EXTEND_MINUTES)).await.unwrap();
+        assert_eq!(left(&core), minutes_span(600));
+        // Under the ceiling, the whole step; zero minutes: nothing.
+        arm(&mut core, 30, SleepMode::Fade).await;
+        core.handle_command(Command::ExtendSleepTimer(0)).await.unwrap();
+        assert_eq!(left(&core), minutes_span(30));
+        core.handle_command(Command::ExtendSleepTimer(EXTEND_MINUTES)).await.unwrap();
+        assert_eq!(left(&core), minutes_span(45));
+        // Past the deadline, zero minutes leave the fade alone; any other
+        // step re-arms from now, under the same ceiling.
+        fading(&mut core).await;
+        core.handle_command(Command::ExtendSleepTimer(0)).await.unwrap();
+        assert_eq!(core.sleep_timer_state().map(|s| s.phase), Some(SleepPhase::Fading));
+        core.handle_command(Command::ExtendSleepTimer(700)).await.unwrap();
+        assert_eq!(core.sleep_timer_state().map(|s| s.phase), Some(SleepPhase::Armed));
+        assert_eq!(left(&core), minutes_span(600));
     }
 
     #[tokio::test(start_paused = true)]

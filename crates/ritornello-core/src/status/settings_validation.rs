@@ -100,40 +100,30 @@ pub enum SettingsError {
     Alarm(AlarmProblem),
 }
 
-/// Bounds of an alarm's optional sleep timer, in minutes.
-pub(super) const ALARM_SLEEP_MINUTES: std::ops::RangeInclusive<u16> = 1..=600;
+/// What is wrong with the alarm list, defined next to the rules themselves
+/// (`state::Alarm::problem`), which `state::load` applies too. No bounds are
+/// quoted: the SPA's editor cannot produce any of these, so the sentence only
+/// has to say which rule a hand-written request broke.
+pub use crate::state::AlarmProblem;
 
-/// What is wrong with the alarm list. No bounds are quoted: the SPA's editor
-/// cannot produce any of these, so the sentence only has to say which rule a
-/// hand-written request broke.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AlarmProblem {
-    Hour,
-    Minute,
-    NoDays,
-    Volume,
-    DuplicateId,
-    SleepMinutes,
-    EmptySourceName,
-    /// An element of the `alarms` array that does not read as an alarm at all
-    /// (a number out of range for its type, a missing field, an unknown
-    /// target kind). Only the PUT refuses it; `state::load` drops it instead.
-    Malformed,
-}
-
-/// Refuses a request whose `alarms` array holds an element that does not
-/// parse as an `Alarm`. `Settings` itself reads that array leniently (a
-/// damaged `state.json` must not reset every setting), and on a PUT that
-/// leniency would turn into silent data loss answered with a success.
+/// Checks a request's `alarms` strictly, on the raw body: an `alarms` that is
+/// not an array, an element that does not parse as an `Alarm`, or one that
+/// breaks an alarm rule is refused. `Settings` itself reads that array
+/// leniently, dropping such an alarm (a damaged `state.json` must not reset
+/// every setting, nor keep an alarm that cannot ring), and on a PUT that
+/// leniency would turn into silent data loss answered with a success. An
+/// absent `alarms` is no alarm (the struct's default), not an error.
 pub fn check_alarms_parse(body: &serde_json::Value) -> Result<(), SettingsError> {
-    if let Some(serde_json::Value::Array(items)) = body.get("alarms") {
-        for item in items {
-            if serde_json::from_value::<crate::state::Alarm>(item.clone()).is_err() {
-                return Err(SettingsError::Alarm(AlarmProblem::Malformed));
-            }
-        }
-    }
-    Ok(())
+    let Some(alarms) = body.get("alarms") else { return Ok(()) };
+    let alarms: Vec<crate::state::Alarm> = match alarms {
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(|item| serde_json::from_value(item.clone()))
+            .collect::<Result<_, _>>()
+            .map_err(|_| SettingsError::Alarm(AlarmProblem::Malformed))?,
+        _ => return Err(SettingsError::Alarm(AlarmProblem::Malformed)),
+    };
+    validate_alarms(&alarms).map_err(SettingsError::Alarm)
 }
 
 impl AlarmProblem {
@@ -348,38 +338,13 @@ pub fn validate_settings(s: &crate::state::Settings) -> Result<(), SettingsError
     validate_alarms(&s.alarms).map_err(SettingsError::Alarm)
 }
 
-/// The alarm list's rules. Each one refuses something that would make an
-/// alarm never ring, ring at a time that does not exist, or be ambiguous.
+/// The alarm list's first problem, by the rules `state::load` applies too
+/// (`state::alarm_list_problems`): a PUT refuses what a load would drop.
 fn validate_alarms(alarms: &[crate::state::Alarm]) -> Result<(), AlarmProblem> {
-    let mut seen = std::collections::HashSet::new();
-    for a in alarms {
-        if a.hour > 23 {
-            return Err(AlarmProblem::Hour);
-        }
-        if a.minute > 59 {
-            return Err(AlarmProblem::Minute);
-        }
-        if a.days.is_empty() {
-            return Err(AlarmProblem::NoDays);
-        }
-        if a.volume > 100 {
-            return Err(AlarmProblem::Volume);
-        }
-        if !seen.insert(a.id) {
-            return Err(AlarmProblem::DuplicateId);
-        }
-        if let Some(sleep) = &a.sleep_after
-            && !ALARM_SLEEP_MINUTES.contains(&sleep.minutes)
-        {
-            return Err(AlarmProblem::SleepMinutes);
-        }
-        if let crate::state::AlarmTarget::Source { name } = &a.target
-            && name.trim().is_empty()
-        {
-            return Err(AlarmProblem::EmptySourceName);
-        }
+    match crate::state::alarm_list_problems(alarms).into_iter().flatten().next() {
+        Some(problem) => Err(problem),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -533,6 +498,32 @@ mod tests {
         assert_eq!(
             bad(&|a| a.target = AlarmTarget::Source { name: "  ".into() }),
             Err(SettingsError::Alarm(AlarmProblem::EmptySourceName))
+        );
+    }
+
+    /// The raw check of a PUT: an `alarms` that is not an array is refused,
+    /// not read as "no alarm" (which would wipe the list with a success), and
+    /// an alarm that breaks a rule is refused there, before the lenient parse
+    /// that drops it.
+    #[test]
+    fn the_raw_alarm_check_refuses_a_non_array_and_a_broken_rule() {
+        use serde_json::json;
+        for alarms in [json!({}), json!(3), json!(null), json!("x"), json!(true)] {
+            assert_eq!(
+                check_alarms_parse(&json!({ "alarms": alarms })),
+                Err(SettingsError::Alarm(AlarmProblem::Malformed)),
+                "{alarms}"
+            );
+        }
+        assert_eq!(check_alarms_parse(&json!({ "overlay_ms": 3000 })), Ok(()), "absent: no alarm");
+        assert_eq!(check_alarms_parse(&json!({ "alarms": [] })), Ok(()));
+        let good = serde_json::to_value(good_alarm(1)).unwrap();
+        assert_eq!(check_alarms_parse(&json!({ "alarms": [good] })), Ok(()));
+        let mut late = good.clone();
+        late["hour"] = json!(24);
+        assert_eq!(
+            check_alarms_parse(&json!({ "alarms": [good, late] })),
+            Err(SettingsError::Alarm(AlarmProblem::Hour))
         );
     }
 
