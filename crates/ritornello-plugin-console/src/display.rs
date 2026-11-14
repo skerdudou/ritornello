@@ -82,8 +82,11 @@ pub fn unix_now() -> Option<u64> {
 }
 
 /// Minutes left on the sleep timer, rounded **up**: `0:30` left reads `1m`,
-/// so the figure only reaches `0m` once the deadline has passed (the timer is
-/// then waiting for the end of the track, or fading out).
+/// so the figure only reaches `0m` once `ends_at_unix_s` has passed. That
+/// instant follows the phase: the deadline while armed, then the 5-minute
+/// cap while waiting for the end of the track, then the end of the fade —
+/// so waiting reads up to `5m` and fading `1m`, not `0m`; `0m` shows only in
+/// the gap before the core's next frame.
 ///
 /// Computed here from the deadline: the core does not push a frame per second
 /// for the timer, only when its state changes.
@@ -761,7 +764,9 @@ mod tests {
         // 1 s short of the deadline still reads one minute; 61 s reads two.
         assert_eq!(compose_full(&st, None, Some(1_000_599))[0], "▶ RADIO  3/12  Z 1m");
         assert_eq!(compose_full(&st, None, Some(1_000_539))[0], "▶ RADIO  3/12  Z 2m");
-        // Past the deadline (waiting for the end of the track, fading): 0m.
+        // Past `ends_at_unix_s` with no newer frame yet: 0m. (Waiting and
+        // fading do not read 0m: their frames move `ends_at_unix_s` to the
+        // cap or to the end of the fade.)
         assert_eq!(compose_full(&st, None, Some(1_000_700))[0], "▶ RADIO  3/12  Z 0m");
     }
 
