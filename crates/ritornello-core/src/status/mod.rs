@@ -554,13 +554,22 @@ async fn settings_json(State(state): State<AppState>) -> Json<crate::state::Sett
 /// whole. A field absent from the body falls back to its default (the struct
 /// is `serde(default)`), which is the price of reusing the state type — fine
 /// on a single-user device.
-async fn settings_put(State(state): State<AppState>, Json(req): Json<crate::state::Settings>) -> Response {
+async fn settings_put(State(state): State<AppState>, Json(mut req): Json<crate::state::Settings>) -> Response {
     if let Err(e) = validate_settings(&req) {
         let msg = e.message(&*state.catalog.read().await);
         return (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": msg })))
             .into_response();
     }
-    *state.settings_current.write().await = req.clone();
+    {
+        // The sleep timer's remembered mode is written by its menu through the
+        // core (`main` mirrors it here), never by this page: a body carrying
+        // an older copy, or none at all, must not replace it in what
+        // `GET /api/settings` serves. The core ignores it too
+        // (`Core::set_settings`).
+        let mut current = state.settings_current.write().await;
+        req.sleep_timer_mode = current.sleep_timer_mode;
+        *current = req.clone();
+    }
     if state.settings_tx.send(req).await.is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
@@ -1543,6 +1552,34 @@ mod tests {
         assert_eq!(received.tens_window_ms, 9000);
         assert_eq!(settings_current.read().await.volume_repeat_interval_ms, 250);
         assert_eq!(settings_current.read().await.tens_window_ms, 9000);
+    }
+
+    #[tokio::test]
+    async fn put_settings_keeps_the_remembered_sleep_timer_mode() {
+        // A body without the field (serde default: `fade`) and one with a
+        // stale value: neither replaces the mode the timer's menu chose.
+        for body in [r#"{"overlay_ms":3000}"#, r#"{"overlay_ms":3000,"sleep_timer_mode":"fade"}"#] {
+            let (state, mut settings_rx) = app_state_with_settings();
+            state.settings_current.write().await.sleep_timer_mode = ritornello_proto::SleepMode::EndOfTrack;
+            let app = router(state);
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::put("/api/settings")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NO_CONTENT, "{body}");
+            assert_eq!(settings_rx.recv().await.unwrap().overlay_ms, 3000);
+            let resp = app.oneshot(Request::get("/api/settings").body(Body::empty()).unwrap()).await.unwrap();
+            let served = resp.into_body().collect().await.unwrap().to_bytes();
+            let v: serde_json::Value = serde_json::from_slice(&served).unwrap();
+            assert_eq!(v["sleep_timer_mode"], "end_of_track", "{body}");
+            assert_eq!(v["overlay_ms"], 3000, "{body}");
+        }
     }
 
     #[tokio::test]

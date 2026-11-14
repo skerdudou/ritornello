@@ -252,6 +252,10 @@ impl<P: Player> Core<P> {
         // "VOLUME 65 %" stayed on screen for up to 2 s after
         // power-off before the standby word appeared.
         self.overlay = None;
+        // A pending `+10` goes with its overlay. `apply_command`'s abandon
+        // guard already drops it on the Power key, but a sleep timer's
+        // standby does not pass through `apply_command`.
+        self.pending_tens = 0;
         // `standby_status` is not resolved here: it already is,
         // since construction and every `set_locale` (see its
         // doc) — never again at the moment standby is entered.

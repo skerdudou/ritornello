@@ -383,6 +383,47 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn mute_during_fade_keeps_fading() {
+        let (mut core, calls, _sc, _rx, _d) = playing_at(40).await;
+        fading(&mut core).await;
+        fade_steps(&mut core, 5).await;
+        core.handle_command(Command::Mute).await.unwrap();
+        assert!(core.muted);
+        assert!(calls.lock().unwrap().contains(&"mute true".to_string()));
+        assert_eq!(phase(&core), Some(SleepPhase::Fading));
+        fade_steps(&mut core, 15).await;
+        assert!(core.standby);
+        let v = volumes(&calls);
+        let (restore, ramp) = v.split_last().unwrap();
+        assert_eq!(ramp.len(), usize::from(FADE_STEPS), "{v:?}");
+        assert!(ramp.windows(2).all(|w| w[0] > w[1]), "{v:?}");
+        assert_eq!(*restore, 40);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timer_standby_drops_a_pending_tens_offset() {
+        // The deadline's standby does not pass through `apply_command`, whose
+        // abandon guard is what drops the offset on the Power key.
+        for mode in [SleepMode::Immediate, SleepMode::Fade] {
+            let (mut core, _calls, _sc, _rx, _d) = playing_at(40).await;
+            arm(&mut core, 1, mode).await;
+            after(&mut core, Duration::from_secs(59)).await;
+            if mode == SleepMode::Fade {
+                after(&mut core, Duration::from_secs(1)).await;
+                fade_steps(&mut core, FADE_STEPS - 1).await;
+            }
+            core.handle_command(Command::Plus10).await.unwrap();
+            assert_eq!(core.pending_tens, 10, "{mode:?}");
+            assert!(!core.standby, "{mode:?}");
+            // The last step: the deadline, or the fade's last step.
+            after(&mut core, if mode == SleepMode::Fade { FADE_STEP } else { Duration::from_secs(1) }).await;
+            assert!(core.standby, "{mode:?}");
+            assert_eq!(core.pending_tens, 0, "{mode:?}");
+            assert!(core.overlay.is_none(), "{mode:?}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn cancel_during_fade_restores_volume_and_keeps_playing() {
         let (mut core, calls, _sc, _rx, _d) = playing_at(40).await;
         fading(&mut core).await;
