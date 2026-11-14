@@ -250,8 +250,8 @@ impl<P: Player> Core<P> {
                 },
                 twelve_hour: !self.settings.clock_24h,
             },
-            // Filled in by the sleep-timer and alarm tasks that follow.
-            sleep_timer: None,
+            sleep_timer: self.sleep_timer_state(),
+            // Filled in by the alarm tasks that follow.
             next_alarm: None,
             track: {
                 let mut m = self.metadata.state();

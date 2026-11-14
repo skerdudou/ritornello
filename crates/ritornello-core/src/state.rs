@@ -244,6 +244,14 @@ pub struct Settings {
     /// for, never something a device starts installing because nobody said
     /// otherwise.
     pub update_prereleases: bool,
+
+    /// How the sleep timer ends, as last chosen in its menu: remembered from
+    /// one timer to the next, so the menu opens on the previous choice.
+    ///
+    /// Written by the core when a timer is armed (`Command::SetSleepTimer`),
+    /// never by the config page: `Core::set_settings` keeps the core's own
+    /// value over whatever a `PUT /api/settings` carries.
+    pub sleep_timer_mode: ritornello_proto::SleepMode,
 }
 
 impl Default for Settings {
@@ -302,6 +310,8 @@ impl Default for Settings {
             // Finished releases only, for the same reason `update_policy` is
             // `Off`: this is an appetite an owner declares.
             update_prereleases: false,
+            // A fade: the gentlest ending, and the proto's own default.
+            sleep_timer_mode: ritornello_proto::SleepMode::Fade,
         }
     }
 }
@@ -834,6 +844,8 @@ mod tests {
                 // whether a device is offered unfinished software, so
                 // "survived the round trip" is exactly what must be proven.
                 update_prereleases: true,
+                // Not the default (`Fade`), for the same reason.
+                sleep_timer_mode: ritornello_proto::SleepMode::Immediate,
             },
             ..Default::default()
         };

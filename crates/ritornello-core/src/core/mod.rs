@@ -14,6 +14,7 @@
 //! - `position`: progress reported by mpv, anchor set by a plugin
 //! - `publish`: player state and sources_catalog pushed to displays, SPA and plugins
 //! - `settings`: audio output, language, theme, writing `state.json`
+//! - `sleep_timer`: the sleep timer — countdown, fade, standby at the deadline
 //! - `sources`: cycle order, switching, hotplug arrival and a plugin's death, `apply`
 //! - `test_support`: fake player and sources, rigs shared by the tests
 
@@ -43,6 +44,7 @@ mod track_metadata;
 mod position;
 mod publish;
 mod settings;
+mod sleep_timer;
 mod sources;
 pub use deadlines::next_deadline;
 
@@ -509,6 +511,10 @@ pub struct Core<P: Player> {
     /// the reason `cover_archive_task` gives.
     #[cfg(test)]
     lyrics_archive_task: Option<tokio::task::JoinHandle<()>>,
+    /// The running sleep timer, if any (see `sleep_timer.rs`). Never
+    /// persisted: a restart loses it, by the owner's decision. Cleared by
+    /// every entry into standby (`enter_standby`).
+    sleep: Option<sleep_timer::SleepTimer>,
 }
 
 /// What the detached read of an armed file (`Core::arm`) found: its tags
@@ -660,6 +666,7 @@ impl<P: Player> Core<P> {
             lyrics_archive_attempted: None,
             #[cfg(test)]
             lyrics_archive_task: None,
+            sleep: None,
         };
         // The sources wired at startup are already known: without this
         // publication, the channel would keep its blank

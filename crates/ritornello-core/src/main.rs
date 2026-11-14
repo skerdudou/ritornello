@@ -2580,6 +2580,15 @@ async fn main() -> Result<()> {
                 None => std::future::pending().await,
             }
         };
+        // Sleep timer: its countdown, then each step of a fade. Absolute, and
+        // read before the `select!` like `overlay_at`, for the same reasons.
+        let sleep_at = core.sleep_deadline().map(tokio::time::Instant::from);
+        let sleep_timer_sleep = async {
+            match sleep_at {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
         // Position tick: one second, armed only when there is a position to
         // publish (see `Core::tick_position`).
         //
@@ -2618,6 +2627,13 @@ async fn main() -> Result<()> {
                     tracing::warn!("command: {e}");
                 }
                 status_state.write().await.active_source = core.active_source().to_string();
+                // The sleep timer's remembered mode is the one setting a
+                // command writes: the copy `GET /api/settings` serves must
+                // follow, or the menu would reopen on the previous choice.
+                let mode = core.sleep_timer_mode();
+                if settings_current.read().await.sleep_timer_mode != mode {
+                    settings_current.write().await.sleep_timer_mode = mode;
+                }
             }
             // Closed channel (mpv pump dead): the `Some(..)` pattern stops
             // matching and `tokio::select!` disables the arm — the
@@ -3128,6 +3144,9 @@ async fn main() -> Result<()> {
             }
             _ = overlay_sleep => {
                 core.expire_overlay();
+            }
+            _ = sleep_timer_sleep => {
+                core.on_sleep_deadline().await;
             }
             _ = position_sleep => {
                 // Rearm first, from now: the cadence stays at one second no
