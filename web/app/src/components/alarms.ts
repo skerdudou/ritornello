@@ -1,4 +1,5 @@
 import type { Alarm, Weekday } from '../types'
+import { SLEEP_TIMER_MAX, SLEEP_TIMER_MIN } from './sleepTimer'
 
 /**
  * The order the day toggles and the chips are drawn in: Monday first, the
@@ -9,9 +10,12 @@ export const WEEK: readonly Weekday[] = [
   'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
 ]
 
-/** Bounds the core enforces (`settings_validation.rs`); the dialog mirrors them. */
-export const ALARM_SLEEP_MIN = 1
-export const ALARM_SLEEP_MAX = 600
+/**
+ * Bounds the core enforces (`settings_validation.rs`); the dialog mirrors them.
+ * The same as the sleep timer's own, in the core as here.
+ */
+export const ALARM_SLEEP_MIN = SLEEP_TIMER_MIN
+export const ALARM_SLEEP_MAX = SLEEP_TIMER_MAX
 
 /** What a new alarm opens on: weekday mornings, resuming, no sleep timer. */
 export const NEW_ALARM_HOUR = 7

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import {
-  Button, Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger,
+  Button, Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, Input,
 } from '@ritornello/ui'
 import { computed, onUnmounted, ref, watch } from 'vue'
 import SleepTimerIcon from './icons/SleepTimerIcon.vue'
@@ -8,7 +8,8 @@ import { useCatalog } from '../composables/useCatalog'
 import type { Command, PlayerPayload, SleepMode } from '../types'
 import { unavailable } from '../views/remoteCommands'
 import {
-  formatRemaining, remainingSeconds, SLEEP_MODES, SLEEP_TIMER_EXTEND_MIN, SLEEP_TIMER_MINUTES,
+  customMinutes, formatRemaining, remainingSeconds, SLEEP_MODES, SLEEP_TIMER_EXTEND_MIN,
+  SLEEP_TIMER_MAX, SLEEP_TIMER_MIN, SLEEP_TIMER_MINUTES,
 } from './sleepTimer'
 
 /**
@@ -24,7 +25,8 @@ import {
  * is then only the 5-minute cap, not worth counting down) or fading out.
  *
  * A click opens the menu: the end mode, then the durations, each of which
- * starts a timer at once (replacing a running one); while a timer runs,
+ * starts a timer at once (replacing a running one), then a free field for any
+ * other whole number of minutes within the core's bounds; while a timer runs,
  * "+15 min" and "Cancel" come first. A dialog rather than a dropdown: the
  * kit has no dropdown menu, and its dialog brings the focus trap, Escape
  * and the phone-sized layout for free.
@@ -50,8 +52,18 @@ const open = ref(false)
 const remembered = ref<SleepMode>(props.mode)
 watch(() => props.mode, (m) => (remembered.value = m))
 const chosen = ref<SleepMode>(props.mode)
+// The free duration: a string once edited (`Input` binds the native value),
+// read through `customMinutes`, never trusted as a number. Empty at each
+// opening, like the mode it goes with.
+const typed = ref<string | number>('')
+const typedMinutes = computed(() => customMinutes(typed.value))
+// Empty is "not yet typed", not a mistake: no red border for it.
+const typedInvalid = computed(() => String(typed.value).trim() !== '' && typedMinutes.value === null)
 watch(open, (isOpen) => {
-  if (isOpen) chosen.value = remembered.value
+  if (isOpen) {
+    chosen.value = remembered.value
+    typed.value = ''
+  }
 })
 
 const timer = computed(() => props.state?.sleep_timer ?? null)
@@ -102,6 +114,9 @@ function fire(cmd: Command) {
 function start(minutes: number) {
   remembered.value = chosen.value
   fire({ cmd: 'SetSleepTimer', arg: { minutes, mode: chosen.value } })
+}
+function startTyped() {
+  if (typedMinutes.value !== null) start(typedMinutes.value)
 }
 </script>
 
@@ -172,6 +187,28 @@ function start(minutes: number) {
             {{ t('sleep_timer_minutes', { n }) }}
           </Button>
         </div>
+        <form data-sleep-custom class="flex items-center gap-2" @submit.prevent="startTyped">
+          <Input
+            v-model="typed"
+            data-sleep-custom-minutes
+            type="number" inputmode="numeric" :min="SLEEP_TIMER_MIN" :max="SLEEP_TIMER_MAX" step="1"
+            class="w-24"
+            :placeholder="t('sleep_timer_custom_placeholder')"
+            :aria-label="t('sleep_timer_custom')"
+            :aria-invalid="typedInvalid ? 'true' : undefined"
+          />
+          <span class="text-sm">{{ t('sleep_timer_custom_unit') }}</span>
+          <Button
+            type="submit"
+            variant="outline"
+            size="sm"
+            class="ml-auto"
+            data-sleep-custom-start
+            :disabled="typedMinutes === null"
+          >
+            {{ t('sleep_timer_custom_start') }}
+          </Button>
+        </form>
       </div>
     </DialogContent>
   </Dialog>
