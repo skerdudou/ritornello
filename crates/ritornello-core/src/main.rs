@@ -2448,6 +2448,9 @@ async fn main() -> Result<()> {
         let listener = tokio::net::TcpListener::bind(&http_addr).await.with_context(|| format!("bind {http_addr}"))?;
         tracing::info!("web interface on http://{http_addr}/");
         tokio::spawn(async move {
+            // With connect info: the update routes name the client that asked
+            // for a check or an install (`update::routes::requester`).
+            let app = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
             if let Err(e) = axum::serve(listener, app).await {
                 tracing::error!("status server: {e}");
             }

@@ -8,8 +8,9 @@
 use crate::status::AppState;
 use crate::update::catalogue::{self, Catalogue};
 use crate::update::sources;
-use axum::extract::State;
-use axum::http::StatusCode;
+use axum::extract::{ConnectInfo, State};
+use axum::http::{Extensions, StatusCode};
+use std::net::SocketAddr;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
@@ -304,8 +305,24 @@ pub async fn sources_delete(
 /// Enqueues a check. Answers 202 even when one is already running: the page
 /// polls `GET /api/update` for the outcome, and a 409 here would make it
 /// invent a second way of saying "busy" that `busy` already says.
-pub async fn update_check_post(State(state): State<AppState>) -> Response {
+pub async fn update_check_post(State(state): State<AppState>, extensions: Extensions) -> Response {
+    tracing::info!("update: check requested by {}", requester(&extensions));
     enqueue(&state, crate::update::Job::Check)
+}
+
+/// Who sent a request, for the log: the client's address when the server was
+/// started with connect info (`main` does), `an unknown client` otherwise.
+///
+/// **Why the two gestures are logged at all.** "I only pressed Check and it
+/// installed the core" was reported from the device, and nothing in the
+/// journal could say which page — which device — had asked for what: the
+/// worker logs the job, never where it came from, and the scheduled run is
+/// the only other source of an install. One line per gesture, naming the
+/// client, settles the question the next time it is asked.
+fn requester(extensions: &Extensions) -> String {
+    extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map_or_else(|| "an unknown client".to_string(), |c| c.0.ip().to_string())
 }
 
 /// Puts a job on the worker's queue **without ever waiting for room**.
@@ -342,11 +359,13 @@ fn enqueue(state: &AppState, job: crate::update::Job) -> Response {
 /// have to hold the same knowledge and could disagree with it.
 pub async fn update_install_post(
     State(state): State<AppState>,
+    extensions: Extensions,
     Json(req): Json<InstallReq>,
 ) -> Response {
     if req.components.is_empty() {
         return StatusCode::BAD_REQUEST.into_response();
     }
+    tracing::info!("update: install of {:?} requested by {}", req.components, requester(&extensions));
     let consented = req.from.into_iter().collect();
     enqueue(&state, crate::update::Job::Install { names: req.components, consented })
 }
@@ -501,6 +520,69 @@ mod tests {
             Ok(crate::update::Job::Install { names, consented })
                 if names == vec!["radio".to_string()] && consented.is_empty()
         ));
+    }
+
+    /// Runs `request` through the router and returns what it logged.
+    async fn logged(request: Request<Body>) -> String {
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone, Default)]
+        struct Buffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buffer {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for Buffer {
+            type Writer = Buffer;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let (state, _rx) = state_with_queue(4);
+        let buffer = Buffer::default();
+        let subscriber = tracing_subscriber::fmt().with_writer(buffer.clone()).with_ansi(false).finish();
+        // `#[tokio::test]` is single-threaded: the per-thread subscriber
+        // holds across the `.await`.
+        let guard = tracing::subscriber::set_default(subscriber);
+        let resp = router(state).oneshot(request).await.unwrap();
+        drop(guard);
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap()
+    }
+
+    fn from_client(mut request: Request<Body>) -> Request<Body> {
+        let addr: std::net::SocketAddr = "192.168.1.98:54441".parse().unwrap();
+        request.extensions_mut().insert(axum::extract::ConnectInfo(addr));
+        request
+    }
+
+    /// Reported from the device: "I only pressed Check and it installed the
+    /// core", and the journal could not say which device had asked for what.
+    /// Each gesture now names its client and, for an install, what it asked.
+    /// **[MUTATION]** drop either `tracing::info!`, or log a constant instead
+    /// of `requester`: red.
+    #[tokio::test]
+    async fn the_install_and_the_check_name_the_client_that_asked() {
+        let log = logged(from_client(install_request())).await;
+        assert!(log.contains("install of [\"radio\"] requested by 192.168.1.98"), "{log}");
+
+        let check = Request::post("/api/update/check").body(Body::empty()).unwrap();
+        let log = logged(from_client(check)).await;
+        assert!(log.contains("check requested by 192.168.1.98"), "{log}");
+    }
+
+    /// A server started without connect info (every test rig) still answers,
+    /// and says it does not know rather than inventing an address.
+    #[tokio::test]
+    async fn without_connect_info_the_client_is_unknown() {
+        let log = logged(install_request()).await;
+        assert!(log.contains("requested by an unknown client"), "{log}");
     }
 
     /// B3: the repository the page's second consent named travels with the
