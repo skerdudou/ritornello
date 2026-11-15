@@ -90,9 +90,40 @@ describe('SleepTimerKey', () => {
     const w = mountKey(payload(), 'immediate')
     await openMenu(w)
     await click('[data-sleep-minutes="45"]')
+    await click('[data-sleep-custom-start]')
     expect(w.emitted('command')).toEqual([[{ cmd: 'SetSleepTimer', arg: { minutes: 45, mode: 'immediate' } }]])
     // The menu closes on its own: the choice is made.
     expect(menu()).toBeNull()
+  })
+
+  it('fills the field with a duration key, without starting anything', async () => {
+    const w = mountKey(payload(), 'fade')
+    await openMenu(w)
+    await click('[data-sleep-minutes="15"]')
+    expect(w.emitted('command')).toBeUndefined()
+    expect(menu()).not.toBeNull()
+    expect((inMenu('[data-sleep-custom-minutes]') as HTMLInputElement).value).toBe('15')
+    // The key that matches the field reads as pressed, and only that one.
+    expect(inMenu('[data-sleep-minutes="15"]')!.getAttribute('aria-pressed')).toBe('true')
+    expect(inMenu('[data-sleep-minutes="30"]')!.getAttribute('aria-pressed')).toBe('false')
+    // A filled duration is corrected by hand, then started.
+    await typeMinutes('20')
+    expect(inMenu('[data-sleep-minutes="15"]')!.getAttribute('aria-pressed')).toBe('false')
+    await click('[data-sleep-custom-start]')
+    expect(w.emitted('command')).toEqual([[{ cmd: 'SetSleepTimer', arg: { minutes: 20, mode: 'fade' } }]])
+  })
+
+  it('opens on an empty field, whatever was filled before', async () => {
+    const w = mountKey(payload())
+    await openMenu(w)
+    await click('[data-sleep-minutes="90"]')
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushPromises()
+    expect(menu()).toBeNull()
+    await openMenu(w)
+    expect((inMenu('[data-sleep-custom-minutes]') as HTMLInputElement).value).toBe('')
+    expect(inMenu('[data-sleep-custom-start]')!.hasAttribute('disabled')).toBe(true)
   })
 
   it('starts a timer with the mode picked in the menu', async () => {
@@ -103,6 +134,7 @@ describe('SleepTimerKey', () => {
     expect(inMenu('[data-sleep-mode="end_of_track"]')!.getAttribute('aria-checked')).toBe('true')
     expect(inMenu('[data-sleep-mode="fade"]')!.getAttribute('aria-checked')).toBe('false')
     await click('[data-sleep-minutes="30"]')
+    await click('[data-sleep-custom-start]')
     expect(w.emitted('command')).toEqual([[{ cmd: 'SetSleepTimer', arg: { minutes: 30, mode: 'end_of_track' } }]])
   })
 
@@ -112,6 +144,7 @@ describe('SleepTimerKey', () => {
     await w.setProps({ mode: 'end_of_track' })
     await openMenu(w)
     await click('[data-sleep-minutes="15"]')
+    await click('[data-sleep-custom-start]')
     expect(w.emitted('command')).toEqual([[{ cmd: 'SetSleepTimer', arg: { minutes: 15, mode: 'end_of_track' } }]])
   })
 
