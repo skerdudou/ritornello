@@ -83,8 +83,20 @@ fn smb_root(name: &str, writable: bool) -> Root {
 }
 
 fn write_roots(tmp: &Path, roots: Vec<Root>) {
+    replace_roots_file(tmp, &toml::to_string(&Roots { root: roots }).unwrap());
+}
+
+/// Replaces the files plugin's roots file the way that plugin does: a
+/// temporary file renamed over it. `std::fs::write` truncates first, and a
+/// refresh running in a task (max age zero keeps one going) that read the
+/// empty file in between found a valid table with no root: the share was
+/// forgotten, and the broken file written next kept it forgotten. That flaked
+/// `a_failed_read_of_the_shares_keeps_the_known_list` in CI.
+fn replace_roots_file(tmp: &Path, text: &str) {
     std::fs::create_dir_all(tmp.join("files")).unwrap();
-    std::fs::write(tmp.join("files/media-roots.toml"), toml::to_string(&Roots { root: roots }).unwrap()).unwrap();
+    let staged = tmp.join("files/media-roots.toml.tmp");
+    std::fs::write(&staged, text).unwrap();
+    std::fs::rename(&staged, tmp.join("files/media-roots.toml")).unwrap();
 }
 
 /// A world around a fake yt-dlp whose body is `tool_body`; the downloads land
@@ -485,7 +497,7 @@ async fn a_failed_read_of_the_shares_keeps_the_known_list() {
     w.op(json!({ "op": "list_targets" })).await.unwrap();
     w.until("targets", |d| d["targets"] == json!(["nas"])).await;
 
-    std::fs::write(w._tmp.path().join("files/media-roots.toml"), "this is [not toml").unwrap();
+    replace_roots_file(w._tmp.path(), "this is [not toml");
     // The cache is stale at once (max age zero): the next reads try again,
     // fail, and must not forget the share.
     for _ in 0..4 {
