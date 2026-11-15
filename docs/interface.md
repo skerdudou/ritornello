@@ -719,7 +719,12 @@ during the fade.
 A click opens the menu, a dialog of the kit (which has no dropdown menu): the
 end mode first, then the durations — **15, 30, 45, 60 and 90 min** — each of
 which starts a timer at once, replacing a running one (including one an alarm
-armed). While a timer runs, **+15 min** and **Cancel** come first. The mode
+armed) — then a free field for any other duration: a **whole number of
+minutes from 1 to 600**, the core's own bounds (below), started with its
+button or Enter. Anything else (empty, 0, 601, 2.5) leaves the button
+disabled and sends nothing; the field reads `customMinutes`
+(`components/sleepTimer.ts`), and both bounds live there, shared with the
+alarm dialog. While a timer runs, **+15 min** and **Cancel** come first. The mode
 is **remembered**: the menu opens on the mode of the last timer started
 **from the menu** (an alarm's own timer does not change it), which
 the core keeps in `state.json` (`settings.sleep_timer_mode`, default `fade`,

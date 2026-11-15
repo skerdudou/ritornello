@@ -1,7 +1,7 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import SleepTimerKey from './SleepTimerKey.vue'
-import { formatRemaining, remainingSeconds } from './sleepTimer'
+import { customMinutes, formatRemaining, remainingSeconds } from './sleepTimer'
 import { resetCatalog } from '../composables/useCatalog'
 import type { PlayerPayload, SleepMode, SleepTimerState } from '../types'
 
@@ -123,6 +123,50 @@ describe('SleepTimerKey', () => {
     expect(minutes).toEqual(['15', '30', '45', '60', '90'])
   })
 
+  /** Types `value` into the free-duration field, as a person would. */
+  async function typeMinutes(value: string) {
+    const field = inMenu('[data-sleep-custom-minutes]') as HTMLInputElement | null
+    expect(field).not.toBeNull()
+    field!.value = value
+    field!.dispatchEvent(new Event('input'))
+    await flushPromises()
+  }
+
+  it('starts a timer of a typed duration, in the chosen mode', async () => {
+    const w = mountKey(payload(), 'fade')
+    await openMenu(w)
+    await click('[data-sleep-mode="end_of_track"]')
+    await typeMinutes('25')
+    await click('[data-sleep-custom-start]')
+    expect(w.emitted('command')).toEqual([[{ cmd: 'SetSleepTimer', arg: { minutes: 25, mode: 'end_of_track' } }]])
+    expect(menu()).toBeNull()
+  })
+
+  it('starts a typed duration with Enter, as a form does', async () => {
+    const w = mountKey(payload(), 'immediate')
+    await openMenu(w)
+    await typeMinutes('600')
+    inMenu('[data-sleep-custom]')!.dispatchEvent(new Event('submit', { cancelable: true }))
+    await flushPromises()
+    expect(w.emitted('command')).toEqual([[{ cmd: 'SetSleepTimer', arg: { minutes: 600, mode: 'immediate' } }]])
+  })
+
+  it('refuses a typed duration the core would ignore: empty, 0, over 600, not whole', async () => {
+    const w = mountKey(payload())
+    await openMenu(w)
+    for (const value of ['', '0', '601', '2.5', '-5']) {
+      await typeMinutes(value)
+      expect(inMenu('[data-sleep-custom-start]')!.hasAttribute('disabled'), value).toBe(true)
+      expect(inMenu('[data-sleep-custom-minutes]')!.getAttribute('aria-invalid'), value).toBe(value === '' ? null : 'true')
+      inMenu('[data-sleep-custom]')!.dispatchEvent(new Event('submit', { cancelable: true }))
+      await flushPromises()
+    }
+    expect(w.emitted('command')).toBeUndefined()
+    // Both bounds themselves are accepted.
+    await typeMinutes('1')
+    expect(inMenu('[data-sleep-custom-start]')!.hasAttribute('disabled')).toBe(false)
+  })
+
   it('counts down by itself: 29:59 one second after a 30-minute deadline', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(NOW_S * 1000)
@@ -187,5 +231,16 @@ describe('sleep timer arithmetic', () => {
     expect(formatRemaining(3599)).toBe('59:59')
     expect(formatRemaining(3600)).toBe('1:00:00')
     expect(formatRemaining(5400 + 61)).toBe('1:31:01')
+  })
+
+  it('reads a typed duration only as a whole number of minutes from 1 to 600', () => {
+    // The field binds a string once edited, a number before.
+    expect(customMinutes('25')).toBe(25)
+    expect(customMinutes(' 25 ')).toBe(25)
+    expect(customMinutes(1)).toBe(1)
+    expect(customMinutes('600')).toBe(600)
+    for (const bad of ['', '  ', '0', '601', '2.5', '-5', 'abc', '1e2x']) {
+      expect(customMinutes(bad), bad).toBeNull()
+    }
   })
 })

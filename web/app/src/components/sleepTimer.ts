@@ -3,6 +3,27 @@ import type { SleepMode } from '../types'
 /** The durations the sleep timer menu offers, in minutes. */
 export const SLEEP_TIMER_MINUTES = [15, 30, 45, 60, 90] as const
 
+/**
+ * The bounds of a timer's duration, in minutes: the core ignores a
+ * `SetSleepTimer` outside them (`state::SLEEP_TIMER_MINUTES`), the same bounds
+ * as an alarm's "turn off after".
+ */
+export const SLEEP_TIMER_MIN = 1
+export const SLEEP_TIMER_MAX = 600
+
+/**
+ * A duration typed in the menu's free field, or `null` when the core would
+ * ignore it: only a whole number of minutes within the bounds. The field binds
+ * a string once edited (a number before), so both are read; `Number('2.5')`
+ * or `Number('1e2')` would let through what the digits-only test refuses.
+ */
+export function customMinutes(value: string | number): number | null {
+  const text = String(value).trim()
+  if (!/^\d+$/.test(text)) return null
+  const n = Number(text)
+  return n >= SLEEP_TIMER_MIN && n <= SLEEP_TIMER_MAX ? n : null
+}
+
 /** What "+15 min" adds to a running timer, in minutes (`ExtendSleepTimer`). */
 export const SLEEP_TIMER_EXTEND_MIN = 15
 
