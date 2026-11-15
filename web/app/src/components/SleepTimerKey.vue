@@ -24,9 +24,11 @@ import {
  * the device is doing instead — waiting for the track to end (the deadline
  * is then only the 5-minute cap, not worth counting down) or fading out.
  *
- * A click opens the menu: the end mode, then the durations, each of which
- * starts a timer at once (replacing a running one), then a free field for any
- * other whole number of minutes within the core's bounds; while a timer runs,
+ * A click opens the menu: the end mode, then the duration. The duration keys
+ * only **fill** the field below them (the owner's choice: a key is a starting
+ * point, "15" corrected to "20" before starting), and the field takes any
+ * whole number of minutes within the core's bounds; its button or Enter
+ * starts the timer, replacing a running one. While a timer runs,
  * "+15 min" and "Cancel" come first. A dialog rather than a dropdown: the
  * kit has no dropdown menu, and its dialog brings the focus trap, Escape
  * and the phone-sized layout for free.
@@ -118,6 +120,14 @@ function start(minutes: number) {
 function startTyped() {
   if (typedMinutes.value !== null) start(typedMinutes.value)
 }
+// A duration key fills the field and hands it the focus, ready to be
+// corrected or started with Enter; it starts nothing by itself.
+const field = ref<{ $el?: HTMLElement } | HTMLElement | null>(null)
+function fill(minutes: number) {
+  typed.value = String(minutes)
+  const el = field.value instanceof HTMLElement ? field.value : field.value?.$el
+  el?.focus()
+}
 </script>
 
 <template>
@@ -179,16 +189,18 @@ function startTyped() {
           <Button
             v-for="n in SLEEP_TIMER_MINUTES"
             :key="n"
-            variant="outline"
+            :variant="typedMinutes === n ? 'default' : 'outline'"
             size="sm"
+            :aria-pressed="typedMinutes === n ? 'true' : 'false'"
             :data-sleep-minutes="n"
-            @click="start(n)"
+            @click="fill(n)"
           >
             {{ t('sleep_timer_minutes', { n }) }}
           </Button>
         </div>
         <form data-sleep-custom class="flex items-center gap-2" @submit.prevent="startTyped">
           <Input
+            ref="field"
             v-model="typed"
             data-sleep-custom-minutes
             type="number" inputmode="numeric" :min="SLEEP_TIMER_MIN" :max="SLEEP_TIMER_MAX" step="1"
@@ -200,7 +212,6 @@ function startTyped() {
           <span class="text-sm">{{ t('sleep_timer_custom_unit') }}</span>
           <Button
             type="submit"
-            variant="outline"
             size="sm"
             class="ml-auto"
             data-sleep-custom-start

@@ -155,6 +155,8 @@ describe('HomeView', () => {
     await flushPromises()
     document.body.querySelector<HTMLElement>('[data-sleep-timer-menu] [data-sleep-minutes="60"]')!.click()
     await flushPromises()
+    document.body.querySelector<HTMLElement>('[data-sleep-timer-menu] [data-sleep-custom-start]')!.click()
+    await flushPromises()
     expect(spy).toHaveBeenCalledWith(
       '/api/command',
       expect.objectContaining({
