@@ -1,12 +1,12 @@
-**Nothing to do** — replace the binaries. A device on 0.2.0 or 0.3.0-beta.1
-updates from the page once "Offer prereleases" is ticked.
+**Nothing to do** — replace the binaries. A device on 0.2.0, 0.3.0-beta.1 or
+0.3.0-beta.2 updates from the page once "Offer prereleases" is ticked.
 
-**Ritornello 0.3.0-beta.2 — the sleep timer's duration, typed.** The second
+**Ritornello 0.3.0-beta.3 — who asked for an update, in the log.** The third
 beta of the 0.3 generation. It is a prerelease: only a device that ticked
 "Offer prereleases" is offered it.
 
 No systemd unit, polkit rule, privileged updater or mount helper changed
-since 0.3.0-beta.1: the root mount helper `files-mount` 1.0.3, the privileged
+since 0.3.0-beta.2: the root mount helper `files-mount` 1.0.3, the privileged
 updater 1.0.0 and the installer 0.5.0 keep their numbers. This is not a wire
 break: no contract moved, and the bootstrap `PROTOCOL_VERSION` did not move.
 <!-- The opening block above is this release's answer to "is there anything
@@ -42,7 +42,26 @@ break: no contract moved, and the bootstrap `PROTOCOL_VERSION` did not move.
      together. A rollback of the core leaves every plugin refused until the
      core is reinstalled. -->
 
-## Behaviour changes since 0.3.0-beta.1
+## Behaviour changes since 0.3.0-beta.2
+
+**The journal names who asked for an update.** Pressing "Check for updates"
+or confirming an install now writes one line in the journal with the address
+of the device that asked, and for an install the components it asked for:
+`update: check requested by 192.168.0.32`,
+`update: install of ["core"] requested by 192.168.0.32`. An install the night
+schedule starts keeps its own line (`scheduled update run`), so the two can
+no longer be confused.
+
+The web page is built with this week's patch releases of Vue, Vite and
+Tailwind; nothing visible changes.
+
+This release carries `ritornello-core` as `0.3.0-beta.3`, and nothing else.
+The language packs stay on their 0.3.0-beta.2 archives, in the v0.3.0-beta.2
+release; the console and web-streaming plugins on their 0.3.0-beta.1
+archives, in the v0.3.0-beta.1 release; every other plugin on its 0.2.0
+archive, in the v0.2.0 release.
+
+## Since 0.3.0-beta.1
 
 **Sleep timer: any duration.** The menu has a field for the duration, in
 whole minutes from 1 to 600, started with **Start** or Enter. The keys 15,
@@ -51,11 +70,6 @@ field, so "15" can be corrected to "20" before starting. The field is empty
 at each opening, and anything outside the bounds keeps **Start** greyed.
 
 French, German, Spanish and Italian cover the new texts.
-
-This release carries, each as `0.3.0-beta.2`: `ritornello-core` and the
-language packs fr, de, es, it. The console and web-streaming plugins stay on
-their 0.3.0-beta.1 archives, in the v0.3.0-beta.1 release; every other plugin
-on its 0.2.0 archive, in the v0.2.0 release.
 
 ## Since 0.2.0, for a device coming from it
 
