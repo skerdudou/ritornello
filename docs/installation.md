@@ -1499,9 +1499,12 @@ ffmpeg 6.1.1:
   clicked on any change faster than about 2.5 dB/s, while the shelf jumped
   0 to -12 dB and back without a measurable click. That was measured on WSL
   only, never heard on the Pi's output. The shelf is flat within 0.21 dB from
-  31 Hz up, but below about 20 Hz it attenuates less: infrasound is not
-  compensated. Whether a biquad this low stays stable in the Pi's float path
-  is unverified;
+  31 Hz up and attenuates less below (half its gain at 10 Hz); the automatic
+  compensation is computed on the shelf's real curve together with the
+  bands, down to 10 Hz, and leaves what lies below 10 Hz untouched. The
+  shelf's formula was checked against the WSL measurements only, never
+  against the Pi. Whether a biquad this low stays stable in the Pi's float
+  path is unverified;
 - whether changing the audio output keeps the live gains is unknown: mpv may
   rebuild the chain from `af` when it reloads the output, so the core rewrites
   the chain after every output change while the equalizer is on — a rewrite
