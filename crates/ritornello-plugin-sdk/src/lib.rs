@@ -1,6 +1,7 @@
 pub mod args;
 pub mod client;
 pub mod declare;
+pub mod embedded;
 pub mod runtime;
 pub mod server;
 
