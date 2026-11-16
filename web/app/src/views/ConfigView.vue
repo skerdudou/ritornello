@@ -645,8 +645,9 @@ async function movePlugin(name: string, to: number) {
  * `declaredOrder` no longer carries. The arrows compute their target
  * position from this rather than from the row's index in the full table,
  * which also lists rows nothing declares. (A drag needs no such lookup: the
- * list already reports positions among the declared rows, and the table
- * reads the name from `declaredOrder`.) */
+ * list already reports positions among the declared rows, and hands over the
+ * grabbed row itself: `declaredOrder[from]` would name another plugin if a
+ * status poll changed the declared set during the drag.) */
 function declaredIndex(name: string): number {
   return declaredOrder.value.indexOf(name)
 }
@@ -1415,10 +1416,8 @@ function goTo(id: string) {
                 :items="plugins"
                 :item-key="(p) => p.name"
                 :reorderable="(p) => p.declared"
-                @move="(from, to) => {
-                  const name = declaredOrder[from]
-                  return name === undefined ? undefined : movePlugin(name, to)
-                }"
+                :disabled="inProgress.size > 0"
+                @move="(_from, to, item) => movePlugin(item.name, to)"
                 v-slot="{ item: p, itemAttrs }"
               >
                 <!--
@@ -1429,7 +1428,10 @@ function goTo(id: string) {
                   `missing_binary` row's arrows are already hidden the same
                   way. Only the handle starts a drag, with a finger or a
                   mouse; the rest of the row stays free to scroll. The list
-                  reports positions among the declared rows. The handle,
+                  reports positions among the declared rows. It is locked
+                  while any row is busy, exactly like the arrows: `movePlugin`
+                  ignores a busy row, and a drop then would snap back with no
+                  word. The handle,
                   the admin link and the order arrows live inside the
                   plugin cell rather than in columns of their own: that is
                   what brought the table from eight columns down to six,
