@@ -118,6 +118,8 @@ impl<P: Player> Core<P> {
                     }
                 }
             }
+            // Task 5 fills this: the core re-applies the equalizer chain here.
+            Event::FileStarting => {}
             Event::PlaybackIdle => {
                 if !self.standby && self.expecting_stream {
                     let delay = (RETRY_BASE * 2u32.pow(self.retry_count)).min(RETRY_MAX);

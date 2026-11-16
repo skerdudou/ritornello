@@ -105,6 +105,17 @@ impl crate::player::Player for FakePlayer {
         }
         Ok(())
     }
+    async fn set_audio_filters(&self, chain: &str) -> anyhow::Result<()> {
+        self.calls.lock().unwrap().push(format!("af {chain}"));
+        Ok(())
+    }
+    async fn audio_filter_command(&self, cmd: &crate::equalizer::AfCommand) -> anyhow::Result<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("af_cmd {} {} {} {}", cmd.label, cmd.command, cmd.arg, cmd.target));
+        Ok(())
+    }
     async fn set_ytdl(&self, path: Option<&std::path::Path>) -> anyhow::Result<()> {
         let call = match path {
             Some(p) => format!("ytdl {}", p.display()),

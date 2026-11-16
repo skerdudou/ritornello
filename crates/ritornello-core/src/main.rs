@@ -1774,8 +1774,16 @@ async fn main() -> Result<()> {
     let audio_buffer = player::mpv::audio_buffer_setting(audio_buffer_raw.as_deref());
     let readahead = player::mpv::readahead_setting(readahead_raw.as_deref());
     let (mpv_player, mut mpv_child) =
-        player::mpv::start(&mpv_bin, &mpv_socket, &cd_dev, audio_buffer, readahead, ev_tx)
-            .await
+        player::mpv::start(
+            &mpv_bin,
+            &mpv_socket,
+            &cd_dev,
+            audio_buffer,
+            readahead,
+            &equalizer::af_chain(&persisted.equalizer),
+            ev_tx,
+        )
+        .await
             .context("starting mpv")?;
 
     // Fresh directory, then the registration socket bound BEFORE any launch:
@@ -3462,6 +3470,12 @@ mod toggle_tests {
             Ok(())
         }
         async fn set_ytdl(&self, _path: Option<&std::path::Path>) -> Result<()> {
+            Ok(())
+        }
+        async fn set_audio_filters(&self, _chain: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn audio_filter_command(&self, _cmd: &crate::equalizer::AfCommand) -> Result<()> {
             Ok(())
         }
     }
