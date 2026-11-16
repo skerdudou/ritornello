@@ -1,4 +1,4 @@
-import { api, Select, SelectItem, toast } from '@ritornello/ui'
+import { api, ReorderList, Select, SelectItem, toast } from '@ritornello/ui'
 import { flushPromises, mount, type DOMWrapper, type VueWrapper } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryHistory, createRouter } from 'vue-router'
@@ -1311,26 +1311,116 @@ describe('ConfigView — plugin table', () => {
   })
 
   // The drag handle: a gesture the arrows cannot make, since it can cross
-  // several ranks at once. `dragstart` on the first row then `drop` on the
-  // third sends the third row's own (pre-drop) position as `to` — the same
-  // convention `RadioAdmin.vue`'s station table already uses, and the one
-  // `move_entry` implements server-side.
-  it('dragging a row onto another sends its target position to the move route', async () => {
+  // several ranks at once. The list reports two positions among the declared
+  // plugins; the view turns the first into a name and sends the second as `to`,
+  // the convention `move_entry` implements server-side. SortableJS itself is
+  // not exercised here (jsdom has no pointer drag): the list's own tests cover
+  // the gesture, this one covers what the view does with its answer.
+  // `ReorderList` is generic, which `findComponent`'s typing cannot follow.
+  const reorderList = (w: VueWrapper) =>
+    w.findComponent(ReorderList as never) as unknown as { props(k: string): unknown }
+  type Row = { name: string }
+  const dropHandler = (w: VueWrapper) =>
+    reorderList(w).props('onMove') as (from: number, to: number, item: Row) => Promise<void>
+
+  const threePlugins = {
+    plugins: [
+      { name: 'radio', kind: 'source', connected: true, admin: false },
+      { name: 'cd', kind: 'source', connected: false, admin: false },
+      { name: 'files', kind: 'source', connected: false, admin: false },
+    ],
+    active_source: 'radio',
+  }
+
+  it('dragging a row sends its position among declared plugins', async () => {
+    const { w, posts } = await mountView({ '/api/status': threePlugins })
+    await dropHandler(w)(0, 2, { name: 'radio' })
+    await flushPromises()
+    expect(posts).toContainEqual({ url: '/api/plugins/radio/move', body: { to: 2 } })
+  })
+
+  // `from` counts the list as it was when the finger grabbed the row; a
+  // status poll that changed the declared plugins during the drag shifts the
+  // view's own list under it. The list hands over the row it actually held,
+  // and that row is what the view moves -- here `cd`, while position 0 of the
+  // current list is `radio`.
+  it('a drop moves the row the list hands over, not the one now at its position', async () => {
+    const { w, posts } = await mountView({ '/api/status': threePlugins })
+    await dropHandler(w)(0, 2, { name: 'cd' })
+    await flushPromises()
+    expect(posts).toContainEqual({ url: '/api/plugins/cd/move', body: { to: 2 } })
+    expect(posts.filter((p) => p.url.endsWith('/move'))).toHaveLength(1)
+  })
+
+  // An undeclared row in the middle is not counted: `to` is a position among
+  // the declared rows, the one `move_entry` expects, never an index in the
+  // table.
+  it('a drop past an undeclared row sends a position among the declared ones', async () => {
     const { w, posts } = await mountView({
       '/api/status': {
         plugins: [
           { name: 'radio', kind: 'source', connected: true, admin: false },
+          { name: 'mpd', kind: 'unknown', connected: false, admin: false, undeclared_binary: true },
           { name: 'cd', kind: 'source', connected: false, admin: false },
-          { name: 'files', kind: 'source', connected: false, admin: false },
+        ],
+        active_source: 'radio',
+      },
+    })
+    await dropHandler(w)(1, 0, { name: 'cd' })
+    await flushPromises()
+    expect(posts).toContainEqual({ url: '/api/plugins/cd/move', body: { to: 0 } })
+  })
+
+  // The arrows are disabled while any row is busy (a toggle can take 15 s);
+  // the handles must be too, or a drop during that window would snap back
+  // with no word, `movePlugin` returning early on the busy row.
+  it('locks the drag while a row is busy, as it does the arrows', async () => {
+    let resolve: (v: string | null) => void = () => {}
+    vi.mocked(api.put).mockReturnValueOnce(new Promise<string | null>((r) => { resolve = r }))
+    const { w } = await mountView({ '/api/status': threePlugins })
+    expect(reorderList(w).props('disabled')).toBe(false)
+    await w.findAll('[data-plugin-toggle]')[1]!.trigger('click')
+    expect(reorderList(w).props('disabled')).toBe(true)
+    expect(w.find('[data-reorder-handle]').classes()).toContain('cursor-not-allowed')
+    resolve(null)
+    await flushPromises()
+    expect(reorderList(w).props('disabled')).toBe(false)
+  })
+
+  it('an undeclared row is neither marked nor handled', async () => {
+    const { w } = await mountView({
+      '/api/status': {
+        plugins: [
+          { name: 'radio', kind: 'source', connected: true, admin: false },
+          { name: 'mpd', kind: 'unknown', connected: false, admin: false, undeclared_binary: true },
+          { name: 'cd', kind: 'source', connected: false, admin: false },
         ],
         active_source: 'radio',
       },
     })
     const rows = w.findAll('[data-plugin-row]')
-    await rows[0]!.trigger('dragstart')
-    await rows[2]!.trigger('drop')
-    await flushPromises()
-    expect(posts).toContainEqual({ url: '/api/plugins/radio/move', body: { to: 2 } })
+    expect(rows).toHaveLength(3)
+    for (const i of [0, 2]) {
+      expect(rows[i]!.attributes('data-reorder-item')).toBeDefined()
+      expect(rows[i]!.find('[data-reorder-handle]').exists()).toBe(true)
+    }
+    expect(rows[1]!.attributes('data-reorder-item')).toBeUndefined()
+    expect(rows[1]!.find('[data-reorder-handle]').exists()).toBe(false)
+  })
+
+  it('the move handler waits for the refresh', async () => {
+    const { w, spy } = await mountView({ '/api/status': threePlugins })
+    const statusFetches = () => spy.mock.calls.filter(([url]) => url === '/api/status').length
+    const before = statusFetches()
+    const pending = dropHandler(w)(0, 2, { name: 'radio' }) as Promise<void>
+    let settled = false
+    void pending.then(() => { settled = true })
+    // The POST is in flight, the refresh has not been requested yet.
+    expect(settled).toBe(false)
+    expect(statusFetches()).toBe(before)
+    await pending
+    // Resolved only once the follow-up status fetch was made.
+    expect(statusFetches()).toBe(before + 1)
   })
 
   it('toasts the server refusal when an arrow is pressed past the end of a stale list', async () => {

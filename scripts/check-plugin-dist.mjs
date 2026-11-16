@@ -79,6 +79,16 @@ for (const specifier of ['vue', '@ritornello/ui']) {
   }
 }
 
+// 3b. Exactly one copy of Sortable, and it lives in the kit: `fallbackTolerance`
+// is one of its option keys (keys survive minification, plugin code never
+// names it), so its presence here means a plugin bundled its own.
+if (uiJs.includes('fallbackTolerance')) {
+  fail(
+    'ui.js contains Sortable ("fallbackTolerance") — Sortable bundled into a plugin: ' +
+      "import ReorderList from '@ritornello/ui', never vue-draggable-plus",
+  )
+}
+
 // 4. Same check as (3) but from the consequence's point of view: if the
 // Vue runtime had been bundled despite the declared externalization,
 // these fingerprints generally survive minification (they are never

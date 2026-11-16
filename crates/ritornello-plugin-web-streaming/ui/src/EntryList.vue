@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { Button, Input } from '@ritornello/ui'
-import { ref } from 'vue'
+import { Button, Input, ReorderHandle, ReorderList } from '@ritornello/ui'
 import { videoCount, type Kind, type T } from './data'
 
 /** A preset being edited. `key` is browser-side only (see `WebStreamingAdmin.vue`). */
@@ -40,16 +39,8 @@ const emit = defineEmits<{
 }>()
 
 // Reordering: the preset **is** the position, so moving a row changes its
-// number. `dragover.prevent` is essential: without it the browser refuses the
-// drop. ▲▼ exist because drag-and-drop is neither keyboard-accessible nor
-// reliable with a finger.
-const dragging = ref<number | null>(null)
-
-function drop(to: number): void {
-  if (dragging.value === null) return
-  emit('reorder', dragging.value, to)
-  dragging.value = null
-}
+// number. The handle grabs a row, finger and mouse alike; ▲▼ are the keyboard
+// path.
 </script>
 
 <template>
@@ -66,18 +57,18 @@ function drop(to: number): void {
           <th class="w-28" />
         </tr>
       </thead>
-      <tbody class="max-md:block">
+      <ReorderList
+        tag="tbody"
+        class="max-md:block"
+        :items="rows"
+        :item-key="(r) => r.key"
+        @move="(from, to) => emit('reorder', from, to)"
+        v-slot="{ item: r, index: i, itemAttrs }"
+      >
         <tr
-          v-for="(r, i) in rows"
-          :key="r.key"
+          v-bind="itemAttrs"
           class="border-t border-border max-md:flex max-md:flex-wrap max-md:items-center max-md:gap-x-2 max-md:gap-y-1 max-md:py-2 max-md:after:order-2 max-md:after:basis-full max-md:after:content-['']"
-          :class="dragging === i ? 'opacity-50' : ''"
-          draggable="true"
           data-entry-row
-          @dragstart="dragging = i"
-          @dragover.prevent
-          @drop.prevent="drop(i)"
-          @dragend="dragging = null"
         >
           <td class="py-1 pl-1 max-md:order-1">
             <input
@@ -90,7 +81,7 @@ function drop(to: number): void {
             />
           </td>
           <td class="tabular-nums text-muted-foreground max-md:order-1 max-md:mr-auto">
-            <span class="cursor-grab select-none pr-1" :title="t('reorder_hint')">⠿</span>
+            <ReorderHandle class="pr-1" :title="t('reorder_hint')" />
             <span data-entry-num>{{ i + 1 }}</span>
           </td>
           <td class="py-1 pr-2 max-md:order-3 max-md:basis-full max-md:p-0">
@@ -135,7 +126,7 @@ function drop(to: number): void {
             </Button>
           </td>
         </tr>
-      </tbody>
+      </ReorderList>
     </table>
 
     <div class="flex flex-wrap items-center gap-2">

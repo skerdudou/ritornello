@@ -1,4 +1,4 @@
-import { Dialog, SKELETON_DELAY_MS } from '@ritornello/ui'
+import { Dialog, ReorderList, SKELETON_DELAY_MS } from '@ritornello/ui'
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import CountryPicker from './CountryPicker.vue'
@@ -214,7 +214,7 @@ describe('RadioAdmin', () => {
     expect(put).toEqual({ op: 'search', query: 'rock', country: 'BE' })
   })
 
-  it('dragging a station moves it, and the preset follows the position', async () => {
+  it('moving a station by its handle moves it, and the preset follows the position', async () => {
     const { w, spy } = await mountLoaded({
       stations: [
         { preset: 1, name: 'A', url: 'http://a' },
@@ -223,9 +223,12 @@ describe('RadioAdmin', () => {
       ],
       search: [],
     })
-    const rows = () => w.findAll('[data-station-row]')
-    await rows()[0]!.trigger('dragstart')
-    await rows()[2]!.trigger('drop')
+    // `ReorderList` is generic, which `findComponent`'s typing cannot follow.
+    const onMove = (
+      w.findComponent(ReorderList as never) as unknown as { props(k: string): unknown }
+    ).props('onMove') as (from: number, to: number) => Promise<void>
+    await onMove(0, 2)
+    await flushPromises()
     const names = w.findAll('[data-station-name]').map((i) => (i.element as HTMLInputElement).value)
     expect(names).toEqual(['B', 'C', 'A'])
 
@@ -243,9 +246,20 @@ describe('RadioAdmin', () => {
     ])
   })
 
+  it("a station's fields are not a grab", async () => {
+    const { w } = await mountLoaded({
+      stations: [{ preset: 1, name: 'A', url: 'http://a' }],
+      search: [],
+    })
+    const row = w.find('[data-station-row]')
+    expect(row.findAll('[data-reorder-handle]')).toHaveLength(1)
+    expect(row.find('[data-reorder-handle] [data-station-name]').exists()).toBe(false)
+    expect(row.find('[data-reorder-handle] [data-station-url]').exists()).toBe(false)
+  })
+
   it('the up/down buttons also move, and are bounded', async () => {
-    // Drag-and-drop is neither keyboard-accessible nor reliable with a
-    // finger: these buttons are the accessible path, not an ornament.
+    // The handle needs a pointer: these buttons are the keyboard path,
+    // not an ornament.
     const { w } = await mountLoaded({
       stations: [
         { preset: 1, name: 'A', url: 'http://a' },

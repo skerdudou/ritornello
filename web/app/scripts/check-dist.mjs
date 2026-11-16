@@ -43,6 +43,17 @@ if (!indexHtml.includes('"@ritornello/ui":"/assets/ui-kit.js"')) {
 
 const files = readdirSync(assetsDir).filter((f) => f.endsWith('.js'))
 
+// 4. Exactly one copy of Sortable, in the kit. `fallbackTolerance` is one of
+// its option keys: object keys survive minification and no shell or plugin
+// code ever names it, so its presence means Sortable is bundled there.
+const SORTABLE_FINGERPRINT = 'fallbackTolerance'
+if (!readFileSync(`${assetsDir}/ui-kit.js`, 'utf8').includes(SORTABLE_FINGERPRINT)) {
+  fail(
+    'ui-kit.js no longer carries Sortable — the fingerprint ' +
+      `"${SORTABLE_FINGERPRINT}" is stale or the dependency left the kit`,
+  )
+}
+
 for (const file of files) {
   const content = readFileSync(`${assetsDir}/${file}`, 'utf8')
 
@@ -64,6 +75,12 @@ for (const file of files) {
   // (rollupOptions.external) and that two Vue instances, hence two
   // reactivity graphs, coexist in the page.
   if (file.startsWith('app-')) {
+    if (content.includes(SORTABLE_FINGERPRINT)) {
+      fail(
+        `${file} contains Sortable ("${SORTABLE_FINGERPRINT}") — Sortable bundled ` +
+          "into the shell: import ReorderList from '@ritornello/ui', never vue-draggable-plus",
+      )
+    }
     for (const fingerprint of ['__v_isRef', '__v_skip', '[Vue warn]']) {
       if (content.includes(fingerprint)) {
         fail(

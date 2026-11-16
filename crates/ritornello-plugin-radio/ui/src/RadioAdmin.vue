@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {
   api, Button, Card, CardContent, CardHeader, CardTitle, createT, Dialog, DialogContent,
-  DialogHeader, DialogTitle, DialogTrigger, Input, move, Skeleton, useSkeleton, type Catalog,
+  DialogHeader, DialogTitle, DialogTrigger, Input, move, ReorderHandle, ReorderList, Skeleton, useSkeleton, type Catalog,
 } from '@ritornello/ui'
 import { computed, onMounted, ref } from 'vue'
 import CountryPicker from './CountryPicker.vue'
@@ -197,17 +197,13 @@ function remove(i: number): void {
 // Reordering: the preset **is** the position, so moving a row changes its
 // remote number. Nothing is persisted before "Save", same as for adding
 // and removing.
-const dragging = ref<number | null>(null)
-
-function drop(to: number): void {
-  if (dragging.value === null) return
-  stations.value = move(stations.value, dragging.value, to)
-  dragging.value = null
+function reorder(from: number, to: number): void {
+  stations.value = move(stations.value, from, to)
 }
 
-/** Up/down buttons: drag-and-drop is neither keyboard-accessible nor reliable with a finger. */
+/** Up/down buttons: the keyboard path, next to the handle's grab. */
 function shift(i: number, step: number): void {
-  stations.value = move(stations.value, i, i + step)
+  reorder(i, i + step)
 }
 
 // Automatic numbering: the preset is the row's **position**. Accepted
@@ -313,33 +309,29 @@ function label(s: FoundStation): string {
           <th class="w-24" />
         </tr>
       </thead>
-      <tbody class="max-md:block">
-        <!--
-          Draggable rows: since the preset is the position, dragging a
-          station changes its number. `dragover.prevent` is essential —
-          without it the browser refuses the drop.
-        -->
+      <!-- Reorderable rows, grabbed by their handle, finger and mouse alike:
+           since the preset is the position, moving a station changes its number. -->
+      <ReorderList
+        tag="tbody"
+        class="max-md:block"
+        :items="stations"
+        :item-key="(s) => s.key"
+        @move="reorder"
+        v-slot="{ item: s, index: i, itemAttrs }"
+      >
         <tr
-          v-for="(s, i) in stations"
-          :key="s.key"
+          v-bind="itemAttrs"
           class="border-t border-border max-md:flex max-md:flex-wrap max-md:items-center max-md:gap-x-2 max-md:gap-y-1 max-md:py-2 max-md:after:order-2 max-md:after:basis-full max-md:after:content-['']"
-          :class="dragging === i ? 'opacity-50' : ''"
-          draggable="true"
           data-station-row
-          @dragstart="dragging = i"
-          @dragover.prevent
-          @drop.prevent="drop(i)"
-          @dragend="dragging = null"
         >
           <td class="tabular-nums text-muted-foreground max-md:order-1">
-            <span class="cursor-grab select-none pr-1" :title="t('reorder_hint')" data-drag-handle>⠿</span>
+            <ReorderHandle class="pr-1" :title="t('reorder_hint')" data-drag-handle />
             <span data-station-num>{{ i + 1 }}</span>
           </td>
           <td class="py-1 pr-2 max-md:order-1 max-md:min-w-0 max-md:flex-1 max-md:p-0"><Input v-model="s.name" data-station-name /></td>
           <td class="py-1 pr-2 max-md:order-3 max-md:min-w-0 max-md:flex-1 max-md:p-0"><Input v-model="s.url" data-station-url /></td>
           <td class="whitespace-nowrap max-md:order-3">
-            <!-- Alternative to drag-and-drop: neither the keyboard nor a
-                 touchscreen fares well with it. -->
+            <!-- The keyboard path: the handle needs a pointer. -->
             <Button
               variant="ghost"
               size="icon"
@@ -373,7 +365,7 @@ function label(s: FoundStation): string {
             </Button>
           </td>
         </tr>
-      </tbody>
+      </ReorderList>
     </table>
 
     <div class="flex flex-wrap items-center gap-2">

@@ -2,8 +2,8 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 import { h } from 'vue'
 import {
-  Button, cn, Dialog, DialogContent, DialogTitle, HelpButton, Slider, Tabs, TabsContent,
-  TabsList, TabsTrigger, UI_CONTRACT,
+  Button, cn, Dialog, DialogContent, DialogTitle, HelpButton, ReorderHandle, ReorderList,
+  Slider, Tabs, TabsContent, TabsList, TabsTrigger, UI_CONTRACT,
 } from './index'
 // Not part of the kit's public surface, and no reason to widen it just for a
 // test that lives inside the kit.
@@ -22,6 +22,11 @@ vi.stubGlobal('ResizeObserver', ResizeObserverStub)
 describe('public surface of the kit', () => {
   it('exposes the contract version', () => {
     expect(UI_CONTRACT).toBe(1)
+  })
+
+  it('exposes the reorderable list and its handle', () => {
+    expect(ReorderList).toBeDefined()
+    expect(ReorderHandle).toBeDefined()
   })
 
   it('cn merges classes, the last one winning', () => {
