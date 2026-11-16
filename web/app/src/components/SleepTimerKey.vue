@@ -185,7 +185,7 @@ function fill(minutes: number) {
       </div>
       <div class="grid gap-2">
         <span id="sleep-timer-start" class="text-sm font-medium">{{ t('sleep_timer_start') }}</span>
-        <div role="group" aria-labelledby="sleep-timer-start" class="grid grid-cols-5 gap-2">
+        <div role="group" aria-labelledby="sleep-timer-start" class="flex flex-wrap gap-2">
           <Button
             v-for="n in SLEEP_TIMER_MINUTES"
             :key="n"

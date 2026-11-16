@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { sidewaysCulprits } from './overflow'
 
 test('on a phone: bottom bar, top nav absent, named tile', async ({ page }) => {
   await page.goto('/')
@@ -122,6 +123,7 @@ test('on a phone: dragging the volume slider sends a SetVolume that the core ech
  * it does not widen the page.
  */
 for (const { path, ready } of [
+  { path: '/', ready: '[data-preset-button="1"]' },
   { path: '/config', ready: '[data-plugins-table] [data-plugin-row]' },
   { path: '/system', ready: '[data-system-memory]' },
   { path: '/plugins/', ready: '[data-plugins-list] a' },
@@ -133,32 +135,38 @@ for (const { path, ready } of [
     await page.setViewportSize({ width: 360, height: 780 })
     await page.goto(path)
     await expect(page.locator(ready).first()).toBeVisible()
-    const overflow = await page.evaluate(() => {
-      const root = document.documentElement
-      const width = root.clientWidth
-      const culprits: string[] = []
-      for (const el of Array.from(document.body.querySelectorAll<HTMLElement>('*'))) {
-        if (el.children.length > 0) continue
-        const box = el.getBoundingClientRect()
-        if (box.width === 0 || box.right <= width + 0.5) continue
-        // A fixed element (the toaster's empty list) does not widen the page
-        // either, whatever its box says.
-        let clipped = false
-        for (let p: HTMLElement | null = el; p && p !== document.body; p = p.parentElement) {
-          const style = getComputedStyle(p)
-          if (style.position === 'fixed' || (p !== el && style.overflowX !== 'visible')) { clipped = true; break }
-        }
-        if (clipped) continue
-        const marker = Array.from(el.attributes).find((a) => a.name.startsWith('data-'))?.name
-        const text = (el.textContent ?? '').trim().slice(0, 40)
-        culprits.push(`${el.tagName.toLowerCase()}${marker ? `[${marker}]` : ''} "${text}" right=${Math.round(box.right)}`)
-      }
-      return { scroll: root.scrollWidth, width, culprits }
-    })
+    const overflow = await sidewaysCulprits(page)
     expect(overflow.scroll, `wider than the screen:\n${overflow.culprits.join('\n')}`).toBeLessThanOrEqual(
       overflow.width,
     )
   })
+}
+
+/**
+ * A dialog must hold its content on a phone, at the Pixel 7's width and at 360.
+ *
+ * The page loop above cannot see inside an open dialog: it is fixed, so the
+ * page's own scroll width never moves. The dialog's own right edge is the
+ * bound here, and a row of buttons that outgrows it is a culprit.
+ */
+for (const viewport of [undefined /* Pixel 7, 412 px */, { width: 360, height: 780 }]) {
+  for (const { path, open, dialog } of [
+    { path: '/', open: '[data-sleep-timer-key]', dialog: '[data-sleep-timer-menu]' },
+    { path: '/config', open: '[data-alarm-add]', dialog: '[data-alarm-dialog]' },
+    { path: '/config', open: '[data-update-sources]', dialog: '[data-sources-dialog]' },
+    { path: '/plugins/radio/', open: '[data-country-open]', dialog: '[role="dialog"]' },
+  ]) {
+    const w = viewport?.width ?? 412
+    test(`on a ${w} px phone: the dialog of ${open} on ${path} holds its content`, async ({ page }) => {
+      if (viewport) await page.setViewportSize(viewport)
+      await page.goto(path)
+      await page.locator(open).first().click()
+      await expect(page.locator(dialog).first()).toBeVisible()
+      const r = await sidewaysCulprits(page, dialog)
+      expect(r.culprits, r.culprits.join('\n')).toEqual([])
+      await page.keyboard.press('Escape')
+    })
+  }
 }
 
 test('on a phone: the Plugins tab leads to the list, which leads to the plugin page', async ({ page }) => {
