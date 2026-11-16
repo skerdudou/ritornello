@@ -251,6 +251,11 @@ test('on a phone: a station takes two lines, its name then its address, each wid
   expect(name.width).toBeGreaterThanOrEqual(180)
   expect(url.width).toBeGreaterThanOrEqual(180)
   expect(url.y).toBeGreaterThanOrEqual(name.y + name.height)
+  // The move and remove buttons ride on the address's line, to its right.
+  const up = await row.locator('[data-station-up]').boundingBox()
+  if (!up) throw new Error('move-up button not visible')
+  expect(Math.abs(up.y + up.height / 2 - (url.y + url.height / 2))).toBeLessThanOrEqual(2)
+  expect(up.x).toBeGreaterThan(url.x)
 })
 
 test('at desktop width the station table keeps its header row', async ({ page }) => {
