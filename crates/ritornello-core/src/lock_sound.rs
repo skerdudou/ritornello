@@ -39,6 +39,7 @@ pub enum Motif {
     /// The lock motif, then the unlock motif starting right after it ends
     /// (at `duration(sound, Motif::Lock)`): what the config page plays to let
     /// the owner hear a choice.
+    #[cfg_attr(not(test), expect(dead_code, reason = "played by `Core::preview_lock_sound`, which no route calls yet"))]
     Preview,
 }
 
@@ -218,7 +219,8 @@ mod tests {
     fn the_table_is_the_reference() {
         let c4 = 261.63;
         let (g4, a4, c5, d5, e5, g5, a5) = (392.0, 440.0, 523.25, 587.33, 659.25, 783.99, 880.0);
-        let table: [(LockSound, Vec<(f64, f64)>, Vec<(f64, f64)>); 5] = [
+        type Notes = Vec<(f64, f64)>;
+        let table: [(LockSound, Notes, Notes); 5] = [
             (LockSound::A, vec![(e5, 0.0), (c5, 0.16)], vec![(c5, 0.0), (e5, 0.16)]),
             (
                 LockSound::B,
@@ -331,7 +333,7 @@ mod tests {
             .ok()?;
         assert!(status.success(), "ffmpeg refused the expression of {sound:?} {motif:?}");
         let bytes = std::fs::read(&out).unwrap();
-        Some(bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+        Some(bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect())
     }
 
     /// Hann-windowed single-bin DFT magnitude (amplitude units) of

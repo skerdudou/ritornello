@@ -2646,6 +2646,15 @@ async fn main() -> Result<()> {
                 None => std::future::pending().await,
             }
         };
+        // Removal of a lock chime mixed into playback: absolute, and read
+        // before the `select!` like `overlay_at`, for the same reasons.
+        let lock_sound_at = core.lock_sound_deadline().map(tokio::time::Instant::from);
+        let lock_sound_sleep = async {
+            match lock_sound_at {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
         // Sleep timer: its countdown, then each step of a fade. Absolute, and
         // read before the `select!` like `overlay_at`, for the same reasons.
         let sleep_at = core.sleep_deadline().map(tokio::time::Instant::from);
@@ -3215,6 +3224,9 @@ async fn main() -> Result<()> {
             }
             _ = overlay_sleep => {
                 core.expire_overlay();
+            }
+            _ = lock_sound_sleep => {
+                core.expire_lock_sound().await;
             }
             _ = sleep_timer_sleep => {
                 core.on_sleep_deadline().await;

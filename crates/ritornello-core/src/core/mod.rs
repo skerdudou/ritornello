@@ -8,6 +8,7 @@
 //!
 //! - `commands`: remote and UI control — playback/standby, volume, tens, seek, startup
 //! - `deadlines`: overlays and deadlines that the `main.rs` loop must wake up for
+//! - `lock_sound`: the chime of a lock change, idle or mixed into playback
 //! - `player`: mpv events, restart with growing backoff, resume on wake
 //! - `play_request`: a source asking to be played, and what the core decides
 //! - `metadata`: identity, ICY, tags, enrichments, covers and extraction
@@ -40,6 +41,7 @@ mod alarms;
 mod commands;
 mod deadlines;
 mod equalizer;
+mod lock_sound;
 mod play_request;
 mod playback;
 mod track_metadata;
@@ -563,6 +565,10 @@ pub struct Core<P: Player> {
     /// when the last write failed and `af` is unknown. A file start rewrites
     /// the chain only when it differs from the setting's.
     eq_chain_written: Option<String>,
+    /// The chain written with a lock chime mixed in, and when to write it
+    /// back without (`lock_sound.rs`). Cleared by any other whole-chain
+    /// write: that write already dropped the chime.
+    lock_sound_mixed: Option<(String, Instant)>,
     /// mpv holds a live chain `af-command` can reach: set at
     /// `PlaybackRestarted`, cleared at `FileStarting` and `PlaybackIdle` (an
     /// idle or loading mpv refuses every `af-command`). False at launch: mpv
@@ -733,6 +739,7 @@ impl<P: Player> Core<P> {
             eq_bands_sent: persisted.equalizer.gains,
             eq_chain_written: Some(crate::equalizer::af_chain(&persisted.equalizer)),
             eq_live: false,
+            lock_sound_mixed: None,
         };
         // The sources wired at startup are already known: without this
         // publication, the channel would keep its blank
