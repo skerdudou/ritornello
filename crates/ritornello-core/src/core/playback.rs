@@ -122,6 +122,9 @@ impl<P: Player> Core<P> {
             // gains `af-command` set: rewrite it now, while it costs no click.
             Event::FileStarting => self.reapply_equalizer().await,
             Event::PlaybackIdle => {
+                // First, before any early return: whatever follows, nothing
+                // is loaded any more.
+                self.equalizer_idle();
                 if !self.standby && self.expecting_stream {
                     let delay = (RETRY_BASE * 2u32.pow(self.retry_count)).min(RETRY_MAX);
                     self.retry_count = (self.retry_count + 1).min(4);

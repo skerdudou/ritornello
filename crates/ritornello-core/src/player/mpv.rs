@@ -1704,6 +1704,19 @@ pub(crate) mod tests {
         let af = player.ipc.command(&[json!("get_property"), json!("af")]).await.unwrap();
         assert_eq!(graph(&af, "eq5").as_deref(), Some("equalizer=f=1000:t=o:w=1:g=0"), "{af}");
 
+        // Idle, the two facts `core/equalizer.rs` relies on: `af-command`
+        // is refused (no live chain), setting `af` is accepted.
+        assert!(
+            player.audio_filter_command(&crate::equalizer::band_command(5, 6)).await.is_err(),
+            "an idle mpv must refuse af-command"
+        );
+        let mut idle_eq = crate::equalizer::EqualizerSettings { enabled: true, ..Default::default() };
+        idle_eq.gains[5] = 3;
+        player.set_audio_filters(&crate::equalizer::af_chain(&idle_eq)).await.expect("setting af on an idle mpv");
+        let af = player.ipc.command(&[json!("get_property"), json!("af")]).await.unwrap();
+        assert_eq!(graph(&af, "eq5").as_deref(), Some("equalizer=f=1000:t=o:w=1:g=3"), "{af}");
+        player.set_audio_filters(&chain).await.unwrap();
+
         // The chain only exists while something plays (an idle mpv answers
         // "error running command" to any `af-command`): a generated tone.
         player.play("av://lavfi:sine=frequency=440:duration=30").await.unwrap();

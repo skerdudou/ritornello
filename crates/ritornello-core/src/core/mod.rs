@@ -552,9 +552,15 @@ pub struct Core<P: Player> {
     eq_bands_sent: [i8; 10],
     /// The preamp ramp still to send, if any (see `equalizer.rs`).
     eq_ramp: Option<equalizer::PreampRamp>,
-    /// The last whole-chain write failed: mpv's chain may not match the
-    /// setting, and the next file start rewrites it even when disabled.
-    eq_chain_stale: bool,
+    /// The chain mpv's `af` property holds, as last written whole (`--af`
+    /// at launch, a toggle, a file start, an audio output change); `None`
+    /// when the last write failed and `af` is unknown. A file start rewrites
+    /// the chain only when it differs from the setting's.
+    eq_chain_written: Option<String>,
+    /// A file is loaded, so mpv holds a live chain `af-command` can reach:
+    /// set at `FileStarting`, cleared at `PlaybackIdle` (an idle mpv refuses
+    /// every `af-command`). False at launch: mpv starts idle.
+    eq_file_loaded: bool,
 }
 
 /// What the detached read of an armed file (`Core::arm`) found: its tags
@@ -718,7 +724,8 @@ impl<P: Player> Core<P> {
             equalizer: persisted.equalizer.clone(),
             eq_bands_sent: persisted.equalizer.gains,
             eq_ramp: None,
-            eq_chain_stale: false,
+            eq_chain_written: Some(crate::equalizer::af_chain(&persisted.equalizer)),
+            eq_file_loaded: false,
         };
         // The sources wired at startup are already known: without this
         // publication, the channel would keep its blank

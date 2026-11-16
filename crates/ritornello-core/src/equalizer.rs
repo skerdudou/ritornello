@@ -248,14 +248,19 @@ pub fn preamp_command(db: f64) -> AfCommand {
     }
 }
 
+/// The largest preamp step the ramp sends at once: a larger jump of the
+/// `volume` filter clicks. Its companion, the interval between two steps, is
+/// `RAMP_STEP` in `core/equalizer.rs`.
+pub const PREAMP_MAX_STEP_DB: f64 = 1.0;
+
 /// Intermediate preamp values up to `to_db` inclusive, each step at most
-/// 1 dB (a larger jump clicks). Empty when equal.
+/// `PREAMP_MAX_STEP_DB`. Empty when equal.
 pub fn preamp_ramp(from_db: f64, to_db: f64) -> Vec<f64> {
     let diff = to_db - from_db;
     if diff == 0.0 {
         return Vec::new();
     }
-    let steps = ((diff.abs() - 1e-9).ceil() as usize).max(1);
+    let steps = ((diff.abs() / PREAMP_MAX_STEP_DB - 1e-9).ceil() as usize).max(1);
     (1..=steps)
         .map(|i| {
             if i == steps {
@@ -416,13 +421,13 @@ mod tests {
     }
 
     #[test]
-    fn ramp_steps_by_at_most_one_db() {
+    fn ramp_steps_by_at_most_the_max_step() {
         let r = preamp_ramp(0.0, -12.0);
-        assert_eq!(r.len(), 12);
+        assert_eq!(r.len(), (12.0 / PREAMP_MAX_STEP_DB).ceil() as usize);
         assert_eq!(*r.last().unwrap(), -12.0);
         let mut prev = 0.0;
         for v in &r {
-            assert!((v - prev).abs() <= 1.0 + 1e-9);
+            assert!((v - prev).abs() <= PREAMP_MAX_STEP_DB + 1e-9);
             prev = *v;
         }
         assert!(preamp_ramp(-3.0, -3.0).is_empty());
