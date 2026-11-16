@@ -51,8 +51,8 @@ test('on a phone: the connection badge shows its dot without its label', async (
 })
 
 test('on a phone: dragging the volume slider sends a SetVolume that the core echoes back', async ({ page }) => {
-  // The end-to-end proof of the Slider: a real touch gesture, a single
-  // command on release, and the SSE frame that comes back with the value.
+  // The end-to-end proof of the Slider: a real touch gesture, commands
+  // sent during the drag (the last on release), and the SSE frame that comes back with the value.
   // Volume rather than progress because the radio is not `seekable`: its bar
   // is informative, without a thumb — which is verified too.
   await page.goto('/')
@@ -74,8 +74,9 @@ test('on a phone: dragging the volume slider sends a SetVolume that the core ech
   await page.mouse.move(box.x + box.width * 0.25, y, { steps: 5 })
   await page.mouse.up()
   expect((await response).status()).toBe(204)
-  // Between 20 and 30 %: the exact position depends on the thumb's padding.
-  await expect(page.locator('[data-volume]')).toHaveText(/^(2\d|30) %$/)
+  // 20, 25 or 30 %: the exact position depends on the thumb's padding, but
+  // the value is always on the grid of 5 (jsdom cannot prove it: no layout).
+  await expect(page.locator('[data-volume]')).toHaveText(/^(20|25|30) %$/)
   // The 204 only proves the enqueueing: `command_post` sends on `cmd_tx` and
   // replies immediately, before the core's loop handles the command (mpv call
   // then publication on the state channel). A single SSE read may therefore
@@ -99,11 +100,10 @@ test('on a phone: dragging the volume slider sends a SetVolume that the core ech
   await expect
     .poll(async () => {
       lastVolume = await readVolumeSse()
-      return lastVolume >= 20 && lastVolume <= 30
+      return [20, 25, 30].includes(lastVolume)
     }, { timeout: 5000 })
     .toBe(true)
-  expect(lastVolume).toBeGreaterThanOrEqual(20)
-  expect(lastVolume).toBeLessThanOrEqual(30)
+  expect([20, 25, 30]).toContain(lastVolume)
 })
 
 /**

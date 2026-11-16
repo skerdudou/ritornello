@@ -497,14 +497,21 @@ place. Muting dims and strikes through the percentage figure and shows a
 "MUTED" badge, but keeps the number itself legible — it's the value that
 comes back once mute is lifted, same as before.
 
-The slider sends exactly one `SetVolume` per gesture, at release
-(the same commit-on-release mechanic as the progress bar above, both
-built on the kit's shared `Slider`): the figure follows the pointer
-locally while dragging, and the slider holds the released value until a
-frame confirms it, for the same reason the progress bar does. Keyboard:
-arrow keys move by 1%, Page ↑/↓ by 10%, Home/End jump to the ends — this
-is what makes the slider's own `role="slider"` sufficient for
-accessibility, without a pair of ± buttons alongside it.
+The slider moves in steps of 5, like the physical remote's volume keys. It
+sends `SetVolume` while the thumb is dragged, at most every 150 ms, plus
+the final value at release (the progress bar above, built on the same
+kit `Slider`, still sends once, at release). Sends go one POST at a time:
+while one is in flight only the newest value waits, so a burst never
+queues and the last value always wins. The figure follows the pointer
+locally, and the thumb holds the released value until the echo of that
+final send; the echoes of the intermediate sends are recognised as such and
+do not pull it back, another source (the remote, an MPD client) releases it
+at once, and a 2 s backstop releases it if no echo ever comes. Keyboard:
+arrow keys move by 5, Page ↑/↓ and Shift+arrows by 10, Home/End jump to the
+ends — this is what makes the slider's own `role="slider"` sufficient for
+accessibility, without a pair of ± buttons alongside it. A value off the
+grid (an MPD client's `setvol 33`) is shown as is, and the next key lands
+on the grid: from 33, the arrows give 35 and 30, Page ↑/↓ give 40 and 20.
 `VolumeUp`/`VolumeDown`, with their hold-to-repeat cadence from
 `GET /api/settings`, remain the physical remote's gesture (see "Physical
 remote" and the config page's volume-hold card); the `SetVolume` the
