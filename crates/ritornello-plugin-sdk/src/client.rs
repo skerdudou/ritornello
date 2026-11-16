@@ -2187,6 +2187,32 @@ mod tests {
         assert_eq!(msg.cmd, ritornello_proto::Command::Next);
     }
 
+    /// The write deadline itself. The test below this one never fills the
+    /// socket buffer (an even number of flips between two yields means the
+    /// writer sees no change), so it cannot reach the timeout. Here the writer
+    /// runs against a peer that never reads, and it gets a change to write
+    /// after **every** flip, until well past a Unix socket's buffer (about
+    /// 208 KB, i.e. ~7 000 frames of ~31 bytes): a write must then block, and
+    /// the writer must give up within its deadline.
+    #[tokio::test]
+    async fn a_writer_facing_a_full_socket_gives_up_within_its_deadline() {
+        let (ours, _peer_that_never_reads) = tokio::net::UnixStream::pair().unwrap();
+        let (_read, write) = ours.into_split();
+        let (tx, rx) = watch::channel(state_with_lock(false));
+        let writer = tokio::spawn(write_lock_frames(write, rx, std::time::Duration::from_millis(200)));
+        for _ in 0..100_000u32 {
+            tx.send_modify(|s| s.input_locked = !s.input_locked);
+            tokio::task::yield_now().await;
+            if writer.is_finished() {
+                break;
+            }
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(3), writer)
+            .await
+            .expect("the writer must give up on its own, not stay parked on a full socket")
+            .unwrap();
+    }
+
     /// A plugin that never reads must neither stall the toggling nor the
     /// commands: the writer is its own task, bounded by a timeout.
     #[tokio::test]

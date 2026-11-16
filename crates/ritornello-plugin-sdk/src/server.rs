@@ -940,11 +940,14 @@ pub trait InputPlugin: Send + 'static {
     /// keys it is responsible for. `None` (the default) means the plugin does
     /// not honour the lock, and the core never writes to its socket.
     ///
-    /// Read once, at registration, by `Runtime::input` (to announce
+    /// Called twice, both at registration: by `Runtime::input` (to announce
     /// `input_lock`, before the plugin is moved into its loop, like `covers`)
     /// and by `serve_input` (to feed the channel from the core's
-    /// `InputFrame::Lock` frames). The core does not filter commands itself:
-    /// the plugin decides what a locked state means for its own keys.
+    /// `InputFrame::Lock` frames). It must therefore return a **clone of a
+    /// sender the plugin holds**, never a new channel on each call, or the
+    /// plugin would watch a channel nobody writes to. The core does not filter
+    /// commands itself: the plugin decides what a locked state means for its
+    /// own keys.
     fn input_lock(&self) -> Option<tokio::sync::watch::Sender<bool>> {
         None
     }
