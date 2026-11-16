@@ -133,13 +133,15 @@ the browser's own broken-image icon would show instead of the intended
 fallback; it resets on the next `cover_href`, so one failure doesn't
 condemn the square for the rest of the session). **Clicking it enlarges it**,
 full screen over a dark veil, at full resolution. There the image zooms: a
-pinch takes it from ×1 to ×4, a finger drags it once zoomed, with edges that
-stop like a phone's photo gallery (the image never leaves a gap on an axis
-where it is larger than the screen), a double tap returns it to ×1, and on a
-desktop the wheel zooms around the pointer. A tap closes the view only at ×1,
-and never at the end of a gesture — the click the browser fires when the last
-finger of a pinch or a drag lifts would otherwise take away the image being
-looked at (`useCoverZoom.ts` decides, `zoomMath.ts` computes). Escape and the
+pinch takes it from ×1 to ×4, a finger or the mouse drags it once zoomed,
+with edges that stop like a phone's photo gallery (the image never leaves a
+gap on an axis where it is larger than the screen), a double tap (or double
+click) returns it to ×1, and on a desktop the wheel zooms around the pointer.
+A press closes the view only at ×1, whatever its length, and never at the end
+of a gesture — the click the browser fires at the end of a drag (mouse or one
+finger) would otherwise take away the image being looked at
+(`useCoverZoom.ts` decides, `zoomMath.ts` computes). Resizing the window
+returns it to ×1, since the old edges no longer hold. Escape and the
 close button always close, zoomed or not — the button is there so the view can
 be left from the keyboard by something that announces itself. A track change
 closes it too: the next track's image appearing full screen is not something

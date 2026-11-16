@@ -7,17 +7,20 @@
 // after `pointerup`, on the overlay, whatever the pointers did before: the end
 // of a pinch or of a pan would close the image the user was looking at. At
 // that point only this state machine knows whether the sequence that just
-// ended was a plain tap at original size, so it takes the decision at the last
+// ended was a still press at original size (one pointer, no real movement,
+// however long it lasted), so it takes the decision at the last
 // `pointerup` and the click handler consumes it with `shouldClose()`. The
 // decision then falls back to `true`, so a click with no pointer sequence
 // before it (keyboard activation, a test calling `.click()`) still closes.
 //
 // At original size a single tap closes at once, without waiting to see
 // whether a second tap follows: a double tap only means something while
-// zoomed, where it returns to ×1. Pinching is the only way to zoom in on touch.
+// zoomed, where it returns to ×1. Only there does a press's length count: a
+// press longer than `TAP_MAX_MS` is not the first tap of a double tap.
+// Pinching is the only way to zoom in on touch.
 
 import { computed, ref, shallowRef, type ComputedRef, type Ref } from 'vue'
-import { IDENTITY, pan, pinch, zoomAround, type Point, type Size, type View } from './zoomMath'
+import { IDENTITY, clampView, pan, pinch, zoomAround, type Point, type Size, type View } from './zoomMath'
 
 export interface ZoomMeasure {
   box: Size
@@ -61,6 +64,7 @@ export function useCoverZoom(
   onLostpointercapture(e: PointerEvent): void
   onWheel(e: WheelEvent): void
   shouldClose(): boolean
+  reclamp(): void
   reset(): void
 } {
   const view = shallowRef<View>(IDENTITY)
@@ -170,8 +174,10 @@ export function useCoverZoom(
 
   function finish(g: Gesture, point: Point) {
     const at = now()
-    const tap =
-      !g.cancelled && g.maxPointers === 1 && g.maxTravel <= TAP_SLOP_PX && at - g.startedAt <= TAP_MAX_MS
+    // A still press: one pointer, no real movement, not cancelled. Its
+    // length only matters for a double tap; at ×1 a long press closes too.
+    const still = !g.cancelled && g.maxPointers === 1 && g.maxTravel <= TAP_SLOP_PX
+    const tap = still && at - g.startedAt <= TAP_MAX_MS
     if (tap && g.scaleAtStart > 1) {
       const completes =
         lastTap !== null &&
@@ -187,9 +193,10 @@ export function useCoverZoom(
     } else {
       lastTap = null
     }
-    // Taken after a double tap has reset the view: a tap that started zoomed
-    // never closes, even though the view is now at ×1.
-    closeDecision = tap && view.value.scale === 1 && g.scaleAtStart === 1
+    // Taken after a double tap has reset the view: a press that started zoomed
+    // never closes, even though the view is now at ×1. A slow still press at
+    // ×1 closes, as every click on the veil did before zooming existed.
+    closeDecision = still && view.value.scale === 1 && g.scaleAtStart === 1
   }
 
   function onPointerup(e: PointerEvent) {
@@ -208,6 +215,10 @@ export function useCoverZoom(
     release(e, true)
   }
 
+  // `deltaMode` is deliberately not read. Firefox reports pixel deltas to a
+  // page that reads `deltaY` without reading `deltaMode` first; reading
+  // `deltaMode` first switches it to line units, which this rate is not
+  // calibrated for.
   function onWheel(e: WheelEvent) {
     e.preventDefault()
     const m = measure()
@@ -221,6 +232,16 @@ export function useCoverZoom(
     const decision = closeDecision
     closeDecision = true
     return decision
+  }
+
+  // The image's box changed under the current view (the full size arrived):
+  // fit the view to the new limits, but leave the pointers, the gesture and
+  // the close decision alone, so a gesture in progress carries on. Re-anchored
+  // so a finger still down pans from where the image now is.
+  function reclamp() {
+    const m = measure()
+    view.value = clampView(view.value, m.box, m.viewport)
+    reanchor()
   }
 
   function reset() {
@@ -245,6 +266,7 @@ export function useCoverZoom(
     onLostpointercapture,
     onWheel,
     shouldClose,
+    reclamp,
     reset,
   }
 }

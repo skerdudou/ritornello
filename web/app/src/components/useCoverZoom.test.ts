@@ -96,11 +96,18 @@ describe('useCoverZoom', () => {
     move(2, 350)
     // Midpoint moved from 200 to 250: x = 50 at ×2.
     expect(zoom.view.value).toEqual({ scale: 2, x: 50, y: 0 })
-    up(2, 350)
+    // Both fingers move during the pinch, so the remaining finger is no longer
+    // where it went down: a pan anchored on the press point instead of the
+    // current one would jump by 30 px.
+    move(1, 120)
+    move(2, 320)
+    // Still 200 px apart, midpoint 220: x = 20 at ×2.
+    expect(zoom.view.value).toEqual({ scale: 2, x: 20, y: 0 })
+    up(2, 320)
     const before = zoom.view.value
-    move(1, 180)
+    move(1, 150)
     expect(zoom.view.value).toEqual({ scale: 2, x: before.x + 30, y: 0 })
-    up(1, 180)
+    up(1, 150)
     expect(zoom.shouldClose()).toBe(false)
   })
 
@@ -168,11 +175,24 @@ describe('useCoverZoom', () => {
     expect(zoom.shouldClose()).toBe(true)
   })
 
-  it('a slow press does not count as a tap', () => {
+  it('a slow press at original size still closes', () => {
+    // Before zooming existed every click on the veil closed, however long the
+    // press: only a double tap needs a duration, and there is none at ×1.
     down(1, 200)
     t += 400
     up(1, 200)
+    expect(zoom.shouldClose()).toBe(true)
+  })
+
+  it('a slow press while zoomed neither closes nor starts a double tap', () => {
+    zoomTo2()
+    down(3, 200)
+    t += 400
+    up(3, 200)
     expect(zoom.shouldClose()).toBe(false)
+    t += 100
+    tap(4, 200)
+    expect(zoom.view.value.scale).toBe(2)
   })
 
   it('a cancelled pointer is neither a tap nor a pan, and leaves nothing behind', () => {
@@ -265,6 +285,32 @@ describe('useCoverZoom', () => {
     up(1, 150)
     expect(zoom.shouldClose()).toBe(false)
     expect(zoom.shouldClose()).toBe(true)
+  })
+
+  it('reclamp fits the view to a new measure without ending the gesture', () => {
+    // The full image arrives while a finger is panning: its box shrinks.
+    let box = { width: 400, height: 300 }
+    zoom = useCoverZoom(
+      () => ({ box, viewport: { width: 400, height: 800 }, center: { x: 200, y: 400 } }),
+      () => t,
+    )
+    zoomTo2()
+    down(3, 300)
+    move(3, 500)
+    expect(zoom.view.value).toEqual({ scale: 2, x: 200, y: 0 })
+
+    // At ×2 the image is now 600 wide: x may only range over [-100, 100].
+    box = { width: 300, height: 225 }
+    zoom.reclamp()
+    expect(zoom.view.value).toEqual({ scale: 2, x: 100, y: 0 })
+    expect(zoom.gesturing.value).toBe(true)
+
+    // The finger still down keeps panning, from where the image now is.
+    move(3, 450)
+    expect(zoom.view.value).toEqual({ scale: 2, x: 50, y: 0 })
+    up(3, 450)
+    expect(zoom.gesturing.value).toBe(false)
+    expect(zoom.shouldClose()).toBe(false)
   })
 
   it('reset returns to original size', () => {

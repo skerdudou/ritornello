@@ -676,6 +676,7 @@ describe('PlayerCard', () => {
       // starting on X would become a veil click and fail to close a zoomed
       // cover. jsdom has no `setPointerCapture`: a spy stands in for it.
       const capture = vi.fn()
+      const original = Object.getOwnPropertyDescriptor(Element.prototype, 'setPointerCapture')
       Object.defineProperty(Element.prototype, 'setPointerCapture', {
         value: capture,
         configurable: true,
@@ -698,7 +699,8 @@ describe('PlayerCard', () => {
         expect(overlay()).toBeNull()
         w.unmount()
       } finally {
-        delete (Element.prototype as { setPointerCapture?: unknown }).setPointerCapture
+        if (original) Object.defineProperty(Element.prototype, 'setPointerCapture', original)
+        else delete (Element.prototype as { setPointerCapture?: unknown }).setPointerCapture
       }
     })
 
@@ -713,6 +715,20 @@ describe('PlayerCard', () => {
 
       await w.get('[data-cover-enlarge]').trigger('click')
       expect(enlargedImg().style.transform).toBe('translate(0px, 0px) scale(1)')
+      w.unmount()
+    })
+
+    it('the full image arriving keeps the zoom', async () => {
+      // The full size loads on demand and may arrive in the middle of a
+      // gesture: resetting then would throw the image back to ×1 under the
+      // fingers.
+      const w = await open()
+      await pinchOpen()
+      click(overlay()!)
+      expect(scaleOf(enlargedImg())).toBeGreaterThan(1)
+      enlargedImg().dispatchEvent(new Event('load'))
+      await nextTick()
+      expect(scaleOf(enlargedImg())).toBeGreaterThan(1)
       w.unmount()
     })
 

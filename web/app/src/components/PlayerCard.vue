@@ -194,8 +194,9 @@ function measure(): ZoomMeasure {
   }
 }
 const zoom = useCoverZoom(measure)
-// The browser fires a `click` after the last finger of a pinch or a pan lifts;
-// only the gesture machine knows whether what ended was a plain tap at ×1.
+// The browser fires a `click` at the end of a drag (mouse or one finger) as
+// after a press; only the gesture machine knows whether what ended was a
+// still press at ×1.
 function onVeilClick() {
   if (zoom.shouldClose()) enlarged.value = false
 }
@@ -528,7 +529,7 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
           class="max-h-full max-w-full select-none rounded-lg object-contain shadow-2xl"
           :class="zoom.gesturing.value ? '' : 'transition-transform duration-150'"
           :style="{ transform: zoom.transform.value }"
-          @load="enlargedLoading = false; zoom.reset()"
+          @load="enlargedLoading = false; zoom.reclamp()"
           @error="enlargedLoading = false"
         />
         <!-- The full size is now fetched on demand (Task 8): it can take a
