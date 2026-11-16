@@ -617,9 +617,21 @@ describe('PlayerCard', () => {
       pointer(el, 'pointerup', 2, 350, 200)
       await nextTick()
     }
+    /**
+     * The view the image is drawn with, read back from its inline transform.
+     * Parsed rather than compared as a string: the CSSOM serialises
+     * `translate(0px, 0px)` as `translate(0px)` (a zero second argument is
+     * dropped), and jsdom 31 follows it while jsdom 30 did not.
+     */
+    function viewOf(img: HTMLImageElement): { x: number; y: number; scale: number } {
+      const match = /^translate\((-?[\d.]+)px(?:, (-?[\d.]+)px)?\) scale\((-?[\d.]+)\)$/.exec(
+        img.style.transform,
+      )
+      if (!match) return { x: NaN, y: NaN, scale: NaN }
+      return { x: Number(match[1]), y: Number(match[2] ?? 0), scale: Number(match[3]) }
+    }
     function scaleOf(img: HTMLImageElement): number {
-      const match = /scale\(([^)]+)\)/.exec(img.style.transform)
-      return match ? Number(match[1]) : NaN
+      return viewOf(img).scale
     }
     async function open() {
       const w = mountWith({ title: 'So What', cover_href: '/api/cover/1a2b' })
@@ -714,7 +726,7 @@ describe('PlayerCard', () => {
       expect(overlay()).toBeNull()
 
       await w.get('[data-cover-enlarge]').trigger('click')
-      expect(enlargedImg().style.transform).toBe('translate(0px, 0px) scale(1)')
+      expect(viewOf(enlargedImg())).toEqual({ x: 0, y: 0, scale: 1 })
       w.unmount()
     })
 
@@ -741,7 +753,7 @@ describe('PlayerCard', () => {
       expect(scaleOf(enlargedImg())).toBeGreaterThan(1)
       window.dispatchEvent(new Event('resize'))
       await nextTick()
-      expect(enlargedImg().style.transform).toBe('translate(0px, 0px) scale(1)')
+      expect(viewOf(enlargedImg())).toEqual({ x: 0, y: 0, scale: 1 })
       w.unmount()
     })
 
