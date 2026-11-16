@@ -149,7 +149,8 @@ describe('HomeView', () => {
     expect(action.find('[data-sleep-timer-key]').exists()).toBe(true)
     // Standby keeps the far corner.
     const keys = action.findAll('button').map((b) => b.attributes('data-sleep-timer-key') !== undefined ? 'sleep' : b.attributes('data-remote-power') !== undefined ? 'power' : 'other')
-    expect(keys.slice(-2)).toEqual(['sleep', 'power'])
+    // The padlock sits between the sleep timer and standby.
+    expect(keys.slice(-3)).toEqual(['sleep', 'other', 'power'])
 
     await action.get('[data-sleep-timer-key]').trigger('click')
     await flushPromises()
@@ -235,6 +236,28 @@ describe('HomeView', () => {
     FakeEventSource.last!.push({ volume: 45 })
     await w.vm.$nextTick()
     expect(w.find('[data-volume]').text()).toBe('45 %')
+  })
+
+  it('a tap on the padlock sends the absolute command', async () => {
+    const posts: string[] = []
+    const spy = vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') posts.push(String(init.body))
+      return new Response(null, { status: 204 })
+    })
+    vi.stubGlobal('fetch', spy)
+    vi.stubGlobal('EventSource', FakeEventSource)
+    const HomeView = (await import('./HomeView.vue')).default
+    const w = mount(HomeView)
+    FakeEventSource.last!.push({ input_locked: false })
+    await nextTick()
+    await w.get('[data-input-lock]').trigger('click')
+    FakeEventSource.last!.push({ input_locked: true })
+    await nextTick()
+    await w.get('[data-input-lock]').trigger('click')
+    expect(posts).toEqual([
+      JSON.stringify({ cmd: 'SetInputLock', arg: true }),
+      JSON.stringify({ cmd: 'SetInputLock', arg: false }),
+    ])
   })
 
   it('the standby button posts the Power command', async () => {
@@ -478,6 +501,28 @@ describe('HomeView — unavailable buttons', () => {
     expect(w.get('[data-remote-power]').attributes('disabled')).toBeUndefined()
   })
 
+  it('the padlock shows the lock state', async () => {
+    const locked = await mountWith({ input_locked: true })
+    const keyLocked = locked.get('[data-input-lock]')
+    expect(keyLocked.attributes('aria-pressed')).toBe('true')
+    expect(keyLocked.attributes('aria-label')).toBe('input_lock_locked')
+    expect(keyLocked.attributes('title')).toBe('input_lock_locked')
+    // The field is omitted from the payload when false.
+    const unlocked = await mountWith({})
+    const keyUnlocked = unlocked.get('[data-input-lock]')
+    expect(keyUnlocked.attributes('aria-pressed')).toBe('false')
+    expect(keyUnlocked.attributes('aria-label')).toBe('input_lock_unlocked')
+  })
+
+  it('the padlock stays enabled in standby', async () => {
+    // The core lets SetInputLock through its standby gate: a locked remote
+    // must be unlockable whatever the device is doing.
+    const w = await mountWith({ standby: true, input_locked: true })
+    expect(w.get('[data-input-lock]').attributes('disabled')).toBeUndefined()
+    expect(unavailable('SetInputLock', { standby: true } as PlayerPayload)).toBe(false)
+    expect(unavailable('ToggleInputLock', { standby: true } as PlayerPayload)).toBe(false)
+  })
+
   it('the Mute key shows its state, where one acts on the volume', async () => {
     // Requested from use: muted sound was read in the card, at the top of the
     // page, whereas it is muted from this row — at the bottom. The key thus
@@ -624,7 +669,8 @@ describe('HomeView — sliders and names', () => {
 describe('headerMode', () => {
   // Three keys, the gaps between them, then the sleep timer key at rest and
   // standby, each after its gap.
-  const NEEDED = 3 * KEY + 2 * GAP + GAP + KEY + GAP + KEY
+  // The padlock closes the row with the sleep timer and standby keys.
+  const NEEDED = 3 * KEY + 2 * GAP + GAP + KEY + GAP + KEY + GAP + KEY
 
   it('the measures are those of the kit: icon-sm is size-8, the row is gap-1', () => {
     expect(KEY).toBe(32)
@@ -646,9 +692,17 @@ describe('headerMode', () => {
   })
 
   it('the icons from exactly the width they need, the cycle key one pixel below', () => {
-    expect(NEEDED).toBe(176)
+    expect(NEEDED).toBe(212)
     expect(headerMode({ sources: 3, listRead: true, available: NEEDED, standby: false, sleepKey: KEY, activeListed: true })).toBe('icons')
     expect(headerMode({ sources: 3, listRead: true, available: NEEDED - 1, standby: false, sleepKey: KEY, activeListed: true })).toBe('cycle')
+  })
+
+  it('the padlock is counted', () => {
+    // The row without the padlock was 3*KEY + 2*GAP + GAP + KEY + GAP + KEY:
+    // that width no longer holds the keys, one padlock more (KEY + GAP) does.
+    const withoutPadlock = 3 * KEY + 2 * GAP + GAP + KEY + GAP + KEY
+    expect(headerMode({ sources: 3, listRead: true, available: withoutPadlock, standby: false, sleepKey: KEY, activeListed: true })).toBe('cycle')
+    expect(headerMode({ sources: 3, listRead: true, available: withoutPadlock + KEY + GAP, standby: false, sleepKey: KEY, activeListed: true })).toBe('icons')
   })
 
   it('standby makes room for its badge', () => {

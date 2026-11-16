@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { api, Button, toast } from '@ritornello/ui'
-import { LoopIcon } from '@radix-icons/vue'
+import { LockClosedIcon, LockOpen1Icon, LoopIcon } from '@radix-icons/vue'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import PresetGrid from '../components/PresetGrid.vue'
 import SleepTimerKey from '../components/SleepTimerKey.vue'
@@ -156,6 +156,20 @@ onMounted(async () => {
           <span ref="sleepKeyBox" class="inline-flex">
             <SleepTimerKey :state="state" :mode="settings.sleep_timer_mode" @command="send" />
           </span>
+          <!-- Simple tap, state shown; stays enabled in standby (never greyed
+               by `unavailable`) so a locked remote can always be unlocked. -->
+          <Button
+            :variant="state?.input_locked ? 'default' : 'outline'"
+            size="icon-sm"
+            data-input-lock
+            :aria-pressed="state?.input_locked ? 'true' : 'false'"
+            :aria-label="t(state?.input_locked ? 'input_lock_locked' : 'input_lock_unlocked')"
+            :title="t(state?.input_locked ? 'input_lock_locked' : 'input_lock_unlocked')"
+            @click="send({ cmd: 'SetInputLock', arg: !state?.input_locked })"
+          >
+            <LockClosedIcon v-if="state?.input_locked" class="size-4" />
+            <LockOpen1Icon v-else class="size-4" />
+          </Button>
           <Button variant="outline" size="icon-sm" data-remote-power :aria-label="t(REMOTE_POWER.key)" :title="t(REMOTE_POWER.key)" @click="send(REMOTE_POWER.cmd)">
             <StandbyIcon class="size-4" />
           </Button>

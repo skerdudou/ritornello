@@ -110,8 +110,12 @@ export const REMOTE_COMMANDS: RemoteCommand[] = [
   ...REMOTE_MODES,
 ]
 
-/** The commands the core still acts on in standby (`handle_command`'s gate). */
-const STANDBY_COMMANDS = ['Power', 'SelectSource', 'SourceCycle']
+/**
+ * The commands the core still acts on in standby (`handle_command`'s gate).
+ * The two lock commands pass it as well: a locked remote must be unlockable
+ * whatever the device is doing.
+ */
+const STANDBY_COMMANDS = ['Power', 'SelectSource', 'SourceCycle', 'SetInputLock', 'ToggleInputLock']
 
 /**
  * A command the device would ignore in the current state: its button is
