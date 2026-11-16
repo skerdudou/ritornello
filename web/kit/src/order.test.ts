@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { move } from './order'
+import { move, moveAmong } from './order'
 
 describe('move', () => {
   it('moves down and up', () => {
@@ -26,5 +26,20 @@ describe('move', () => {
     expect(move(['A', 'B'], 9, 0)).toEqual(['A', 'B'])
     expect(move([], 0, 0)).toEqual([])
     expect(move(['A', 'B'], 0.5, 1)).toEqual(['A', 'B'])
+  })
+})
+
+describe('moveAmong', () => {
+  it('equals move() when every item is movable', () => {
+    expect(moveAmong(['a', 'b', 'c'], () => true, 2, 0)).toEqual(['c', 'a', 'b'])
+  })
+  it('leaves an unmovable item at its index', () => {
+    // positions among movables: a=0, c=1, d=2
+    expect(moveAmong(['a', 'B', 'c', 'd'], (x) => x !== 'B', 2, 0)).toEqual(['d', 'B', 'a', 'c'])
+  })
+  it('ignores out-of-range and equal positions', () => {
+    const l = ['a', 'B', 'c']
+    expect(moveAmong(l, (x) => x !== 'B', 0, 2)).toEqual(l)
+    expect(moveAmong(l, (x) => x !== 'B', 1, 1)).toEqual(l)
   })
 })

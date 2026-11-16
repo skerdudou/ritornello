@@ -36,3 +36,30 @@ export function move<T>(list: readonly T[], from: number, to: number): T[] {
   copy.splice(to, 0, element as T)
   return copy
 }
+
+/**
+ * Moves the `from`-th **movable** item to the `to`-th movable position,
+ * returning a **new** list; items `movable` refuses keep their indices.
+ *
+ * The positions are counted among movable items only because that is how
+ * SortableJS counts them (`oldDraggableIndex` / `newDraggableIndex`): a row
+ * that cannot be grabbed is not a place a row can be dropped either. Bad
+ * positions leave the list unchanged, exactly as `move` does.
+ */
+export function moveAmong<T>(
+  list: readonly T[],
+  movable: (item: T) => boolean,
+  from: number,
+  to: number,
+): T[] {
+  const slots: number[] = []
+  list.forEach((item, i) => {
+    if (movable(item)) slots.push(i)
+  })
+  const moved = move(slots.map((i) => list[i] as T), from, to)
+  const copy = [...list]
+  slots.forEach((slot, k) => {
+    copy[slot] = moved[k] as T
+  })
+  return copy
+}

@@ -67,5 +67,10 @@ export {
 export {
   Tabs, TabsContent, TabsList, TabsTrigger,
 } from './components/ui/tabs'
+// Every reorderable list of the shell and of the plugin pages goes through
+// these two: one behaviour for finger and mouse, and one SortableJS for the
+// whole page, since the plugins take it from the kit rather than bundling
+// their own.
+export { ReorderHandle, ReorderList } from './components/ui/reorder-list'
 export { Toaster } from './components/ui/sonner'
 export { toast } from 'vue-sonner'
