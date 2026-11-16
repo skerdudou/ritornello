@@ -866,10 +866,12 @@ pub struct PlayerState {
     /// Absent when none is, so no existing frame changes shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_alarm: Option<NextAlarm>,
-    /// The remote lock is on: an input plugin that implements it is
-    /// swallowing its keys. Derived by the SDK from `InputPlugin::input_lock`
-    /// on the plugin side and published by the core, so the SPA shows the
-    /// padlock. Absent when off, so no existing frame changes shape.
+    /// The remote lock is on: an input plugin that honours it is swallowing
+    /// its keys. This is the core's own state (`Core::input_locked`, set by
+    /// `ToggleInputLock` and `SetInputLock`, forgotten on restart), published
+    /// so the SPA shows the padlock. (The SDK derives `Announcement::input_lock`
+    /// from `InputPlugin::input_lock`, not this field.) Absent when off, so no
+    /// existing frame changes shape.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub input_locked: bool,
     #[serde(flatten)]

@@ -59,7 +59,7 @@ export function headerMode(input: {
   if (listRead && sources <= 1) return 'none'
   if (!listRead || available === null) return 'cycle'
   if (!activeListed) return 'cycle'
-  // The keys and the gaps between them, then the padlock, the sleep timer
+  // The keys and the gaps between them, then the sleep timer, the padlock
   // and standby keys that always close the row, each after its gap, then
   // the standby badge when it shows.
   let needed = sources * KEY + (sources - 1) * GAP + GAP + KEY + GAP + sleepKey + GAP + KEY

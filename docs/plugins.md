@@ -1793,6 +1793,10 @@ what made that migration verifiable.
   - `next_alarm` — `{"weekday":"monday","hour":7,"minute":0}`, the next
     enabled alarm, in the device's local time; it moves at each minute check
     and with each change of the alarm list.
+
+  From `display` contract 1.4 it also carries `input_locked` — `true` while
+  the core's remote lock is on (see the `input` contract 1.2 lock below),
+  **absent** when it is off; the core forgets the lock on restart.
 - `{"frame":"catalog","data":{…}}` — the declared sources, in
   `SourceCycle` order, and for each one that can enumerate them its named
   presets (see [`ListPresets`](#ritornello-plugin-radio--internet-radio) in
@@ -2042,7 +2046,11 @@ core on its input socket, and the only frame the core writes back is
 `{"frame":"lock","locked":true|false}` — the current value at connection, then
 once on each change of it. A plugin that did not opt in is never written to,
 and an unknown frame, or an unreadable line, is logged and skipped by the SDK's
-reader rather than ending it. The core does **not** filter commands itself:
+reader rather than ending it. A plugin that opts in without the SDK should
+know that if the core's lock writer gives up (a write blocked past its 2-second
+deadline, or an error), it closes its write side and the plugin reads EOF: that
+is not the core going away, and the commands the plugin sends keep flowing. The
+core does **not** filter commands itself:
 what a locked state means for its own keys is the plugin's decision (the MPD
 plugin does not opt in: phone apps are an adult's remote).
 

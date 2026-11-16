@@ -730,7 +730,8 @@ individual plugins are untouched and keep their own glyphs.
 
 If a key does not respond, open `http://<host>:8080/plugins/generic-input/`,
 pick the device from the list (a device just plugged in appears on its
-own within five seconds; "Refresh" lists it at once), click "Learn" on the action's row, press the key, then "Save". No
+own within five seconds; "Refresh" lists it at once), click "Learn" on the
+action's row, press the key, then "Save". No
 restart is needed: the table is re-read on every key press. To start from
 a base, load the `mce` or `keyboard` preset.
 
