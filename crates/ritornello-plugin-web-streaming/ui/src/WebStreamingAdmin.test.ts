@@ -438,7 +438,19 @@ describe('WebStreamingAdmin', () => {
     await optionsFor({ entries: [video(1)] })
     const buttons = [...document.querySelectorAll('[data-format], [data-cover]')]
     expect(buttons.length).toBeGreaterThan(0)
-    for (const b of buttons) expect(b.classList.contains('whitespace-normal'), b.outerHTML).toBe(true)
+    for (const b of buttons) {
+      expect(b.classList.contains('max-md:whitespace-normal'), b.outerHTML).toBe(true)
+      // Unprefixed, h-auto would replace the kit's h-8 and grow the desktop buttons.
+      expect(b.classList.contains('h-auto'), b.outerHTML).toBe(false)
+      expect(b.classList.contains('whitespace-normal'), b.outerHTML).toBe(false)
+    }
+  })
+
+  it('the cut fields keep their desktop width', async () => {
+    await optionsFor({ entries: [video(1)] })
+    for (const sel of ['[data-trim-start="1"]', '[data-trim-end="1"]']) {
+      expect(inDialog(sel)!.classList.contains('w-24'), sel).toBe(true)
+    }
   })
 
   it('says what is wrong with a time and does not download until it is right', async () => {

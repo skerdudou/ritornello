@@ -310,7 +310,7 @@ function formatLabel(f: Format): string {
               v-for="f in FORMATS"
               :key="f"
               size="sm"
-              class="h-auto min-h-9 w-full whitespace-normal"
+              class="w-full max-md:h-auto max-md:min-h-9 max-md:whitespace-normal"
               :variant="f === format ? 'default' : 'outline'"
               :aria-pressed="f === format"
               :data-format="f"
@@ -333,7 +333,7 @@ function formatLabel(f: Format): string {
               v-for="c in COVERS"
               :key="c"
               size="sm"
-              class="h-auto min-h-9 w-full whitespace-normal"
+              class="w-full max-md:h-auto max-md:min-h-9 max-md:whitespace-normal"
               :variant="cover === c ? 'default' : 'outline'"
               :aria-pressed="cover === c"
               :data-cover="c"
@@ -364,7 +364,7 @@ function formatLabel(f: Format): string {
               <span class="shrink-0 text-muted-foreground">{{ t('trim_from') }}</span>
               <Input
                 v-model="cuts[String(i.preset)]!.start"
-                class="w-28"
+                class="w-24 max-md:w-28"
                 :data-trim-start="i.preset"
                 :disabled="!ffmpeg"
                 :placeholder="t('trim_start_placeholder')"
@@ -373,7 +373,7 @@ function formatLabel(f: Format): string {
               <span class="shrink-0 text-muted-foreground">{{ t('trim_to') }}</span>
               <Input
                 v-model="cuts[String(i.preset)]!.end"
-                class="w-28"
+                class="w-24 max-md:w-28"
                 :data-trim-end="i.preset"
                 :disabled="!ffmpeg"
                 :placeholder="t('trim_end_placeholder')"
