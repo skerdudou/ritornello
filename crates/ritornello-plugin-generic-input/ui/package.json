@@ -9,6 +9,7 @@
     "typecheck": "vue-tsc --noEmit"
   },
   "devDependencies": {
+    "@radix-icons/vue": "^1.0.0",
     "@ritornello/ui": "^0.1.0",
     "@tailwindcss/vite": "^4.3.5",
     "@vitejs/plugin-vue": "^6.0.10",

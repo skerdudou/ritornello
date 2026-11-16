@@ -261,3 +261,19 @@ test('at desktop width the station table keeps its header row', async ({ page })
   const url = await page.locator('[data-station-url]').first().boundingBox()
   expect(Math.abs(name!.y - url!.y)).toBeLessThan(2) // same line
 })
+
+test('on a phone: the generic-input buttons are icons, their words kept for screen readers', async ({ page }) => {
+  await page.goto('/plugins/generic-input/')
+  const learn = page.locator('[data-learn]').first()
+  await expect(learn).toBeVisible()
+  expect((await learn.boundingBox())!.width).toBeLessThanOrEqual(44)
+  expect((await learn.locator('[data-label]').boundingBox())!.width).toBeLessThanOrEqual(1)
+  await expect(learn).toHaveAttribute('aria-label', /.+/)
+})
+
+test('at desktop width the generic-input buttons show their words', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await page.goto('/plugins/generic-input/')
+  expect((await page.locator('[data-learn] [data-label]').first().boundingBox())!.width).toBeGreaterThan(20)
+  await expect(page.locator('[data-learn] [data-phone-icon]').first()).toBeHidden()
+})
