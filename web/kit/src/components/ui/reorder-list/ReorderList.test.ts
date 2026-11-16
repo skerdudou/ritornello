@@ -124,6 +124,19 @@ describe('ReorderList', () => {
     expect(order(r)).toEqual(['a', 'b', 'c'])
   })
 
+  it('a second drag before the answer starts from the order on screen', async () => {
+    const onMove = vi.fn(() => new Promise(() => {}))
+    const w = mountList({ onMove })
+    drop(w, 'c', 'a', 2, 0)
+    await nextTick()
+    expect(order(w)).toEqual(['c', 'a', 'b'])
+    // Sortable counts on the displayed rows: position 0 is now `c`, not `a`.
+    drop(w, 'c', 'b', 0, 1)
+    await nextTick()
+    expect(onMove).toHaveBeenLastCalledWith(0, 1)
+    expect(order(w)).toEqual(['a', 'c', 'b'])
+  })
+
   it('a drop in place calls nothing', async () => {
     const onMove = vi.fn()
     const w = mountList({ onMove })

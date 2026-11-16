@@ -66,7 +66,9 @@ let anchor: Node | null = null
 function onStart(e: SortableEvent) {
   // A poll that lands mid-drag must not re-render the rows under the finger:
   // Vue would patch a DOM that Sortable has rearranged.
-  snapshot.value = [...props.items]
+  // What is on screen, a pending order included: Sortable's indices count
+  // the displayed rows, not the parent's list.
+  snapshot.value = [...shown.value]
   anchor = e.item.nextSibling
 }
 
