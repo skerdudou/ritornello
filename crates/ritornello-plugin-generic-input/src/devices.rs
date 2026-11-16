@@ -202,6 +202,12 @@ pub fn key_outcome_event(
 /// toggles after `LONG_PRESS`, and one that does repeat toggles once.
 pub(crate) async fn key_loop(mut events: mpsc::Receiver<(u16, i32)>, name: String, hub: Hub) {
     let mut press = LockKeyPress::default();
+    // The code whose hold is armed. A release of that code disarms it
+    // whatever the bindings say by then: learning may have started on this
+    // device, or the table changed, during the hold, and the release then no
+    // longer resolves to `LockRelease` — yet the key is up, and the deadline
+    // must not toggle for a key nobody holds.
+    let mut armed: Option<u16> = None;
     loop {
         let deadline = press.deadline();
         let event = tokio::select! {
@@ -226,6 +232,10 @@ pub(crate) async fn key_loop(mut events: mpsc::Receiver<(u16, i32)>, name: Strin
                         continue;
                     }
                 }
+                if edge == KeyEdge::Release && armed == Some(code) {
+                    press.release();
+                    armed = None;
+                }
                 // No lock guard crosses an `.await`.
                 let (outcome, is_lock_key) = {
                     let learn = hub.learn.read().unwrap();
@@ -245,10 +255,12 @@ pub(crate) async fn key_loop(mut events: mpsc::Receiver<(u16, i32)>, name: Strin
                     }
                     Outcome::LockPress => {
                         press.press(Instant::now());
+                        armed = Some(code);
                         false
                     }
                     Outcome::LockRelease => {
                         press.release();
+                        armed = None;
                         false
                     }
                     // An autorepeat of the lock key is a chance to notice the
@@ -769,6 +781,25 @@ mod tests {
         let (ev, mut rx, _lock) = loop_fixture(false);
         ev.send((LOCK_CODE, 1)).await.unwrap();
         advance(1500).await;
+        ev.send((LOCK_CODE, 0)).await.unwrap();
+        advance(5000).await;
+        nothing(&mut rx);
+    }
+
+    /// A release that no longer resolves to the lock key (the table changed
+    /// during the hold) must still disarm the hold: the key is up.
+    #[tokio::test(start_paused = true)]
+    async fn a_release_after_the_bindings_changed_still_disarms_the_hold() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let (_lock_tx, lock_rx) = watch::channel(false);
+        let hub = Hub::new(lock_table(), tx, lock_rx);
+        let bindings = hub.bindings.clone();
+        let (ev, ev_rx) = mpsc::channel(64);
+        tokio::spawn(key_loop(ev_rx, "eHome".into(), hub));
+        ev.send((LOCK_CODE, 1)).await.unwrap();
+        advance(500).await;
+        // The key no longer resolves to the lock.
+        *bindings.write().unwrap() = Bindings { devices: vec![] };
         ev.send((LOCK_CODE, 0)).await.unwrap();
         advance(5000).await;
         nothing(&mut rx);
