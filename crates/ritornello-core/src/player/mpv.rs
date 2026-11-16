@@ -1687,12 +1687,11 @@ pub(crate) mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&mpv, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let chain = crate::equalizer::af_chain(&crate::equalizer::EqualizerSettings::default());
-        let chain = if chain.is_empty() {
-            "@eqpre:lavfi=[volume=0dB],@eq5:lavfi=[equalizer=f=1000:t=o:w=1:g=0]".to_string()
-        } else {
-            chain
-        };
+        // Built through the model, so this cannot drift from the real format.
+        let chain = crate::equalizer::af_chain(&crate::equalizer::EqualizerSettings {
+            enabled: true,
+            ..Default::default()
+        });
         let (tx, mut rx) = mpsc::channel(1024);
         tokio::spawn(async move { while rx.recv().await.is_some() {} });
         let (player, _child) =
