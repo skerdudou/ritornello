@@ -161,30 +161,99 @@ fn peaking_response_db(f0: f64, gain_db: f64, f: f64) -> f64 {
     let alpha = w0.sin() * (LN_2 / 2.0 * 1.0 * w0 / w0.sin()).sinh();
     let b = [1.0 + alpha * a, -2.0 * w0.cos(), 1.0 - alpha * a];
     let den = [1.0 + alpha / a, -2.0 * w0.cos(), 1.0 - alpha / a];
-    let w = 2.0 * PI * f / SAMPLE_RATE;
+    biquad_response_db(&b, &den, f)
+}
+
+/// Magnitude in dB of the biquad `b / den` at frequency `f`.
+fn biquad_response_db(b: &[f64; 3], den: &[f64; 3], f: f64) -> f64 {
+    let w = 2.0 * std::f64::consts::PI * f / SAMPLE_RATE;
     let mag2 = |c: &[f64; 3]| {
         let re = c[0] + c[1] * w.cos() + c[2] * (2.0 * w).cos();
         let im = -(c[1] * w.sin() + c[2] * (2.0 * w).sin());
         re * re + im * im
     };
-    10.0 * (mag2(&b) / mag2(&den)).log10()
+    10.0 * (mag2(b) / mag2(den)).log10()
 }
 
-/// Opposite of the peak of the combined response, never above 0.
+/// The preamp's shelf: centre frequency and Q. `af_chain` writes the
+/// filter from these, so the model and the chain cannot drift apart.
+const SHELF_HZ: f64 = 10.0;
+const SHELF_Q: f64 = 0.707;
+
+/// The lowest frequency the compensation looks at: the shelf's own centre.
+/// Below it the shelf still attenuates partly, but nothing is searched.
+const COMPENSATED_FROM_HZ: f64 = SHELF_HZ;
+
+/// Coefficients (`b`, `den`) of the preamp's RBJ high shelf (the one
+/// ffmpeg's `highshelf` uses, `t=q`) at gain `gain_db`. They depend on the
+/// gain only: compute them once, then evaluate with `biquad_response_db`.
+fn highshelf_coefficients(gain_db: f64) -> ([f64; 3], [f64; 3]) {
+    use std::f64::consts::PI;
+    let a = 10f64.powf(gain_db / 40.0);
+    let w0 = 2.0 * PI * SHELF_HZ / SAMPLE_RATE;
+    let (cos, alpha) = (w0.cos(), w0.sin() / (2.0 * SHELF_Q));
+    let beta = 2.0 * a.sqrt() * alpha;
+    let b = [
+        a * ((a + 1.0) + (a - 1.0) * cos + beta),
+        -2.0 * a * ((a - 1.0) + (a + 1.0) * cos),
+        a * ((a + 1.0) + (a - 1.0) * cos - beta),
+    ];
+    let den = [
+        (a + 1.0) - (a - 1.0) * cos + beta,
+        2.0 * ((a - 1.0) - (a + 1.0) * cos),
+        (a + 1.0) - (a - 1.0) * cos - beta,
+    ];
+    (b, den)
+}
+
+/// The least attenuation, in dB (never above 0), that keeps the chain mpv
+/// runs — the ten bands **and the preamp's shelf** — at or below 0 dB from
+/// 10 Hz to 20 kHz.
+///
+/// The shelf is not a flat gain: at -12 it gives -11.8 dB at 31 Hz, -11 at
+/// 20 Hz, -6 at 10 Hz (measured). Taking the preamp as the opposite of the
+/// bands' peak, as if it were flat, left a lone 31 Hz boost above 0 dB, so
+/// the preamp is searched on the combined curve instead: a bisection, since
+/// lowering the shelf's gain lowers its response at every frequency. The
+/// search does not look below 10 Hz (`COMPENSATED_FROM_HZ`).
 pub fn preamp_db(gains: &[i8; 10]) -> f64 {
-    const POINTS: usize = 400;
-    let (lo, hi) = (20f64.ln(), 20_000f64.ln());
-    let mut peak = f64::MIN;
-    for i in 0..POINTS {
-        let f = (lo + (hi - lo) * i as f64 / (POINTS - 1) as f64).exp();
-        let total: f64 = BANDS_HZ
-            .iter()
-            .zip(gains)
-            .map(|(&hz, &g)| peaking_response_db(f64::from(hz), f64::from(g), f))
-            .sum();
-        peak = peak.max(total);
+    const FLOOR: f64 = -40.0;
+    let grid: Vec<(f64, f64)> = compensation_grid()
+        .map(|f| {
+            let bands: f64 = BANDS_HZ
+                .iter()
+                .zip(gains)
+                .map(|(&hz, &g)| peaking_response_db(f64::from(hz), f64::from(g), f))
+                .sum();
+            (f, bands)
+        })
+        .collect();
+    let fits = |p: f64| {
+        let (b, den) = highshelf_coefficients(p);
+        grid.iter().all(|&(f, bands)| bands + biquad_response_db(&b, &den, f) <= 0.0)
+    };
+    if fits(0.0) {
+        return 0.0;
     }
-    -peak.max(0.0)
+    // `low` always fits (or is the floor), `high` never does.
+    let (mut low, mut high) = (FLOOR, 0.0);
+    while high - low > 0.005 {
+        let mid = (low + high) / 2.0;
+        if fits(mid) {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    low
+}
+
+/// The frequencies `preamp_db` checks: 500 points, evenly spaced on a log
+/// scale from `COMPENSATED_FROM_HZ` to 20 kHz.
+fn compensation_grid() -> impl Iterator<Item = f64> {
+    const POINTS: usize = 500;
+    let (lo, hi) = (COMPENSATED_FROM_HZ.ln(), 20_000f64.ln());
+    (0..POINTS).map(move |i| (lo + (hi - lo) * i as f64 / (POINTS - 1) as f64).exp())
 }
 
 pub fn effective_preamp_db(s: &EqualizerSettings) -> f64 {
@@ -212,14 +281,15 @@ fn fmt_db(v: f64) -> String {
 /// **The preamp is a high shelf at 10 Hz, not a `volume` filter.** Measured
 /// on mpv 0.37: `volume` clicks on any change faster than about 2.5 dB/s,
 /// while a shelf this low is a broadband gain that jumps 0 to -12 dB and back
-/// without a click. It is flat within 0.21 dB from 31 Hz up; below about
-/// 20 Hz it attenuates less (infrasound is not compensated).
+/// without a click. It is flat within 0.21 dB from 31 Hz up and attenuates
+/// less below (half its gain at 10 Hz): `preamp_db` computes the
+/// compensation on that real curve, down to 10 Hz.
 pub fn af_chain(s: &EqualizerSettings) -> String {
     if !s.enabled {
         return String::new();
     }
     let mut parts = vec![format!(
-        "@eqpre:lavfi=[highshelf=f=10:t=q:w=0.707:g={}]",
+        "@eqpre:lavfi=[highshelf=f={SHELF_HZ}:t=q:w={SHELF_Q}:g={}]",
         fmt_db(effective_preamp_db(s))
     )];
     for (i, (hz, g)) in BANDS_HZ.iter().zip(s.gains).enumerate() {
@@ -356,6 +426,83 @@ mod tests {
         let p = preamp_db(&g);
         assert!(p < -12.5, "{p}");
         assert!((p + 14.60).abs() < 0.05, "{p}");
+    }
+
+    /// The shelf formula pinned against mpv 0.37 itself (measured with
+    /// `highshelf=f=10:t=q:w=0.707:g=-12` on a sine sweep): it gives only
+    /// half its gain at 10 Hz, and is flat from about 31 Hz up.
+    #[test]
+    fn the_shelf_matches_its_measured_curve() {
+        let (b, den) = highshelf_coefficients(-12.0);
+        let at = |f| biquad_response_db(&b, &den, f);
+        for (f, want, tol) in [(10.0, -6.0, 0.3), (20.0, -11.0, 0.3), (31.0, -11.8, 0.2), (1000.0, -12.0, 0.05)] {
+            assert!((at(f) - want).abs() <= tol, "{f} Hz: {} (want {want} ±{tol})", at(f));
+        }
+    }
+
+    /// The highest point of the chain mpv really runs — the ten bands and
+    /// the preamp's shelf — from 10 Hz to 20 kHz, on a grid finer than the
+    /// one `preamp_db` searches.
+    fn combined_peak_db(gains: &[i8; 10], preamp: f64) -> f64 {
+        combined_peak_at(gains, preamp).0
+    }
+
+    /// `combined_peak_db` and the frequency where it lies.
+    fn combined_peak_at(gains: &[i8; 10], preamp: f64) -> (f64, f64) {
+        const POINTS: usize = 4000;
+        let (lo, hi) = (10f64.ln(), 20_000f64.ln());
+        let (b, den) = highshelf_coefficients(preamp);
+        (0..POINTS)
+            .map(|i| {
+                let f = (lo + (hi - lo) * i as f64 / (POINTS - 1) as f64).exp();
+                let bands: f64 = BANDS_HZ
+                    .iter()
+                    .zip(gains)
+                    .map(|(&hz, &g)| peaking_response_db(f64::from(hz), f64::from(g), f))
+                    .sum();
+                (bands + biquad_response_db(&b, &den, f), f)
+            })
+            .fold((f64::MIN, 0.0), |best, x| if x.0 > best.0 { x } else { best })
+    }
+
+    /// The search starts at the shelf's own 10 Hz, not at 20 Hz. Pinned on
+    /// the grid itself: across every setting tried (bands 31 to 250 Hz in
+    /// steps of 3 dB, the others at -12), the point that binds the preamp
+    /// never lay below 26.8 Hz, so no result of `preamp_db` tells a 20 Hz
+    /// start from a 10 Hz one today.
+    #[test]
+    fn the_compensation_looks_down_to_10_hz() {
+        let grid: Vec<f64> = compensation_grid().collect();
+        assert!((grid[0] - 10.0).abs() < 1e-9, "starts at {}", grid[0]);
+        assert!((grid[grid.len() - 1] - 20_000.0).abs() < 1e-6, "ends at {}", grid[grid.len() - 1]);
+    }
+
+    #[test]
+    fn preamp_is_zero_when_flat() {
+        assert_eq!(preamp_db(&[0; 10]), 0.0);
+    }
+
+    /// The shelf gives only -11.79 dB at 31 Hz for -12: a preamp computed
+    /// as if it were a flat gain left a lone 31 Hz boost 0.2 dB above 0,
+    /// and more below.
+    #[test]
+    fn a_31_hz_boost_is_fully_compensated_through_the_shelf() {
+        let mut g = [0; 10];
+        g[0] = 12;
+        let p = preamp_db(&g);
+        let peak = combined_peak_db(&g, p);
+        assert!(peak <= 0.05, "preamp {p}: combined peak {peak} dB");
+    }
+
+    #[test]
+    fn the_combined_peak_never_exceeds_zero() {
+        for gains in [[12; 10], [12, 12, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 12, 12, 0, 0, 0], [-12, 12, -12, 12, -12, 12, -12, 12, -12, 12]] {
+            let p = preamp_db(&gains);
+            let peak = combined_peak_db(&gains, p);
+            assert!(peak <= 0.05, "{gains:?}: preamp {p}, peak {peak}");
+            // The least attenuation that does it, not any.
+            assert!(peak >= -0.1, "{gains:?}: preamp {p} over-compensates, peak {peak}");
+        }
     }
 
     fn flat_chain(pre: &str) -> String {

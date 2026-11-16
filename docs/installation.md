@@ -1490,14 +1490,21 @@ ffmpeg 6.1.1:
 - the gains set by `af-command` are lost at every new file, which is why the
   core rewrites the chain on `start-file` when the setting changed since it
   was last written; an idle mpv refuses every `af-command`, so a change made
-  while nothing plays waits for that rewrite;
+  while nothing plays waits for that rewrite; a loading mpv refuses them too,
+  from `start-file` until `playback-restart` (up to 3 s for a radio), so a
+  change made then is sent at `playback-restart`. That catch-up is tested
+  against a fake player only; a real mpv was only shown to accept a command
+  right after `playback-restart`;
 - the preamp is a high shelf at 10 Hz, not a `volume` filter: `volume`
   clicked on any change faster than about 2.5 dB/s, while the shelf jumped
   0 to -12 dB and back without a measurable click. That was measured on WSL
   only, never heard on the Pi's output. The shelf is flat within 0.21 dB from
-  31 Hz up, but below about 20 Hz it attenuates less: infrasound is not
-  compensated. Whether a biquad this low stays stable in the Pi's float path
-  is unverified;
+  31 Hz up and attenuates less below (half its gain at 10 Hz); the automatic
+  compensation is computed on the shelf's real curve together with the
+  bands, down to 10 Hz; the compensation does not look below 10 Hz. The
+  shelf's formula was checked against the WSL measurements only, never
+  against the Pi. Whether a biquad this low stays stable in the Pi's float
+  path is unverified;
 - whether changing the audio output keeps the live gains is unknown: mpv may
   rebuild the chain from `af` when it reloads the output, so the core rewrites
   the chain after every output change while the equalizer is on — a rewrite

@@ -48,5 +48,10 @@ pub enum Event {
     /// and too early, `playback-restart` leaves 100 to 730 ms of the old
     /// curve).
     FileStarting,
+    /// mpv's `playback-restart` IPC event: the file is decoding and its
+    /// audio filter chain is live. Measured on mpv 0.37: `af-command` is
+    /// refused from `start-file` until this event (0.1 to 3 s, a radio
+    /// connecting) and accepted from it on. Also sent after every seek.
+    PlaybackRestarted,
     TrackChanged(i64),
 }

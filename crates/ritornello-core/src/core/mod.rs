@@ -556,10 +556,11 @@ pub struct Core<P: Player> {
     /// when the last write failed and `af` is unknown. A file start rewrites
     /// the chain only when it differs from the setting's.
     eq_chain_written: Option<String>,
-    /// A file is loaded, so mpv holds a live chain `af-command` can reach:
-    /// set at `FileStarting`, cleared at `PlaybackIdle` (an idle mpv refuses
-    /// every `af-command`). False at launch: mpv starts idle.
-    eq_file_loaded: bool,
+    /// mpv holds a live chain `af-command` can reach: set at
+    /// `PlaybackRestarted`, cleared at `FileStarting` and `PlaybackIdle` (an
+    /// idle or loading mpv refuses every `af-command`). False at launch: mpv
+    /// starts idle.
+    eq_live: bool,
 }
 
 /// What the detached read of an armed file (`Core::arm`) found: its tags
@@ -723,7 +724,7 @@ impl<P: Player> Core<P> {
             equalizer: persisted.equalizer.clone(),
             eq_bands_sent: persisted.equalizer.gains,
             eq_chain_written: Some(crate::equalizer::af_chain(&persisted.equalizer)),
-            eq_file_loaded: false,
+            eq_live: false,
         };
         // The sources wired at startup are already known: without this
         // publication, the channel would keep its blank

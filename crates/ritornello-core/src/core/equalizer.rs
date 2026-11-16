@@ -6,13 +6,16 @@
 //! rebuilds the chain from the recorded `af`, losing whatever `af-command`
 //! set; and an idle mpv answers "error running command" to every
 //! `af-command` (there is no live chain), while setting `af` works idle too.
+//! A loading mpv refuses them the same way, from `start-file` until
+//! `playback-restart` (0.1 to 3 s, a radio connecting).
 //! The preamp is a 10 Hz high shelf (see `crate::equalizer::af_chain`),
 //! which jumps without a click: it is commanded at once, like a band.
 //!
 //! Hence:
 //! - toggling `enabled` rewrites the chain (empty when disabled) — the only
 //!   rewrite tolerated during playback, a brief cut the design accepts;
-//! - otherwise, while enabled and a file is loaded, one `af-command` per
+//! - otherwise, while enabled and the chain is live (`eq_live`, from
+//!   `playback-restart` to the next file start or idle), one `af-command` per
 //!   band whose gain differs from what mpv holds, and one for the preamp
 //!   when it moved;
 //! - **never a boost before its attenuation**: when the preamp goes down
@@ -24,8 +27,10 @@
 //!   after an IPC timeout would stall the main loop again. What was not sent
 //!   stays pending (`eq_preamp_sent`, `eq_bands_sent` track only what mpv
 //!   acknowledged); the next change or the next file catches up;
-//! - while disabled, or while no file is loaded, nothing but the setting
-//!   moves: there is no filter to command;
+//! - while disabled, or while the chain is not live, nothing but the setting
+//!   moves: there is no filter to command. At `playback-restart`
+//!   (`equalizer_live`) what changed while the file loaded is sent, by the
+//!   same rules; after a seek nothing differs and nothing is sent;
 //! - at each file start (`reapply_equalizer`), the whole chain is rewritten
 //!   — **only when mpv's `af` no longer holds the current setting**
 //!   (`eq_chain_written`). mpv rebuilds the chain from `af` anyway, so a
@@ -44,10 +49,11 @@ impl<P: Player> Core<P> {
         self.equalizer = new;
         let result = if old_enabled != self.equalizer.enabled {
             self.write_chain().await
-        } else if self.equalizer.enabled && self.eq_file_loaded {
+        } else if self.equalizer.enabled && self.eq_live {
             self.command_change().await
         } else {
-            // Disabled, or nothing loaded: no filter to command. The next
+            // Disabled, or no live chain: no filter to command. A file
+            // loading catches up at `playback-restart`; otherwise the next
             // file start sees `af` differ from the setting and rewrites it.
             Ok(())
         };
@@ -73,9 +79,10 @@ impl<P: Player> Core<P> {
     /// A file is starting: mpv rebuilds the chain from `af`, dropping what
     /// `af-command` set. Rewrite `af` only if it no longer holds the current
     /// setting; either way the chain now carries the setting, so whatever a
-    /// failed command left pending is moot.
+    /// failed command left pending is moot. mpv refuses `af-command` until
+    /// `playback-restart` (`equalizer_live`).
     pub async fn reapply_equalizer(&mut self) {
-        self.eq_file_loaded = true;
+        self.eq_live = false;
         let chain = crate::equalizer::af_chain(&self.equalizer);
         if self.eq_chain_written.as_deref() == Some(chain.as_str()) {
             self.eq_preamp_sent = crate::equalizer::effective_preamp_db(&self.equalizer);
@@ -87,10 +94,25 @@ impl<P: Player> Core<P> {
         }
     }
 
+    /// `playback-restart`: the chain is live and takes `af-command`. Catch up
+    /// on whatever changed while it was loading — what mpv holds
+    /// (`eq_bands_sent`, `eq_preamp_sent`, set by the chain written at the
+    /// file start) against the setting — in the order of any change. After
+    /// a seek, nothing differs and nothing is sent.
+    pub(super) async fn equalizer_live(&mut self) {
+        self.eq_live = true;
+        if !self.equalizer.enabled {
+            return;
+        }
+        if let Err(e) = self.command_change().await {
+            tracing::warn!("equalizer at playback restart: {e}");
+        }
+    }
+
     /// mpv went idle: no live chain any more, so no `af-command` until the
-    /// next file (`reapply_equalizer`).
+    /// next file's `playback-restart` (`equalizer_live`).
     pub(super) fn equalizer_idle(&mut self) {
-        self.eq_file_loaded = false;
+        self.eq_live = false;
     }
 
     /// The audio output changed: mpv may rebuild the chain from `af` when it
@@ -176,9 +198,19 @@ mod tests {
         rig
     }
 
-    /// `launched_with`, then a file started: mpv holds a live chain that
-    /// `af-command` can reach (an idle mpv refuses every one).
+    /// `launched_with`, then a file started and its playback restarted: mpv
+    /// holds a live chain that `af-command` can reach (an idle or loading
+    /// mpv refuses every one).
     async fn playing_with(eq: EqualizerSettings) -> Rig {
+        let mut rig = loading_with(eq).await;
+        rig.0.handle_event(Event::PlaybackRestarted).await;
+        rig.1.lock().unwrap().clear();
+        rig
+    }
+
+    /// `launched_with`, then a file started but its playback not restarted
+    /// yet: mpv refuses `af-command` (measured), as it does idle.
+    async fn loading_with(eq: EqualizerSettings) -> Rig {
         let mut rig = setup_persisted(PersistedState { equalizer: eq, ..Default::default() });
         rig.0.handle_event(Event::FileStarting).await;
         rig.1.lock().unwrap().clear();
@@ -363,6 +395,7 @@ mod tests {
         calls.lock().unwrap().clear();
         core.handle_event(Event::FileStarting).await;
         assert_eq!(calls_of(&calls), vec![format!("af {}", af_chain(&current))]);
+        core.handle_event(Event::PlaybackRestarted).await;
 
         // A later change sends only the band that moved since.
         calls.lock().unwrap().clear();
@@ -427,6 +460,7 @@ mod tests {
         core.set_equalizer(next.clone()).await.unwrap();
         calls.lock().unwrap().clear();
         core.handle_event(Event::FileStarting).await;
+        core.handle_event(Event::PlaybackRestarted).await;
         assert!(calls_of(&calls).is_empty(), "{:?}", calls_of(&calls));
         // …and a later change sends only what moved from that setting.
         core.set_equalizer(start.clone()).await.unwrap();
@@ -452,9 +486,94 @@ mod tests {
         *core.player.af_cmd_fails_for.lock().unwrap() = None;
         calls.lock().unwrap().clear();
         core.handle_event(Event::FileStarting).await;
+        core.handle_event(Event::PlaybackRestarted).await;
         assert!(calls_of(&calls).is_empty(), "af already holds the setting: {:?}", calls_of(&calls));
 
         core.set_equalizer(start.clone()).await.unwrap();
         assert!(calls_of(&calls).is_empty(), "{:?}", calls_of(&calls));
+    }
+
+    /// Between `start-file` and `playback-restart` (up to 3 s, a radio
+    /// connecting) mpv refuses `af-command` (measured). A change made then
+    /// used to log a warning and be heard only from the next file — hours
+    /// later on a radio — while the page showed it. It now waits, silently,
+    /// and reaches mpv at `playback-restart`, in the usual order.
+    #[tokio::test]
+    async fn a_change_while_loading_is_sent_at_playback_restart() {
+        // Preamp going down: preamp first, then the boost.
+        let (mut core, calls, _sc, _rx, dir) = loading_with(enabled()).await;
+        core.player.af_cmd_fails.store(true, Ordering::SeqCst);
+        let new = with_band(enabled(), 5, 12);
+        core.set_equalizer(new.clone()).await.expect("no command, so no error");
+        assert!(calls_of(&calls).is_empty(), "{:?}", calls_of(&calls));
+        assert_eq!(disk_equalizer(&dir), new);
+        core.player.af_cmd_fails.store(false, Ordering::SeqCst);
+        core.handle_event(Event::PlaybackRestarted).await;
+        assert_eq!(calls_of(&calls), vec![preamp_call(effective_preamp_db(&new)), band_call(5, 12)]);
+
+        // Preamp going up: the cut, the boost, then the preamp.
+        let (mut core, calls, _sc, _rx, _dir) = loading_with(with_band(enabled(), 5, 12)).await;
+        let new = with_band(enabled(), 4, 6);
+        core.set_equalizer(new.clone()).await.unwrap();
+        assert!(calls_of(&calls).is_empty(), "{:?}", calls_of(&calls));
+        core.handle_event(Event::PlaybackRestarted).await;
+        assert_eq!(calls_of(&calls), vec![band_call(5, 0), band_call(4, 6), preamp_call(effective_preamp_db(&new))]);
+
+        // Caught up: a change after that sends only what moves.
+        calls.lock().unwrap().clear();
+        core.set_equalizer(with_band(new.clone(), 0, -3)).await.unwrap();
+        assert_eq!(band_calls(&calls), vec![band_call(0, -3)]);
+    }
+
+    /// The case that happens: something plays, the next file (a radio
+    /// connecting) starts, and the equalizer moves before its playback
+    /// restarts. The file start must end the live window it inherited.
+    #[tokio::test]
+    async fn a_change_while_the_next_file_loads_waits_for_its_playback_restart() {
+        let (mut core, calls, _sc, _rx, dir) = playing_with(enabled()).await;
+        core.handle_event(Event::FileStarting).await;
+        assert!(calls_of(&calls).is_empty(), "af holds the setting: {:?}", calls_of(&calls));
+        core.player.af_cmd_fails.store(true, Ordering::SeqCst);
+        let new = with_band(enabled(), 5, 12);
+        core.set_equalizer(new.clone()).await.expect("no command while loading, so no error");
+        assert!(calls_of(&calls).is_empty(), "{:?}", calls_of(&calls));
+        assert_eq!(disk_equalizer(&dir), new);
+
+        core.player.af_cmd_fails.store(false, Ordering::SeqCst);
+        core.handle_event(Event::PlaybackRestarted).await;
+        assert_eq!(calls_of(&calls), vec![preamp_call(effective_preamp_db(&new)), band_call(5, 12)]);
+    }
+
+    /// `playback-restart` also follows every seek: with nothing changed, it
+    /// costs no command.
+    #[tokio::test]
+    async fn a_playback_restart_with_nothing_changed_sends_nothing() {
+        let (mut core, calls, _sc, _rx, _dir) = playing_with(with_band(enabled(), 5, 6)).await;
+        core.handle_event(Event::PlaybackRestarted).await;
+        assert!(calls_of(&calls).is_empty(), "seek: {:?}", calls_of(&calls));
+
+        core.handle_event(Event::FileStarting).await;
+        core.handle_event(Event::PlaybackRestarted).await;
+        assert!(calls_of(&calls).is_empty(), "next file: {:?}", calls_of(&calls));
+    }
+
+    /// Disabled, mpv holds no equalizer chain: nothing to catch up on.
+    #[tokio::test]
+    async fn a_disabled_equalizer_catches_up_on_nothing() {
+        let (mut core, calls, _sc, _rx, _dir) = loading_with(EqualizerSettings::default()).await;
+        core.set_equalizer(with_band(EqualizerSettings::default(), 5, 6)).await.unwrap();
+        core.handle_event(Event::PlaybackRestarted).await;
+        assert!(calls_of(&calls).is_empty(), "{:?}", calls_of(&calls));
+    }
+
+    /// The catch-up obeys the rule of every change: the first error stops
+    /// it, before the boost its attenuation was there to compensate.
+    #[tokio::test]
+    async fn a_failed_catch_up_stops_at_the_first_error() {
+        let (mut core, calls, _sc, _rx, _dir) = loading_with(enabled()).await;
+        core.set_equalizer(with_band(enabled(), 5, 12)).await.unwrap();
+        core.player.af_cmd_fails.store(true, Ordering::SeqCst);
+        core.handle_event(Event::PlaybackRestarted).await;
+        assert_eq!(calls_of(&calls).len(), 1, "{:?}", calls_of(&calls));
     }
 }

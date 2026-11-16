@@ -328,6 +328,7 @@ mod tests {
         let (mut core, player_calls, _sc, _rx, _dir) =
             setup_persisted(PersistedState { equalizer: eq.clone(), ..Default::default() });
         core.handle_event(Event::FileStarting).await;
+        core.handle_event(Event::PlaybackRestarted).await;
         eq.gains[5] = 6;
         core.set_equalizer(eq.clone()).await.unwrap();
         player_calls.lock().unwrap().clear();
