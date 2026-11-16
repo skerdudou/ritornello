@@ -2051,10 +2051,12 @@ core on its input socket, and the only frame the core writes back is
 once on each change of it. A plugin that did not opt in is never written to,
 and an unknown frame, or an unreadable line, is logged and skipped by the SDK's
 reader rather than ending it. A plugin that opts in without the SDK should
-know that if the core's lock writer gives up (a write blocked past its 2-second
-deadline, or an error), it closes its write side and the plugin reads EOF: that
-is not the core going away, and the commands the plugin sends keep flowing. The
-core does **not** filter commands itself:
+know that the core's lock writer never gives up on a slow reader: a write
+blocked past its 2-second deadline is logged once and then waited for, and when
+it completes the writer sends the lock's current value if it moved meanwhile,
+so a plugin that stops reading for a while catches up on resuming. Only a write
+error (the peer is gone) ends the writer, and the commands the plugin sends keep
+flowing throughout. The core does **not** filter commands itself:
 what a locked state means for its own keys is the plugin's decision (the MPD
 plugin does not opt in: phone apps are an adult's remote).
 
