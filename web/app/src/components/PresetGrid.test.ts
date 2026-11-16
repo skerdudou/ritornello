@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { resetCatalog, useCatalog } from '../composables/useCatalog'
 import type { PlayerPayload } from '../types'
 import PresetGrid from './PresetGrid.vue'
+import { LAYOUT_KEY, revealScrollTop } from './presetLayout'
 
 const state = (e: Partial<PlayerPayload>): PlayerPayload => ({
   source: 'radio', volume: 60, muted: false, standby: false, preset: null, preset_count: null,
@@ -13,7 +14,10 @@ const state = (e: Partial<PlayerPayload>): PlayerPayload => ({
 const NAMES: Record<number, string> = { 1: 'FIP', 2: 'France Inter' }
 // The shell's catalog is module-level state: load the two keys the card
 // renders with params, as App.vue does, so the test reads the real text.
-const CATALOG = { presets_label: 'Presets', presets_window: '{first}–{last} of {total}' }
+const CATALOG = {
+  presets_label: 'Presets', presets_window: '{first}–{last} of {total}',
+  presets_show_list: 'Show every preset in one list', presets_show_pages: 'Show the presets in pages of ten',
+}
 beforeEach(async () => {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(CATALOG), { status: 200 })))
   await useCatalog().reload()
@@ -133,5 +137,118 @@ describe('PresetGrid', () => {
     expect(w.findAll('[data-preset-button]')).toHaveLength(10)
     expect(w.find('[data-preset-prev]').exists()).toBe(false)
     expect(w.find('[data-preset-count]').exists()).toBe(false)
+  })
+})
+
+describe('layout', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    localStorage.clear()
+  })
+
+  const toggle = (w: ReturnType<typeof mounted>) => w.get('[data-preset-layout-toggle]')
+  const layoutOf = (w: ReturnType<typeof mounted>) => w.get('[data-preset-grid]').attributes('data-preset-layout')
+
+  it('shows the layout toggle even when everything fits on one page', () => {
+    const w = mounted({ preset_count: 10 })
+    expect(w.find('[data-preset-layout-toggle]').exists()).toBe(true)
+    expect(w.find('[data-preset-prev]').exists()).toBe(false)
+    expect(w.find('[data-preset-window]').exists()).toBe(false)
+  })
+
+  it('switches to a list of every preset, without arrows or window, and back', async () => {
+    const w = mounted({ preset_count: 23 })
+    await toggle(w).trigger('click')
+    expect(w.find('[data-preset-list]').exists()).toBe(true)
+    expect(w.findAll('[data-preset-button]')).toHaveLength(23)
+    expect(w.find('[data-preset-prev]').exists()).toBe(false)
+    expect(w.find('[data-preset-next]').exists()).toBe(false)
+    expect(w.find('[data-preset-window]').exists()).toBe(false)
+    expect(layoutOf(w)).toBe('list')
+
+    await toggle(w).trigger('click')
+    expect(w.find('[data-preset-list]').exists()).toBe(false)
+    expect(w.findAll('[data-preset-button]')).toHaveLength(10)
+    expect(w.find('[data-preset-prev]').exists()).toBe(true)
+    expect(w.find('[data-preset-next]').exists()).toBe(true)
+    expect(layoutOf(w)).toBe('pages')
+  })
+
+  it('remembers the layout for the next mount', async () => {
+    const w = mounted({ preset_count: 23 })
+    await toggle(w).trigger('click')
+    w.unmount()
+    const again = mounted({ preset_count: 23 })
+    expect(layoutOf(again)).toBe('list')
+    expect(localStorage.getItem(LAYOUT_KEY)).toBe('list')
+  })
+
+  it('starts in pages when storage is unavailable, and the toggle still works', async () => {
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('denied') })
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('denied') })
+    const w = mounted({ preset_count: 23 })
+    expect(layoutOf(w)).toBe('pages')
+    await toggle(w).trigger('click')
+    expect(layoutOf(w)).toBe('list')
+    expect(w.find('[data-preset-list]').exists()).toBe(true)
+  })
+
+  it('a stored list with ten presets or fewer shows them as a list', () => {
+    localStorage.setItem(LAYOUT_KEY, 'list')
+    const w = mounted({ preset_count: 8 })
+    expect(layoutOf(w)).toBe('list')
+    expect(w.get('[data-preset-list]').findAll('[data-preset-button]')).toHaveLength(8)
+  })
+
+  it('in list, the toggle offers the pages and the tile emits its number', async () => {
+    localStorage.setItem(LAYOUT_KEY, 'list')
+    const w = mounted({ preset_count: 23 })
+    expect(toggle(w).attributes('aria-label')).toBe('Show the presets in pages of ten')
+    await w.get('[data-preset-button="17"]').trigger('click')
+    expect(w.emitted('choose')).toEqual([[17]])
+  })
+
+  it('in pages, the toggle offers the list', () => {
+    const w = mounted({ preset_count: 23 })
+    expect(toggle(w).attributes('aria-label')).toBe('Show every preset in one list')
+  })
+
+  it('back to pages, shows the page of the active preset', async () => {
+    const w = mounted({ preset_count: 23, preset: 17 })
+    await toggle(w).trigger('click')
+    await w.setProps({ state: state({ preset_count: 23, preset: 4 }) })
+    await toggle(w).trigger('click')
+    expect(w.get('[data-preset-window]').text()).toBe('1–10 of 23')
+  })
+
+  it('in list, scrolls the frame, not the page, to the active preset', async () => {
+    // jsdom has no layout: give the frame and row 17 the geometry the
+    // computation reads, and back scrollTop with a map so the write is visible.
+    const proto = HTMLElement.prototype as unknown as Record<string, unknown>
+    const scrollIntoView = vi.fn()
+    proto.scrollIntoView = scrollIntoView
+    const tops = new WeakMap<object, number>()
+    const isFrame = (el: HTMLElement) => el.hasAttribute('data-preset-list')
+    const isRow = (el: HTMLElement) => el.getAttribute('data-preset-button') === '17'
+    Object.defineProperty(proto, 'clientHeight', { configurable: true, get(this: HTMLElement) { return isFrame(this) ? 200 : 0 } })
+    Object.defineProperty(proto, 'scrollHeight', { configurable: true, get(this: HTMLElement) { return isFrame(this) ? 1300 : 0 } })
+    Object.defineProperty(proto, 'offsetTop', { configurable: true, get(this: HTMLElement) { return isRow(this) ? 900 : 0 } })
+    Object.defineProperty(proto, 'offsetHeight', { configurable: true, get(this: HTMLElement) { return isRow(this) ? 48 : 0 } })
+    Object.defineProperty(proto, 'scrollTop', {
+      configurable: true,
+      get(this: HTMLElement) { return tops.get(this) ?? 0 },
+      set(this: HTMLElement, v: number) { tops.set(this, v) },
+    })
+    try {
+      const w = mounted({ preset_count: 23, preset: 17 })
+      await toggle(w).trigger('click')
+      await w.vm.$nextTick()
+      const frame = w.get('[data-preset-list]').element as HTMLElement
+      expect(frame.scrollTop).toBe(revealScrollTop(0, 200, 900, 48, 1300))
+      expect(frame.scrollTop).toBe(900 + 24 - 100)
+      expect(scrollIntoView).not.toHaveBeenCalled()
+    } finally {
+      for (const k of ['clientHeight', 'scrollHeight', 'offsetTop', 'offsetHeight', 'scrollTop', 'scrollIntoView']) delete proto[k]
+    }
   })
 })
