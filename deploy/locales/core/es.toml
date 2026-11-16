@@ -1,4 +1,6 @@
 standby = "EN ESPERA"
+overlay_input_locked = "BLOQUEADO"
+overlay_input_unlocked = "DESBLOQUEADO"
 config_title = "Configuración"
 plugins_title = "Complementos"
 active_source_label = "Fuente activa"

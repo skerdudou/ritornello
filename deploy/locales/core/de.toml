@@ -1,4 +1,6 @@
 standby = "STANDBY"
+overlay_input_locked = "GESPERRT"
+overlay_input_unlocked = "ENTSPERRT"
 config_title = "Konfiguration"
 plugins_title = "Plugins"
 active_source_label = "Aktive Quelle"

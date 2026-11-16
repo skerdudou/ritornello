@@ -137,6 +137,13 @@ pub struct Core<P: Player> {
     volume: u8,
     muted: bool,
     standby: bool,
+    /// The remote lock: the device's own state, published as
+    /// `PlayerState::input_locked` and honoured by the input plugins that
+    /// opted in (`Announcement::input_lock`), **never by the core** — mpd is
+    /// not locked and the page is never locked, so `handle_command` applies
+    /// whatever it receives. `false` at construction and never persisted: a
+    /// restart unlocks, so a lock cannot outlive the reason it was set for.
+    input_locked: bool,
     /// Standby as `state.json` had it at launch — the only thing
     /// `StartupPower::Previous` needs, and the reason it is a snapshot and
     /// not a re-read: `startup` runs after `new`, and by then `persist`
@@ -648,6 +655,7 @@ impl<P: Player> Core<P> {
             volume: persisted.volume.min(100),
             muted: false,
             standby: false,
+            input_locked: false,
             persisted_standby: persisted.standby,
             expecting_stream: false,
             playback: false,
@@ -742,6 +750,18 @@ impl<P: Player> Core<P> {
         // first minute check.
         core.refresh_next_alarm(crate::update::now_unix_s() as i64);
         core
+    }
+
+    /// Shows `text` as the transient message overlay for `overlay_ms`.
+    ///
+    /// One place for the overlay and its deadline, shared by the transient
+    /// status path of `handle_source_update` and the remote lock's feedback:
+    /// two copies of the deadline arithmetic would drift, and the deadline is
+    /// what the `select!` loop sleeps on. The text is final — resolved by the
+    /// caller, never retranslated while it is up.
+    pub(super) fn show_message(&mut self, text: String) {
+        let deadline = Instant::now() + Duration::from_millis(self.settings.overlay_ms.into());
+        self.overlay = Some((Overlay::Message { text, remaining_ms: self.settings.overlay_ms }, deadline));
     }
 
     /// Applies what a Source reports: its status, and/or the identity of
@@ -1028,11 +1048,7 @@ impl<P: Player> Core<P> {
             let text = self.decide_status_text(name, status_text);
             let message = text.and_then(|t| self.resolve_text(&t, name));
             if let Some(message) = message {
-                let deadline = Instant::now() + Duration::from_millis(self.settings.overlay_ms.into());
-                self.overlay = Some((
-                    Overlay::Message { text: message, remaining_ms: self.settings.overlay_ms },
-                    deadline,
-                ));
+                self.show_message(message);
             }
         }
         if let Some(identity) = identity {

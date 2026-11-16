@@ -430,8 +430,8 @@ mod tests {
         assert_eq!(
             stamped["contracts"],
             serde_json::json!({
-                "display": {"major": 1, "minor": 3},
-                "input": {"major": 1, "minor": 1},
+                "display": {"major": 1, "minor": 4},
+                "input": {"major": 1, "minor": 2},
                 "admin": {"major": 1, "minor": 0},
             })
         );
