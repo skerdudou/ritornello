@@ -731,9 +731,10 @@ export interface PlayerPayload {
    */
   input_locked?: boolean
 }
-/** What a sleep timer does when its time is up. Mirrors `ritornello_proto::SleepMode`. */
+/** The sound played on the device at every lock change; `none` is silence. Mirrors the core's `lock_sound::LockSound`. */
 export type LockSound = 'none' | 'a' | 'b' | 'c' | 'd' | 'e'
-export type SleepMode ='immediate' | 'fade' | 'end_of_track'
+/** What a sleep timer does when its time is up. Mirrors `ritornello_proto::SleepMode`. */
+export type SleepMode = 'immediate' | 'fade' | 'end_of_track'
 /** Where a running sleep timer stands. Mirrors `ritornello_proto::SleepPhase`. */
 export type SleepPhase = 'armed' | 'waiting_end_of_track' | 'fading'
 /**

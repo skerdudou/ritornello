@@ -308,7 +308,8 @@ memory only: **a core restart forgets it**, and the device comes back
 unlocked.
 
 Every lock change also plays a short **lock sound** on the device, chosen in
-the Player card (below): the same sound for locking and for unlocking. It is
+the Player card (below): the chosen sound, with its locking or its unlocking
+motif. It is
 mixed into what plays — the music is never lowered — or plays alone when
 nothing is playing, standby included, without waking anything. It follows the
 volume and the mute, and is silent while the music is paused or while a file
