@@ -176,18 +176,6 @@ test('files plugin journey: local root, scan, saved list, presets', async ({
   await expect(page.locator('[data-scan-error]')).toHaveCount(0)
   await expect(page.locator('[data-track-missing]')).toHaveCount(0)
 
-  // Durations are collected in the background, from the files' headers.
-  //
-  // A scan provides no duration — only an `#EXTINF` carries one — so the
-  // column showed a dash. The plugin now reads the headers, in batches, and
-  // the page polls for as long as it takes. The fixtures are 30 s long: that
-  // is the value we must see arrive, which proves a real read and not an
-  // invented value.
-  await expect(page.locator('[data-track-row]').first().locator('td').nth(2)).toHaveText(
-    /0:(29|30|31)/,
-    { timeout: 30_000 },
-  )
-
   // --- Save, clear, reload ----------------------------------------------------
   await expect(page.locator('[data-no-saved]')).toBeVisible()
   await page.locator('[data-playlist-name]').fill('journey')

@@ -73,7 +73,6 @@ scan_progress = "Scanning {dir} — {found} tracks found"
 playlist_title = "Current playlist"
 col_num = "No."
 col_track = "Track"
-col_duration = "Length"
 empty_playlist = "Empty playlist"
 missing_badge = "not found"
 reorder_hint = "Drag to reorder"
@@ -154,7 +153,6 @@ duplicate_source = "This folder is already declared as a source."
 
 not_a_playlist = "\"{path}\" is not a playlist file (.m3u or .m3u8)"
 btn_load_m3u = "Load this playlist"
-duration_progress = "Reading track lengths ({done} of {total})"
 
 # --- Unresponsive mount points ---
 #
