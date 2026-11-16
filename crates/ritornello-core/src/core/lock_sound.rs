@@ -81,8 +81,10 @@ impl<P: Player> Core<P> {
 
     /// The chime has ended: write the plain chain back — only if mpv's `af`
     /// still holds the chain written with the chime. Otherwise something
-    /// rewrote it meanwhile (a file start, the equalizer, the audio output),
-    /// and the chime is already gone.
+    /// rewrote it meanwhile (a file start, the equalizer, the audio output
+    /// — which rewrites it whenever a chime is mixed, equalizer off
+    /// included: `reapply_equalizer_after_output_change`), and the chime is
+    /// already gone; each of those clears `lock_sound_mixed` too.
     pub async fn expire_lock_sound(&mut self) {
         let Some((chain, _)) = self.lock_sound_mixed.take() else { return };
         if self.eq_chain_written.as_deref() != Some(chain.as_str()) {
@@ -298,6 +300,34 @@ mod tests {
         pc.lock().unwrap().clear();
         core.expire_lock_sound().await;
         assert_eq!(chime_calls(&pc), Vec::<String>::new(), "the toggle already wrote the chain without the chime");
+    }
+
+    /// An output change drops a mixed chime with the equalizer off too, where
+    /// it would otherwise leave mpv's chain alone and the chime outlive the
+    /// output it was mixed for.
+    #[tokio::test]
+    async fn an_output_change_drops_a_mixed_chime_equalizer_off_included() {
+        let (mut core, pc, _sc, _rx, _d) = playing_with(EqualizerSettings::default());
+        core.set_audio_device(Some("hw:1".into())).await.unwrap();
+        assert_eq!(chime_calls(&pc), Vec::<String>::new(), "equalizer off, no chime: the chain is left alone");
+
+        core.handle_command(Command::SetInputLock(true)).await.unwrap();
+        pc.lock().unwrap().clear();
+        core.set_audio_device(None).await.unwrap();
+        assert_eq!(chime_calls(&pc), vec!["af ".to_string()], "the plain (empty) chain is written back");
+        assert!(core.lock_sound_deadline().is_none(), "nothing left to remove");
+        pc.lock().unwrap().clear();
+        core.expire_lock_sound().await;
+        assert_eq!(chime_calls(&pc), Vec::<String>::new());
+
+        // Equalizer on: the rewrite drops the chime as before.
+        let eq = enabled();
+        let (mut core, pc, _sc, _rx, _d) = playing_with(eq.clone());
+        core.handle_command(Command::SetInputLock(true)).await.unwrap();
+        pc.lock().unwrap().clear();
+        core.set_audio_device(Some("hw:1".into())).await.unwrap();
+        assert_eq!(chime_calls(&pc), vec![format!("af {}", af_chain(&eq))]);
+        assert!(core.lock_sound_deadline().is_none());
     }
 
     #[tokio::test]

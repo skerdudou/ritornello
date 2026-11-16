@@ -81,15 +81,23 @@ pub trait Player: Send + Sync + 'static {
     /// hook script (see `MpvPlayer`'s implementation for what that did).
     async fn set_ytdl(&self, path: Option<&std::path::Path>) -> Result<()>;
     /// Replaces the whole audio filter chain (`set_property af`); an empty
-    /// chain removes every filter. It rebuilds the chain, which clicks if sent
-    /// mid-playback: reserved for moments when mpv rebuilds it anyway
-    /// (`start-file`) and for enabling or disabling the equalizer.
+    /// chain removes every filter. mpv rebuilds the chain, so it is sent at
+    /// `start-file`, when the equalizer is enabled or disabled, and
+    /// mid-playback by the lock chime (`core::lock_sound`), which mixes
+    /// itself in after the equalizer and is removed the same way. A rewrite
+    /// that changes the equalizer's filters mid-playback clicked (the
+    /// equalizer's prototype); the chime's addition and removal, which leave
+    /// them as they are, were measured without a click by the lock-sound
+    /// spike (mpv 0.37 / FFmpeg 6.1, `ao=pcm`; never heard on the device,
+    /// see `docs/installation.md`). A change of one parameter goes through
+    /// `audio_filter_command` instead.
     async fn set_audio_filters(&self, chain: &str) -> Result<()>;
     /// Changes one parameter of one labelled filter of the running chain
     /// (`af-command`), without a click. The change is lost at the next file
     /// load, which rebuilds the chain from the recorded `af`.
     async fn audio_filter_command(&self, cmd: &crate::equalizer::AfCommand) -> Result<()>;
-    /// Where a chime can play now: `Idle` when mpv has nothing loaded;
+    /// Where a chime can play now: `Idle` when mpv has nothing loaded or
+    /// plays only an earlier chime (`play_aside`, replaced by the next);
     /// `Live` while a file plays (rate and channels from `audio-params`);
     /// `Silent` when paused, or when the file has no audio parameters yet
     /// (loading).

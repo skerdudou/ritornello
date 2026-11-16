@@ -119,9 +119,12 @@ impl<P: Player> Core<P> {
 
     /// The audio output changed: mpv may rebuild the chain from `af` when it
     /// reloads the output, dropping what `af-command` set. Rewrite it with
-    /// the current setting; the change cuts the sound anyway.
+    /// the current setting; the change cuts the sound anyway. A lock chime
+    /// mixed in goes with it, equalizer off included (the plain chain is then
+    /// empty), rather than sounding on until its own removal on an output
+    /// it was not mixed for.
     pub(super) async fn reapply_equalizer_after_output_change(&mut self) {
-        if !self.equalizer.enabled {
+        if !self.equalizer.enabled && self.lock_sound_mixed.is_none() {
             return;
         }
         if let Err(e) = self.write_chain().await {

@@ -383,6 +383,9 @@ pub(crate) struct AsideGate {
     armed: u32,
     /// Between an aside's `start-file` and its end.
     inside: bool,
+    /// A real load (`play`, `load_list`) sent whose `start-file` has not
+    /// come yet: mpv is about to replace whatever sounds (`sounding_aside`).
+    loading: bool,
     /// Per observed property, the value the core was last given.
     seen: HashMap<String, Value>,
     /// Per observed property, the last line swallowed since.
@@ -407,6 +410,23 @@ impl AsideGate {
         self.armed = self.armed.saturating_sub(1);
     }
 
+    /// A real load is about to be sent (or, `false`, was refused).
+    pub(crate) fn set_loading(&mut self, loading: bool) {
+        self.loading = loading;
+    }
+
+    /// Whether what mpv plays right now is an aside and nothing real is on
+    /// its way to replace it: a new chime may then simply replace it
+    /// (`chime_route`). `inside`, not `armed`: `armed` counts a `start-file`
+    /// still to come, which can stay counted if it never comes, whereas
+    /// `inside` is closed by any admitted `start-file` and by the chime's
+    /// idle. `loading` covers the few milliseconds between a real `loadfile`
+    /// and its `start-file`, while mpv still plays the chime it is about to
+    /// replace: a chime sent then as an aside would replace the real file.
+    pub(crate) fn sounding_aside(&self) -> bool {
+        self.inside && !self.loading
+    }
+
     /// Whether `line` (an event, never a response) reaches the core. When it
     /// does, `take_replay` gives what must follow it.
     pub(crate) fn admit(&mut self, line: &Value) -> bool {
@@ -417,6 +437,7 @@ impl AsideGate {
                 return false;
             }
             self.inside = false;
+            self.loading = false;
             // Track numbers in a fixed order; the rest only adopted.
             for name in TRACK_PROPERTIES {
                 if let Some(line) = self.pending.remove(name) {
@@ -720,6 +741,41 @@ pub struct MpvPlayer {
     ipc: Arc<MpvIpc>,
 }
 
+impl MpvPlayer {
+    fn gate(&self) -> std::sync::MutexGuard<'_, AsideGate> {
+        self.ipc.gate.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A load the core sees (`loadfile`, `loadlist`): the gate learns of it
+    /// **before** it is written, since its `start-file` can arrive before
+    /// its response (`AsideGate::sounding_aside`).
+    async fn real_load(&self, cmd: &[Value]) -> Result<Value> {
+        self.gate().set_loading(true);
+        let result = self.ipc.command(cmd).await;
+        if result.is_err() {
+            self.gate().set_loading(false);
+        }
+        result
+    }
+
+    /// `chime_route`'s three questions to mpv.
+    async fn ask_chime_route(&self) -> Result<super::ChimeRoute> {
+        use super::ChimeRoute;
+        if self.ipc.command(&[json!("get_property"), json!("idle-active")]).await? == json!(true) {
+            return Ok(ChimeRoute::Idle);
+        }
+        if self.ipc.command(&[json!("get_property"), json!("pause")]).await? == json!(true) {
+            return Ok(ChimeRoute::Silent);
+        }
+        let params = self.ipc.command(&[json!("get_property"), json!("audio-params")]).await.unwrap_or(Value::Null);
+        let field = |name: &str| params[name].as_u64().and_then(|n| u32::try_from(n).ok());
+        Ok(match (field("samplerate"), field("channel-count")) {
+            (Some(sample_rate), Some(channels)) => ChimeRoute::Live { sample_rate, channels },
+            _ => ChimeRoute::Silent,
+        })
+    }
+}
+
 /// Brings a `get_property` response down to a usable number.
 ///
 /// Three ways for mpv to say "I don't know", all brought down to `None`:
@@ -894,7 +950,7 @@ pub async fn start(
 #[async_trait::async_trait]
 impl super::Player for MpvPlayer {
     async fn play(&self, uri: &str) -> Result<()> {
-        self.ipc.command(&[json!("loadfile"), json!(uri), json!("replace")]).await?;
+        self.real_load(&[json!("loadfile"), json!(uri), json!("replace")]).await?;
         self.ipc.command(&[json!("set_property"), json!("pause"), json!(false)]).await?;
         Ok(())
     }
@@ -927,7 +983,7 @@ impl super::Player for MpvPlayer {
             None => json!("auto"),
         };
         self.ipc.command(&[json!("set_property"), json!("playlist-start"), start]).await?;
-        self.ipc.command(&[json!("loadlist"), json!(uri), json!("replace")]).await?;
+        self.real_load(&[json!("loadlist"), json!(uri), json!("replace")]).await?;
         self.ipc.command(&[json!("set_property"), json!("pause"), json!(false)]).await?;
         Ok(())
     }
@@ -1059,20 +1115,32 @@ impl super::Player for MpvPlayer {
     /// `idle-active`, `pause`, `audio-params`. Audio parameters that are an
     /// error, a `null` or lack the rate or the channel count mean a file
     /// still loading: nothing to mix into yet.
+    ///
+    /// **An aside sounding is idle.** While an idle chime plays, mpv answers
+    /// like a real file: `idle-active` false, `pause` false (the chime's
+    /// file-local option), valid `audio-params` (measured on mpv 0.37,
+    /// +20 to +400 ms after `play_aside`). Asking mpv would mix a second
+    /// chime into the first, to be cut when the first ends (`amix
+    /// duration=first`), or lose it while the first still loads. So when the
+    /// gate is inside an aside (`AsideGate::sounding_aside`) the answer is
+    /// `Idle` without a question: the next `play_aside` replaces the chime,
+    /// and the gate swallows two asides in a row.
+    ///
+    /// **Armed but not yet inside** (the chime's `loadfile` written, its
+    /// `start-file` not read yet) is not taken for idle: `armed` stays
+    /// counted if that `start-file` never comes, and an `Idle` then, with a
+    /// real file playing, would replace it. mpv is asked instead, and the
+    /// gate looked at again once it has answered, since the chime's
+    /// `start-file` may have been read meanwhile; otherwise the rare chime
+    /// sent in those few milliseconds goes by mpv's own answer (most often
+    /// `idle-active` true still: replaced as well).
     async fn chime_route(&self) -> Result<super::ChimeRoute> {
         use super::ChimeRoute;
-        if self.ipc.command(&[json!("get_property"), json!("idle-active")]).await? == json!(true) {
+        if self.gate().sounding_aside() {
             return Ok(ChimeRoute::Idle);
         }
-        if self.ipc.command(&[json!("get_property"), json!("pause")]).await? == json!(true) {
-            return Ok(ChimeRoute::Silent);
-        }
-        let params = self.ipc.command(&[json!("get_property"), json!("audio-params")]).await.unwrap_or(Value::Null);
-        let field = |name: &str| params[name].as_u64().and_then(|n| u32::try_from(n).ok());
-        Ok(match (field("samplerate"), field("channel-count")) {
-            (Some(sample_rate), Some(channels)) => ChimeRoute::Live { sample_rate, channels },
-            _ => ChimeRoute::Silent,
-        })
+        let route = self.ask_chime_route().await?;
+        Ok(if self.gate().sounding_aside() { ChimeRoute::Idle } else { route })
     }
 
     /// The named `loadfile` measured by the lock-sound spike on mpv 0.37
@@ -1083,11 +1151,10 @@ impl super::Player for MpvPlayer {
     /// **before** the command is written, since the chime's `start-file` can
     /// arrive before its response, and disarmed if the command fails.
     async fn play_aside(&self, uri: &str) -> Result<()> {
-        let gate = || self.ipc.gate.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        gate().arm();
+        self.gate().arm();
         let load = json!({"name": "loadfile", "url": uri, "flags": "replace", "options": "loop-file=no,pause=no"});
         if let Err(e) = self.ipc.command_named(load).await {
-            gate().disarm();
+            self.gate().disarm();
             return Err(e);
         }
         Ok(())
@@ -2294,14 +2361,152 @@ pub(crate) mod tests {
     }
 
     async fn route_with(answers: Vec<(&'static str, Value)>) -> (Result<crate::player::ChimeRoute>, Vec<Value>) {
+        route_with_gate(answers, |_| {}).await
+    }
+
+    /// `route_with`, the gate first brought to a state by `prepare`.
+    async fn route_with_gate(
+        answers: Vec<(&'static str, Value)>,
+        prepare: impl FnOnce(&mut AsideGate),
+    ) -> (Result<crate::player::ChimeRoute>, Vec<Value>) {
         use crate::player::Player;
         let (client, server) = UnixStream::pair().unwrap();
         let (tx, _rx) = mpsc::channel(16);
         let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        prepare(&mut player.gate());
         let server = answering(server, answers);
         let route = player.chime_route().await;
         drop(player);
         (route, server.await.unwrap())
+    }
+
+    /// What mpv answers while an idle chime plays (measured on mpv 0.37 at
+    /// +20/+100/+400 ms after `play_aside`): a real file's answers.
+    fn answers_during_a_chime() -> Vec<(&'static str, Value)> {
+        vec![
+            ("idle-active", json!(false)),
+            ("pause", json!(false)),
+            ("audio-params", json!({"format": "floatp", "samplerate": 48000, "channel-count": 1})),
+        ]
+    }
+
+    /// A gate inside an aside, as the chime's `start-file` leaves it.
+    fn inside_an_aside(gate: &mut AsideGate) {
+        gate.arm();
+        assert!(!gate.admit(&json!({"event":"start-file","playlist_entry_id":7})));
+    }
+
+    /// A second chime while an idle chime sounds replaces it (`Idle`)
+    /// rather than being mixed into it and cut at its end — and mpv, which
+    /// would answer like a real file, is not asked.
+    ///
+    /// **[MUTATION]** the early `sounding_aside` return removed from
+    /// `chime_route` → `Live` and three requests: fails.
+    #[tokio::test]
+    async fn a_chime_while_an_aside_sounds_replaces_it_without_asking_mpv() {
+        use crate::player::ChimeRoute;
+        let (route, sent) = route_with_gate(answers_during_a_chime(), inside_an_aside).await;
+        assert_eq!(route.unwrap(), ChimeRoute::Idle);
+        assert_eq!(sent, Vec::<Value>::new(), "no question while the gate is inside");
+        // Otherwise the same answers mean a real file playing: mixed.
+        let (route, _) = route_with(answers_during_a_chime()).await;
+        assert_eq!(route.unwrap(), ChimeRoute::Live { sample_rate: 48000, channels: 1 });
+    }
+
+    /// Neither a chime merely armed (its `start-file` may never come) nor a
+    /// chime a real load is replacing is taken for idle: an `Idle` there
+    /// would send a `replace` cutting the real file.
+    #[tokio::test]
+    async fn only_a_sounding_aside_short_cuts_the_question() {
+        use crate::player::ChimeRoute;
+        let live = ChimeRoute::Live { sample_rate: 48000, channels: 1 };
+        let (route, sent) = route_with_gate(answers_during_a_chime(), |g| g.arm()).await;
+        assert_eq!(route.unwrap(), live, "armed only");
+        assert_eq!(sent.len(), 3, "{sent:?}");
+        let (route, sent) = route_with_gate(answers_during_a_chime(), |g| {
+            inside_an_aside(g);
+            g.set_loading(true);
+        })
+        .await;
+        assert_eq!(route.unwrap(), live, "a real load on its way");
+        assert_eq!(sent.len(), 3, "{sent:?}");
+        // The real file's `start-file` closes both: nothing is an aside.
+        let mut gate = AsideGate::default();
+        inside_an_aside(&mut gate);
+        gate.set_loading(true);
+        assert!(!gate.sounding_aside());
+        assert!(gate.admit(&json!({"event":"start-file","playlist_entry_id":8})));
+        assert!(!gate.sounding_aside());
+        gate.set_loading(false);
+        assert!(!gate.sounding_aside(), "the real start-file closed the aside");
+        // The chime's own idle closes it too.
+        let mut gate = AsideGate::default();
+        inside_an_aside(&mut gate);
+        assert!(gate.sounding_aside());
+        assert!(!gate.admit(&json!({"event":"property-change","id":3,"name":"idle-active","data":true})));
+        assert!(!gate.sounding_aside());
+    }
+
+    /// `play` and `load_list` tell the gate a real load is on its way, so a
+    /// chime asked for before its `start-file` is not sent as an aside that
+    /// would replace it; a refused load tells it the opposite.
+    #[tokio::test]
+    async fn a_real_load_ends_the_aside_shortcut_at_once() {
+        use crate::player::Player;
+        for refused in [false, true] {
+            for list in [false, true] {
+                let (client, server) = UnixStream::pair().unwrap();
+                let (tx, _rx) = mpsc::channel(16);
+                let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+                inside_an_aside(&mut player.gate());
+                let server = tokio::spawn(async move {
+                    let (r, mut w) = server.into_split();
+                    let mut lines = BufReader::new(r).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let req: Value = serde_json::from_str(&line).unwrap();
+                        let load = matches!(req["command"][0].as_str(), Some("loadfile" | "loadlist"));
+                        let error = if refused && load { "error running command" } else { "success" };
+                        let resp = json!({"request_id": req["request_id"], "error": error});
+                        w.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+                    }
+                });
+                let res = if list { player.load_list("/m/l.m3u", None).await } else { player.play("/m/a.flac").await };
+                assert_eq!(res.is_err(), refused);
+                assert_eq!(player.gate().sounding_aside(), refused, "refused {refused}, list {list}");
+                drop(player);
+                server.await.unwrap();
+            }
+        }
+    }
+
+    /// Armed when asked, inside once mpv has answered: the chime's
+    /// `start-file`, read before the answer, makes the route `Idle`.
+    #[tokio::test]
+    async fn a_chime_starting_while_mpv_is_asked_is_idle() {
+        use crate::player::{ChimeRoute, Player};
+        let (client, server) = UnixStream::pair().unwrap();
+        let (tx, _rx) = mpsc::channel(16);
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        player.gate().arm();
+        let server = tokio::spawn(async move {
+            let (r, mut w) = server.into_split();
+            let mut lines = BufReader::new(r).lines();
+            let mut seen = Vec::new();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let req: Value = serde_json::from_str(&line).unwrap();
+                if seen.is_empty() {
+                    w.write_all(b"{\"event\":\"start-file\",\"playlist_entry_id\":7}\n").await.unwrap();
+                }
+                let answer = answers_during_a_chime().into_iter().find(|(k, _)| req["command"][1] == json!(k));
+                let resp = json!({"data": answer.unwrap().1, "request_id": req["request_id"], "error": "success"});
+                w.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+                seen.push(req["command"].clone());
+            }
+            seen
+        });
+        assert_eq!(player.chime_route().await.unwrap(), ChimeRoute::Idle);
+        drop(player);
+        assert_eq!(server.await.unwrap().len(), 3, "armed only when asked: mpv was asked");
     }
 
     #[tokio::test]
@@ -2514,6 +2719,33 @@ pub(crate) mod tests {
         })
         .await;
         assert!(waited.is_ok(), "the real load after the aside did not reach the core: {got:?}");
+    }
+
+    /// The real thing for a second chime: with a timed output the idle
+    /// chime lasts its 0.74 s, and while it sounds mpv answers like a real
+    /// file — yet the route is `Idle`.
+    #[tokio::test]
+    async fn a_second_chime_during_a_real_aside_is_idle() {
+        use crate::player::{ChimeRoute, Player};
+        if mpv_missing() {
+            eprintln!("mpv missing: skipping test");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let mpv = d.join("mpv");
+        wrapper(&mpv, "#!/bin/sh\nexec mpv --no-config --ao=null \"$@\"\n");
+        let (tx, _rx) = mpsc::channel(1024);
+        let (player, _child) = start_test_mpv(&mpv, d, "", tx).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let uri = crate::lock_sound::idle_uri(crate::lock_sound::LockSound::A, crate::lock_sound::Motif::Lock).unwrap();
+        player.play_aside(&uri).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let idle = player.ipc.command(&[json!("get_property"), json!("idle-active")]).await.unwrap();
+        assert_eq!(idle, json!(false), "the chime is still sounding, or the test proves nothing");
+        assert!(player.gate().sounding_aside(), "the gate saw the chime start");
+        assert_eq!(player.chime_route().await.unwrap(), ChimeRoute::Idle);
     }
 
     #[tokio::test]

@@ -2269,4 +2269,8 @@ latency, so neither the live mix nor the idle chime was heard through a real
 sound card (under `ao=pcm` the idle chime runs untimed). Unverified on the Pi:
 the mix rebuild, the idle load's event order behind the gate, and the
 `loadfile` named options there; and whether a seek within the ~1.2 s the chime
-stays in the chain replays it.
+stays in the chain replays it. A second chime during an idle one replaces it
+(the core does not ask mpv, which answers then as for a real file); that was
+run on WSL against mpv 0.37 with the timed `ao=null` output only, and a chime
+asked for in the few milliseconds between an idle chime's load and its
+`start-file` still goes by mpv's own answer.
