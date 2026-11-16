@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Badge, Button, Slider } from '@ritornello/ui'
 import { SpeakerLoudIcon, SpeakerOffIcon } from '@radix-icons/vue'
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useCatalog } from '../composables/useCatalog'
 
 // Volume is a continuous setting: a slider, not two keys. The keyboard
@@ -9,50 +9,131 @@ import { useCatalog } from '../composables/useCatalog'
 // by reka, whose Page keys would jump by 50 with a step of 5; reka's
 // `role=slider` still carries the accessibility semantics. The − / + keys
 // remain those of the physical remote. The command sent is `SetVolume`
-// (absolute): at once on a key press, a single one on release of a drag —
-// during the gesture, only the display moves.
+// (absolute): at once on a key press; during a drag, the first value at once,
+// then at most one every THROTTLE_MS carrying the finger's latest value; on
+// release, the final value at once if it was not the last one sent.
 const STEP = 5
+const THROTTLE_MS = 150
+const LATCH_TIMEOUT_MS = 2000
 const { t } = useCatalog()
 const props = defineProps<{ volume: number | null; muted: boolean; disabled: boolean }>()
 const emit = defineEmits<{ set: [percent: number]; mute: [] }>()
 
-// Value under the finger during the drag; null outside a gesture.
+// Value under the finger during the drag; null outside a gesture. While it is
+// set, the display follows it and nothing else.
 const local = ref<number | null>(null)
-// Committed value, awaiting the frame that confirms it. Same reason as in
-// ProgressBar: the frame from before the adjustment must not make the handle
-// step back for an instant.
+// Released value, held on screen until the device confirms it. Same reason as
+// in ProgressBar: a frame from before the adjustment must not make the handle
+// step back for an instant. Sending while dragging makes it worse: the echoes
+// of the intermediate sends come back after the release, and each would pull
+// the thumb back to a value the finger has already left.
 const target = ref<number | null>(null)
+// Values sent and not yet seen in a frame, oldest first. Not reactive: only
+// the frame watcher reads it.
+let inFlight: number[] = []
+// Last value sent in the current gesture, and when. Reset at every release:
+// dedup and throttle are per gesture — a stale `lastSent` would swallow a tap
+// on a value a remote has since left.
+let lastSent: number | null = null
+let lastSentAt = -Infinity
+let trailing: ReturnType<typeof setTimeout> | null = null
+let backstop: ReturnType<typeof setTimeout> | null = null
+
+function sendNow(p: number): void {
+  emit('set', p)
+  lastSent = p
+  lastSentAt = Date.now()
+  inFlight.push(p)
+}
+
+function clearTrailing(): void {
+  if (trailing !== null) clearTimeout(trailing)
+  trailing = null
+}
+
+function release(): void {
+  target.value = null
+  inFlight = []
+  if (backstop !== null) clearTimeout(backstop)
+  backstop = null
+}
+
+// Frames. Strict equality, not ProgressBar's tolerance to the `step`: the
+// volume is an exact integer the core returns as is, so the echo of a send
+// lands exactly on it. A frame is recognised as an echo of ours when it is in
+// `inFlight`, and the **first** occurrence is the one it answers: echoes come
+// back in send order, so after sends 50, 45, 50 the first frame 50 answers
+// the first send, not the last — releasing on it would let the echo of 45
+// drop the thumb. That echo confirms every older send too (the core may
+// coalesce frames and skip some), so they all leave the queue. A frame that
+// is not in the queue comes from another source (infrared remote, an MPD
+// client) and releases the latch at once, otherwise the page would stay
+// frozen on its own value. The latch also lets go when the queue is empty:
+// the final send's echo has arrived. During a drag the queue is consumed the
+// same way, but the display stays on `local` regardless.
 watch(
   () => props.volume,
-  (v, previous) => {
-    if (target.value === null) return
-    // Strict equality, not ProgressBar's tolerance to the `step`: the volume
-    // is an exact integer the core returns as is, without smoothing nor
-    // rounding device side — the confirming frame necessarily lands exactly.
-    // But an external source (infrared remote) also moves the volume without
-    // ever landing on `target`: any change of the real volume (relative to
-    // the previous frame) proves the device has spoken, and releases the
-    // target. An in-flight frame still repeating the old value does not
-    // change `previous` -> `v`, so releases nothing wrongly.
-    if (v === target.value || (previous !== undefined && v !== previous)) target.value = null
+  (v) => {
+    if (v === null) return
+    const i = inFlight.indexOf(v)
+    if (i >= 0) inFlight.splice(0, i + 1)
+    if (target.value !== null && (i < 0 || inFlight.length === 0)) release()
   },
 )
 const displayed = computed(() => local.value ?? target.value ?? props.volume)
 
+// Drag (pointer only: the keyboard is captured below). Leading edge at once,
+// then a trailing timer that sends the finger's latest value, not the one
+// that armed it.
 // reka's `update:modelValue` may emit `undefined` (case of a removed handle,
 // outside our single-handle usage): the type allows for it, not our logic —
 // we then fall back to 0 without crashing.
 function onChange(v: number[] | undefined): void {
-  local.value = v?.[0] ?? 0
+  local.value = Math.round(v?.[0] ?? 0)
+  if (trailing !== null) return
+  if (local.value === lastSent) return
+  const elapsed = Date.now() - lastSentAt
+  if (elapsed >= THROTTLE_MS) {
+    sendNow(local.value)
+    return
+  }
+  trailing = setTimeout(() => {
+    trailing = null
+    if (local.value !== null && local.value !== lastSent) sendNow(local.value)
+  }, THROTTLE_MS - elapsed)
 }
-function commit(p: number): void {
+
+// End of a gesture: reka's `valueCommit`, a key press, or `pointerup` /
+// `pointercancel` on the wrapper — reka emits no `valueCommit` when a drag
+// ends on the value it started from. The wrapper's listener runs after reka's
+// own, so after a `valueCommit` it finds `local === null` and does nothing.
+function finish(v: number): void {
+  clearTrailing()
+  const p = Math.round(v)
   local.value = null
-  target.value = p
-  emit('set', p)
+  if (p !== lastSent) sendNow(p)
+  // Nothing unconfirmed: nothing to hold.
+  target.value = inFlight.length > 0 ? p : null
+  if (target.value !== null) {
+    if (backstop !== null) clearTimeout(backstop)
+    // A lost echo must not freeze the display forever.
+    backstop = setTimeout(release, LATCH_TIMEOUT_MS)
+  }
+  lastSent = null
+  lastSentAt = -Infinity
 }
 function onCommit(v: number[]): void {
-  commit(Math.round(v[0] ?? 0))
+  finish(v[0] ?? 0)
 }
+function onPointerEnd(): void {
+  if (local.value !== null) finish(local.value)
+}
+
+onBeforeUnmount(() => {
+  clearTrailing()
+  if (backstop !== null) clearTimeout(backstop)
+  backstop = null
+})
 
 const UP_KEYS = ['ArrowRight', 'ArrowUp', 'PageUp']
 const DOWN_KEYS = ['ArrowLeft', 'ArrowDown', 'PageDown']
@@ -82,7 +163,7 @@ function fromKeyboard(e: KeyboardEvent): void {
   e.preventDefault()
   e.stopPropagation()
   dest = Math.min(100, Math.max(0, dest))
-  if (dest !== base) commit(dest)
+  if (dest !== base) finish(dest)
 }
 </script>
 
@@ -102,7 +183,12 @@ function fromKeyboard(e: KeyboardEvent): void {
       <SpeakerOffIcon v-if="muted" class="size-5" />
       <SpeakerLoudIcon v-else class="size-5" />
     </Button>
-    <div class="flex-1" @keydown.capture="fromKeyboard">
+    <div
+      class="flex-1"
+      @keydown.capture="fromKeyboard"
+      @pointerup="onPointerEnd"
+      @pointercancel="onPointerEnd"
+    >
       <Slider
         data-volume-slider
         :model-value="[displayed ?? 0]"

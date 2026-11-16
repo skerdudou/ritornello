@@ -1,6 +1,6 @@
 import { Slider } from '@ritornello/ui'
 import { flushPromises, mount } from '@vue/test-utils'
-import { beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import Volume from './Volume.vue'
 
 const mounted = (props: Record<string, unknown> = {}) => {
@@ -14,20 +14,21 @@ const press = async (w: ReturnType<typeof mounted>, key: string, opts: { shiftKe
   await handle.trigger('keydown', { key, ...opts })
 }
 
-describe('Volume', () => {
-  beforeAll(() => {
-    Element.prototype.setPointerCapture ??= () => {}
-    Element.prototype.releasePointerCapture ??= () => {}
-    Element.prototype.hasPointerCapture ??= () => true
-    // jsdom does not provide ResizeObserver; reka-ui uses it to measure the
-    // slider track at mount time (see ProgressBar.test.ts).
-    globalThis.ResizeObserver ??= class {
-      observe() {}
-      unobserve() {}
-      disconnect() {}
-    }
-  })
+// Pointer capture and ResizeObserver, which jsdom lacks, for both suites.
+beforeAll(() => {
+  Element.prototype.setPointerCapture ??= () => {}
+  Element.prototype.releasePointerCapture ??= () => {}
+  Element.prototype.hasPointerCapture ??= () => true
+  // jsdom does not provide ResizeObserver; reka-ui uses it to measure the
+  // slider track at mount time (see ProgressBar.test.ts).
+  globalThis.ResizeObserver ??= class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+})
 
+describe('Volume', () => {
   it('shows the value and a handle at that value', async () => {
     const w = mounted()
     // reka-ui resolves aria-valuenow one tick after mounting under jsdom.
@@ -147,19 +148,6 @@ describe('Volume', () => {
     expect(w.emitted('mute')).toHaveLength(1)
   })
 
-  it('the gesture follows the finger locally and only commits on release', async () => {
-    // A single `set` per gesture: during the drag, only the display moves.
-    // Direct emission on the component (as in ProgressBar.test.ts) rather
-    // than real pointerdown/move/up, under jsdom without real layout.
-    const w = mounted()
-    const slider = w.getComponent(Slider)
-    await slider.vm.$emit('update:modelValue', [25])
-    expect(w.emitted('set')).toBeUndefined()
-    expect(w.get('[data-volume]').text()).toBe('25 %')
-    await slider.vm.$emit('valueCommit', [25])
-    expect(w.emitted('set')).toEqual([[25]])
-  })
-
   it('the target value holds until the frame that reaches it', async () => {
     // Without this, the next frame (volume from before the adjustment)
     // brought the handle back for an instant — the same defect as on
@@ -197,5 +185,245 @@ describe('Volume', () => {
     const w = mounted({ disabled: true })
     expect(w.get('[data-remote-command="Mute"]').attributes('disabled')).toBeDefined()
     expect(w.get('[data-slot="slider"]').attributes('data-disabled')).toBeDefined()
+  })
+})
+
+// Direct emission on the component (as in ProgressBar.test.ts) rather than
+// real pointerdown/move/up, under jsdom without real layout. Every mount
+// starts at 60.
+describe('Volume — dragging', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  const drag = async (w: ReturnType<typeof mounted>, v: number) => {
+    await w.getComponent(Slider).vm.$emit('update:modelValue', [v])
+  }
+  const release = async (w: ReturnType<typeof mounted>, v: number) => {
+    await w.getComponent(Slider).vm.$emit('valueCommit', [v])
+  }
+  const frame = async (w: ReturnType<typeof mounted>, volume: number) => {
+    await w.setProps({ volume })
+  }
+  const shown = (w: ReturnType<typeof mounted>) => w.get('[data-volume]').text()
+
+  it('the first value of a drag goes at once, then one every 150 ms, the latest kept', async () => {
+    const w = mounted()
+    await drag(w, 55)
+    expect(w.emitted('set')).toEqual([[55]])
+    vi.advanceTimersByTime(50)
+    await drag(w, 50)
+    await drag(w, 45)
+    expect(w.emitted('set')).toEqual([[55]])
+    vi.advanceTimersByTime(100)
+    // The trailing send carries the finger's latest value, not 50 which armed it.
+    expect(w.emitted('set')).toEqual([[55], [45]])
+  })
+
+  it('the release sends the final value at once and cancels the pending one', async () => {
+    const w = mounted()
+    await drag(w, 55)
+    vi.advanceTimersByTime(10)
+    await drag(w, 50)
+    await release(w, 50)
+    expect(w.emitted('set')).toEqual([[55], [50]])
+    vi.advanceTimersByTime(500)
+    expect(w.emitted('set')).toEqual([[55], [50]])
+  })
+
+  it('a release on the value last sent sends nothing more', async () => {
+    const w = mounted()
+    await drag(w, 55)
+    vi.advanceTimersByTime(200)
+    await drag(w, 50)
+    expect(w.emitted('set')).toEqual([[55], [50]])
+    await release(w, 50)
+    expect(w.emitted('set')).toEqual([[55], [50]])
+  })
+
+  it('the thumb follows the finger, not the echoes, while dragging', async () => {
+    const w = mounted()
+    await drag(w, 55)
+    vi.advanceTimersByTime(200)
+    await drag(w, 45)
+    await frame(w, 55)
+    expect(shown(w)).toBe('45 %')
+    await drag(w, 40)
+    await frame(w, 45)
+    expect(shown(w)).toBe('40 %')
+  })
+
+  it('late echoes of intermediate values do not pull the thumb back', async () => {
+    // Review focus: sends 50, 40, 30, then their echoes after the release.
+    // The old rule ("any frame different from the previous one releases")
+    // took the echo of 50 for another source and dropped the thumb to 50.
+    const w = mounted()
+    await drag(w, 50)
+    vi.advanceTimersByTime(200)
+    await drag(w, 40)
+    vi.advanceTimersByTime(200)
+    await drag(w, 30)
+    await release(w, 30)
+    await frame(w, 50)
+    expect(shown(w)).toBe('30 %')
+    await frame(w, 40)
+    expect(shown(w)).toBe('30 %')
+    await frame(w, 30)
+    expect(shown(w)).toBe('30 %')
+    // Released by the final echo: a remote press now shows.
+    await frame(w, 35)
+    expect(shown(w)).toBe('35 %')
+  })
+
+  it('an early echo equal to the final value does not release the latch', async () => {
+    // Review focus: a back-and-forth sends 50, 45, 50. The first echo of 50
+    // is not the final one: releasing on it (`v === target`, or matching the
+    // last occurrence in the queue) would let the echo of 45 drop the thumb.
+    const w = mounted()
+    await drag(w, 50)
+    vi.advanceTimersByTime(200)
+    await drag(w, 45)
+    vi.advanceTimersByTime(200)
+    await drag(w, 50)
+    await release(w, 50)
+    expect(w.emitted('set')).toEqual([[50], [45], [50]])
+    await frame(w, 50)
+    expect(shown(w)).toBe('50 %')
+    await frame(w, 45)
+    expect(shown(w)).toBe('50 %')
+    await frame(w, 50)
+    expect(shown(w)).toBe('50 %')
+    await frame(w, 55)
+    expect(shown(w)).toBe('55 %')
+  })
+
+  it('a coalesced stream that skips echoes still releases on the final one', async () => {
+    // The core may coalesce frames: only the echo of 30 arrives. It confirms
+    // every older send with it, so the queue is empty and 40 afterwards
+    // can only come from another source.
+    const w = mounted()
+    await drag(w, 50)
+    vi.advanceTimersByTime(200)
+    await drag(w, 40)
+    vi.advanceTimersByTime(200)
+    await drag(w, 30)
+    await release(w, 30)
+    await frame(w, 30)
+    expect(shown(w)).toBe('30 %')
+    await frame(w, 40)
+    expect(shown(w)).toBe('40 %')
+  })
+
+  it('a frame from another source releases the latch at once', async () => {
+    const w = mounted()
+    await drag(w, 50)
+    vi.advanceTimersByTime(200)
+    await drag(w, 40)
+    await release(w, 40)
+    await frame(w, 50)
+    expect(shown(w)).toBe('40 %')
+    await frame(w, 63)
+    expect(shown(w)).toBe('63 %')
+  })
+
+  it('the latch gives up after 2 s without its echo', async () => {
+    const w = mounted()
+    await drag(w, 50)
+    await release(w, 50)
+    vi.advanceTimersByTime(1999)
+    await w.vm.$nextTick()
+    expect(shown(w)).toBe('50 %')
+    vi.advanceTimersByTime(1)
+    await w.vm.$nextTick()
+    expect(shown(w)).toBe('60 %')
+  })
+
+  it('a drag back to its starting value still sends it and lets go of the finger', async () => {
+    // Review focus: reka emits no `valueCommit` when a drag ends on the value
+    // it started from, so the release is also read from `pointerup`.
+    // `hasPointerCapture` is stubbed to true, so reka's own `pointerup` may
+    // emit a `valueCommit` too: `finish` is idempotent either way.
+    const w = mounted()
+    await drag(w, 55)
+    vi.advanceTimersByTime(50)
+    await drag(w, 60)
+    await w.get('[data-volume-slider]').trigger('pointerup')
+    expect(w.emitted('set')).toEqual([[55], [60]])
+    expect(shown(w)).toBe('60 %')
+    await frame(w, 55)
+    expect(shown(w)).toBe('60 %')
+    await frame(w, 60)
+    expect(shown(w)).toBe('60 %')
+    await frame(w, 70)
+    expect(shown(w)).toBe('70 %')
+  })
+
+  it('pointercancel ends the gesture like pointerup', async () => {
+    const w = mounted()
+    await drag(w, 55)
+    await w.get('[data-volume-slider]').trigger('pointercancel')
+    await frame(w, 55)
+    await frame(w, 70)
+    expect(shown(w)).toBe('70 %')
+  })
+
+  it('a press and release without movement sends nothing and holds nothing', async () => {
+    const w = mounted()
+    await w.get('[data-volume-slider]').trigger('pointerup')
+    expect(w.emitted('set')).toBeUndefined()
+    await frame(w, 70)
+    expect(shown(w)).toBe('70 %')
+  })
+
+  it('a tap on a value already seen (remote moved since) is sent', async () => {
+    // Dedup is per gesture: a `lastSent` kept from the previous gesture would
+    // swallow this 50, which the remote has since left.
+    const w = mounted()
+    await drag(w, 50)
+    await release(w, 50)
+    await frame(w, 50)
+    await frame(w, 55) // the remote
+    await drag(w, 50)
+    await release(w, 50)
+    expect(w.emitted('set')?.slice(-2)).toEqual([[50], [50]])
+  })
+
+  it('unmounting cancels a pending send', async () => {
+    // A listener spy, since test-utils forgets `emitted()` on unmount. Vue
+    // also drops an emit from an unmounted instance, so the spy alone cannot
+    // see a timer left behind: the timer count does.
+    const onSet = vi.fn()
+    const w = mounted({ onSet })
+    await drag(w, 55)
+    vi.advanceTimersByTime(10)
+    await drag(w, 50)
+    w.unmount()
+    expect(vi.getTimerCount()).toBe(0)
+    vi.advanceTimersByTime(500)
+    expect(onSet.mock.calls).toEqual([[55]])
+    // The latch's backstop too.
+    const w2 = mounted()
+    await drag(w2, 50)
+    await release(w2, 50)
+    w2.unmount()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('a release with nothing unconfirmed shows the device at once', async () => {
+    // The echo of the last send arrived during the drag, then another source
+    // moved the volume: the release sends nothing (the finger is on the value
+    // last sent), so there is nothing to hold — the device's 70 shows, not a
+    // stale 55 for two seconds.
+    const w = mounted()
+    await drag(w, 55)
+    await frame(w, 55)
+    await frame(w, 70)
+    expect(shown(w)).toBe('55 %')
+    await release(w, 55)
+    expect(w.emitted('set')).toEqual([[55]])
+    expect(shown(w)).toBe('70 %')
   })
 })
