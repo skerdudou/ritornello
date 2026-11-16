@@ -1,5 +1,5 @@
 <script setup lang="ts" generic="T">
-import { computed, provide, shallowRef, toRef, watch } from "vue"
+import { computed, provide, shallowRef, watch } from "vue"
 import { useDraggable, type SortableEvent } from "vue-draggable-plus"
 import { moveAmong } from "@/order"
 import { REORDER_DISABLED } from "./context"
@@ -13,7 +13,9 @@ import { REORDER_DISABLED } from "./context"
  * move is undone and the order handed to the parent as two positions. The
  * list on screen is then the dropped order until the parent's answer settles,
  * and the parent's own list after that: a refused or failed move falls back
- * by itself, with nothing for the parent to restore.
+ * by itself, with nothing for the parent to restore. No second drag starts
+ * while a drop awaits its answer: its positions would count the dropped order
+ * the parent does not hold yet, and the first answer would wipe its display.
  *
  * The doc lives here and not above the template on purpose: an HTML comment
  * before the root element would give the component two root nodes, and the
@@ -30,7 +32,9 @@ const props = withDefaults(defineProps<{
   /**
    * A prop and not an emit, so the component can await what it returns:
    * the dropped order stays on screen until that settles. `from` and `to` are
-   * positions **among reorderable items**, as Sortable counts them.
+   * positions **among reorderable items**, as Sortable counts them, in the
+   * parent's `items`. No second drop until the returned promise settles: the
+   * list is disabled meanwhile.
    */
   onMove?: (from: number, to: number) => unknown
 }>(), {
@@ -59,6 +63,8 @@ function attrsFor(item: T): Record<string, string> {
 const snapshot = shallowRef<readonly T[] | null>(null) // frozen while a finger holds a row
 const pending = shallowRef<readonly T[] | null>(null) // dropped order, until the parent answers
 const shown = computed(() => pending.value ?? snapshot.value ?? props.items)
+// Disabled by the parent, or waiting for the parent's answer to a drop.
+const locked = computed(() => props.disabled || pending.value !== null)
 // The node the grabbed element was in front of when the drag began: where it
 // goes back to. It may be one of Vue's empty text anchors, which is fine.
 let anchor: Node | null = null
@@ -66,9 +72,9 @@ let anchor: Node | null = null
 function onStart(e: SortableEvent) {
   // A poll that lands mid-drag must not re-render the rows under the finger:
   // Vue would patch a DOM that Sortable has rearranged.
-  // What is on screen, a pending order included: Sortable's indices count
-  // the displayed rows, not the parent's list.
-  snapshot.value = [...shown.value]
+  // The parent's list is what is on screen: no drag starts while a drop is
+  // pending (see `locked`).
+  snapshot.value = [...props.items]
   anchor = e.item.nextSibling
 }
 
@@ -126,14 +132,15 @@ const draggable = useDraggable<T>(root, {
   bubbleScroll: true,
   scrollSensitivity: 120,
   scrollSpeed: 20,
-  disabled: props.disabled,
+  disabled: locked.value,
   onStart,
   onEnd,
 })
 
-watch(() => props.disabled, (d) => draggable.option("disabled", d))
+watch(locked, (d) => draggable.option("disabled", d))
 
-provide(REORDER_DISABLED, toRef(props, "disabled"))
+// The handles show the same lock, a pending drop included.
+provide(REORDER_DISABLED, locked)
 
 // Sortable names its states with single classes it sets itself; arbitrary
 // variants on the container style them. Here and not in `theme.css`: the

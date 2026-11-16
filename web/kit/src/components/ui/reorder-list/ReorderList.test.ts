@@ -100,10 +100,13 @@ describe('ReorderList', () => {
     expect(onMove).toHaveBeenCalledTimes(1)
     expect(onMove).toHaveBeenCalledWith(2, 0)
     expect(order(w)).toEqual(['c', 'a', 'b'])
-    await w.setProps({ items: ['c', 'a', 'b'] })
+    // The parent's list, not the dropped one, is the truth once it answers:
+    // it may differ (another client moved something meanwhile).
+    await w.setProps({ items: ['c', 'b', 'a'] })
+    expect(order(w)).toEqual(['c', 'a', 'b'])
     answer()
     await flushPromises()
-    expect(order(w)).toEqual(['c', 'a', 'b'])
+    expect(order(w)).toEqual(['c', 'b', 'a'])
   })
 
   it("a refused drop falls back to the parent's list", async () => {
@@ -124,17 +127,44 @@ describe('ReorderList', () => {
     expect(order(r)).toEqual(['a', 'b', 'c'])
   })
 
-  it('a second drag before the answer starts from the order on screen', async () => {
-    const onMove = vi.fn(() => new Promise(() => {}))
-    const w = mountList({ onMove })
+  it('no second drag while a drop awaits its answer', async () => {
+    // A second drop would count positions in an order the parent does not
+    // hold yet, and the first answer would wipe its display.
+    let answer!: () => void
+    const onMove = vi.fn(() => new Promise<void>((r) => { answer = r }))
+    const w = mountList({ onMove }, (p) =>
+      h('li', { ...p.itemAttrs, 'data-k': p.item }, [h(ReorderHandle)]),
+    )
     drop(w, 'c', 'a', 2, 0)
     await nextTick()
-    expect(order(w)).toEqual(['c', 'a', 'b'])
-    // Sortable counts on the displayed rows: position 0 is now `c`, not `a`.
-    drop(w, 'c', 'b', 0, 1)
+    expect(option).toHaveBeenLastCalledWith('disabled', true)
+    expect(w.find('[data-reorder-handle]').classes()).toContain('cursor-not-allowed')
+    answer()
+    await flushPromises()
+    expect(option).toHaveBeenLastCalledWith('disabled', false)
+    expect(w.find('[data-reorder-handle]').classes()).toContain('cursor-grab')
+
+    // Settling never re-enables a list its parent disabled.
+    option.mockClear()
+    let answerToo!: () => void
+    const d = mountList({ disabled: true, onMove: vi.fn(() => new Promise<void>((r) => { answerToo = r })) })
+    drop(d, 'c', 'a', 2, 0)
     await nextTick()
-    expect(onMove).toHaveBeenLastCalledWith(0, 1)
-    expect(order(w)).toEqual(['a', 'c', 'b'])
+    answerToo()
+    await flushPromises()
+    expect(option).not.toHaveBeenCalledWith('disabled', false)
+  })
+
+  it('an onMove that throws puts the list back and unlocks it', async () => {
+    const w = mountList(
+      { onMove: vi.fn(() => { throw new Error('boom') }) },
+      (p) => h('li', { ...p.itemAttrs, 'data-k': p.item }, [h(ReorderHandle)]),
+    )
+    expect(() => drop(w, 'c', 'a', 2, 0)).not.toThrow()
+    await flushPromises()
+    expect(order(w)).toEqual(['a', 'b', 'c'])
+    expect(option).not.toHaveBeenCalledWith('disabled', true)
+    expect(w.find('[data-reorder-handle]').classes()).toContain('cursor-grab')
   })
 
   it('a drop in place calls nothing', async () => {
