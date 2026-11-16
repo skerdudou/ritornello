@@ -9,7 +9,10 @@
 //!   no source request, no publication: the device stays asleep;
 //! - **playing**: the chime is mixed into the running audio chain, after the
 //!   equalizer (`mix_filter`), and the chain without it is written back once
-//!   the chime has ended (`lock_sound_mixed`, `expire_lock_sound`). Mixing
+//!   the chime has ended (`lock_sound_mixed`, `expire_lock_sound`). Both
+//!   writes build on the chain mpv's `af` holds (`write_held_chain`), not on
+//!   the setting: the equalizer's entries keep their arguments even after a
+//!   gain moved live, and the live gains stand. Mixing
 //!   (`amix`, `normalize=0`) leaves the main stream untouched: measured
 //!   without a click on mpv 0.37 / FFmpeg 6.1;
 //! - **silent** (paused, or a file still loading): no chime — nothing would
@@ -55,7 +58,7 @@ impl<P: Player> Core<P> {
             }
             ChimeRoute::Live { sample_rate, channels } => {
                 let Some(filter) = crate::lock_sound::mix_filter(sound, motif, sample_rate, channels) else { return };
-                match self.write_chain_with(Some(&filter)).await {
+                match self.write_held_chain(Some(&filter)).await {
                     Ok(chain) => {
                         let until = Instant::now() + crate::lock_sound::duration(sound, motif) + REMOVAL_MARGIN;
                         self.lock_sound_mixed = Some((chain, until));
@@ -90,7 +93,7 @@ impl<P: Player> Core<P> {
         if self.eq_chain_written.as_deref() != Some(chain.as_str()) {
             return;
         }
-        if let Err(e) = self.write_chain_with(None).await {
+        if let Err(e) = self.write_held_chain(None).await {
             tracing::warn!("lock sound removal: {e}");
         }
     }
@@ -244,6 +247,46 @@ mod tests {
         pc.lock().unwrap().clear();
         core.handle_event(Event::FileStarting).await;
         assert_eq!(chime_calls(&pc), Vec::<String>::new());
+    }
+
+    /// A band moved live (`af-command`) leaves mpv's `af` holding the old
+    /// gains. Rebuilding the chime's chain from the setting changed the
+    /// equalizer's entries mid-playback — the rewrite that clicks — and its
+    /// removal then wrote the setting's chain once more. The chime is mixed
+    /// into the chain mpv holds, and its removal writes that same chain back:
+    /// the equalizer's entries are never touched, and the live gains stand.
+    #[tokio::test]
+    async fn a_chime_after_a_live_band_change_leaves_the_equalizer_entries_alone() {
+        let eq = enabled();
+        let (mut core, pc, _sc, _rx, _d) = setup_persisted(PersistedState { equalizer: eq.clone(), ..Default::default() });
+        core.handle_event(Event::FileStarting).await;
+        core.handle_event(Event::PlaybackRestarted).await;
+        set_route(&core, LIVE);
+        let moved = EqualizerSettings { gains: [0, 0, 0, 0, 0, 6, 0, 0, 0, 0], ..eq.clone() };
+        core.set_equalizer(moved.clone()).await.unwrap();
+        assert!(
+            calls_of(&pc).iter().any(|c| c.starts_with("af_cmd eq5 ")),
+            "the band went live, otherwise the test proves nothing: {:?}",
+            calls_of(&pc)
+        );
+        pc.lock().unwrap().clear();
+
+        core.handle_command(Command::SetInputLock(true)).await.unwrap();
+        let filter = mix_filter(LockSound::A, Motif::Lock, 48000, 2).unwrap();
+        assert_eq!(chime_calls(&pc), vec![format!("af {},{filter}", af_chain(&eq))], "mixed into the chain mpv holds");
+
+        pc.lock().unwrap().clear();
+        core.expire_lock_sound().await;
+        assert_eq!(chime_calls(&pc), vec![format!("af {}", af_chain(&eq))], "the same plain chain back");
+
+        // No gain reverted: the live gains are still counted as held, so the
+        // same setting again sends nothing…
+        pc.lock().unwrap().clear();
+        core.set_equalizer(moved.clone()).await.unwrap();
+        assert_eq!(chime_calls(&pc), Vec::<String>::new());
+        // …and the next file still gets the setting's chain, written whole.
+        core.handle_event(Event::FileStarting).await;
+        assert_eq!(chime_calls(&pc), vec![format!("af {}", af_chain(&moved))]);
     }
 
     #[tokio::test]

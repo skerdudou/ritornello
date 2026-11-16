@@ -576,6 +576,17 @@ pub struct Core<P: Player> {
     /// when the last write failed and `af` is unknown. A file start rewrites
     /// the chain only when it differs from the setting's.
     eq_chain_written: Option<String>,
+    /// The equalizer part of what mpv's `af` holds: the plain chain (no
+    /// chime) last written whole from the setting (`--af` at launch, a
+    /// toggle, a file start, an audio output change). It equals
+    /// `eq_chain_written` unless a chime is mixed in, and it is **not** the
+    /// setting's chain once a gain moved live: `af-command` never updates
+    /// `af`. A chime is mixed into it, and its removal writes it back
+    /// (`write_held_chain`), so mpv's equalizer entries keep their arguments
+    /// — a rewrite that changes one mid-playback clicks — and the live gains
+    /// (`eq_preamp_sent`, `eq_bands_sent`) stand. `None` when `af` is
+    /// unknown (a failed write).
+    eq_plain_written: Option<String>,
     /// The chain written with a lock chime mixed in, and when to write it
     /// back without (`lock_sound.rs`). Cleared by any other whole-chain
     /// write: that write already dropped the chime.
@@ -751,6 +762,7 @@ impl<P: Player> Core<P> {
             equalizer: persisted.equalizer.clone(),
             eq_bands_sent: persisted.equalizer.gains,
             eq_chain_written: Some(crate::equalizer::af_chain(&persisted.equalizer)),
+            eq_plain_written: Some(crate::equalizer::af_chain(&persisted.equalizer)),
             eq_live: false,
             lock_sound_mixed: None,
         };

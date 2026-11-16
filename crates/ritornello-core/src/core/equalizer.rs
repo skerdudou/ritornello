@@ -13,7 +13,12 @@
 //!
 //! Hence:
 //! - toggling `enabled` rewrites the chain (empty when disabled) — the only
-//!   rewrite tolerated during playback, a brief cut the design accepts;
+//!   rewrite during playback that changes the equalizer's filters, a brief
+//!   cut the design accepts. A lock chime also rewrites the chain twice
+//!   during playback (`lock_sound.rs`), but adds and removes only its own
+//!   filter after the equalizer's, which it writes exactly as `af` holds
+//!   them (`write_held_chain`, `eq_plain_written`) — measured without a
+//!   click;
 //! - otherwise, while enabled and the chain is live (`eq_live`, from
 //!   `playback-restart` to the next file start or idle), one `af-command` per
 //!   band whose gain differs from what mpv holds, and one for the preamp
@@ -142,18 +147,45 @@ impl<P: Player> Core<P> {
     /// equalizer's filters; returns the chain written. Any whole-chain write
     /// drops a chime mixed before it, so its pending removal goes too
     /// (`lock_sound_mixed`): the caller mixing a new one sets it again.
-    pub(super) async fn write_chain_with(&mut self, extra: Option<&str>) -> Result<String> {
+    async fn write_chain_with(&mut self, extra: Option<&str>) -> Result<String> {
         let eq = crate::equalizer::af_chain(&self.equalizer);
-        let chain = match extra {
-            Some(extra) if !extra.is_empty() && !eq.is_empty() => format!("{eq},{extra}"),
-            Some(extra) if !extra.is_empty() => extra.to_string(),
-            _ => eq,
-        };
+        let chain = with_extra(&eq, extra);
         self.lock_sound_mixed = None;
         let result = self.player.set_audio_filters(&chain).await;
         self.eq_chain_written = result.is_ok().then(|| chain.clone());
+        self.eq_plain_written = result.is_ok().then_some(eq);
         self.eq_preamp_sent = crate::equalizer::effective_preamp_db(&self.equalizer);
         self.eq_bands_sent = self.equalizer.gains;
+        result.map(|()| chain)
+    }
+
+    /// Writes the plain chain mpv's `af` already holds (`eq_plain_written`)
+    /// with `extra` after it — a lock chime — or alone when `extra` is
+    /// `None`, which removes a chime; returns the chain written.
+    ///
+    /// The equalizer's entries are written with the arguments `af` already
+    /// carries, not rebuilt from the setting: after a gain moved live
+    /// (`af-command`, which never updates `af`) the setting's chain would
+    /// change an entry mid-playback, the rewrite that clicks. So the gains
+    /// mpv holds live (`eq_preamp_sent`, `eq_bands_sent`) are left as they
+    /// are, and the next file start still rewrites the setting's chain,
+    /// since `af` differs from it.
+    ///
+    /// When `af` is unknown (a failed write) there is nothing to build on:
+    /// the setting's chain is written whole instead (`write_chain_with`).
+    /// Like every whole-chain write, it drops a chime mixed before it
+    /// (`lock_sound_mixed`); the caller mixing a new one sets it again.
+    pub(super) async fn write_held_chain(&mut self, extra: Option<&str>) -> Result<String> {
+        let Some(plain) = self.eq_plain_written.clone() else {
+            return self.write_chain_with(extra).await;
+        };
+        let chain = with_extra(&plain, extra);
+        self.lock_sound_mixed = None;
+        let result = self.player.set_audio_filters(&chain).await;
+        self.eq_chain_written = result.is_ok().then(|| chain.clone());
+        if result.is_err() {
+            self.eq_plain_written = None;
+        }
         result.map(|()| chain)
     }
 
@@ -189,6 +221,15 @@ impl<P: Player> Core<P> {
             self.eq_bands_sent[band] = gain;
         }
         Ok(())
+    }
+}
+
+/// `plain` with `extra` after it; either may be empty.
+fn with_extra(plain: &str, extra: Option<&str>) -> String {
+    match extra {
+        Some(extra) if !extra.is_empty() && !plain.is_empty() => format!("{plain},{extra}"),
+        Some(extra) if !extra.is_empty() => extra.to_string(),
+        _ => plain.to_string(),
     }
 }
 
