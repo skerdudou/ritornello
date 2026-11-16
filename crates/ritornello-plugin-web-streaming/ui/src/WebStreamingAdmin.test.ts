@@ -409,7 +409,7 @@ describe('WebStreamingAdmin', () => {
     // Video 3 is left whole: a start of 0 alone is no cut.
     await typeDialog('[data-trim-start="3"]', '0:00')
     await clickDialog('[data-download-here]')
-    expect(s.putsOf('download')[0]!.trims).toEqual({ 1: { start: 83, end: 300 } })
+    expect(s.putsOf('download')[0]!.trims).toEqual({ 1: { start_ms: 83_000, end_ms: 300_000 } })
   })
 
   it('sends one bound alone, the start or the end', async () => {
@@ -417,7 +417,28 @@ describe('WebStreamingAdmin', () => {
     await typeDialog('[data-trim-start="1"]', '90')
     await typeDialog('[data-trim-end="2"]', '1:00:00')
     await clickDialog('[data-download-here]')
-    expect(s.putsOf('download')[0]!.trims).toEqual({ 1: { start: 90 }, 2: { end: 3600 } })
+    expect(s.putsOf('download')[0]!.trims).toEqual({ 1: { start_ms: 90_000 }, 2: { end_ms: 3_600_000 } })
+  })
+
+  it('sends a fraction of a second, with a point or a comma, in milliseconds', async () => {
+    const { s } = await optionsFor({ entries: [video(1)] })
+    await typeDialog('[data-trim-start="1"]', '1:30,25')
+    await typeDialog('[data-trim-end="1"]', '2:00.5')
+    await clickDialog('[data-download-here]')
+    expect(s.putsOf('download')[0]!.trims).toEqual({ 1: { start_ms: 90_250, end_ms: 120_500 } })
+  })
+
+  it('the cut fields open the standard keyboard', async () => {
+    await optionsFor({ entries: [video(1)] })
+    expect(inDialog('[data-trim-start="1"]')!.hasAttribute('inputmode')).toBe(false)
+    expect(inDialog('[data-trim-end="1"]')!.hasAttribute('inputmode')).toBe(false)
+  })
+
+  it('a long format or cover label wraps inside its button', async () => {
+    await optionsFor({ entries: [video(1)] })
+    const buttons = [...document.querySelectorAll('[data-format], [data-cover]')]
+    expect(buttons.length).toBeGreaterThan(0)
+    for (const b of buttons) expect(b.classList.contains('whitespace-normal'), b.outerHTML).toBe(true)
   })
 
   it('says what is wrong with a time and does not download until it is right', async () => {

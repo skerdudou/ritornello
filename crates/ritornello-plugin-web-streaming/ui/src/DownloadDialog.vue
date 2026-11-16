@@ -4,7 +4,7 @@ import {
 } from '@ritornello/ui'
 import { computed, ref, watch } from 'vue'
 import {
-  faultText, parseClock, targetText, type Choices, type CoverMode, type Explore, type Format, type Kind, type T,
+  faultText, parseClockMs, targetText, type Choices, type CoverMode, type Explore, type Format, type Kind, type T,
   type Target, type Trim,
 } from './data'
 
@@ -84,14 +84,14 @@ const cutOf = computed(() => {
   const read: Record<string, Trim | null | 'invalid' | 'order'> = {}
   for (const i of videos.value) {
     const typed = cuts.value[String(i.preset)] ?? { start: '', end: '' }
-    const start = parseClock(typed.start)
-    const end = parseClock(typed.end)
+    const start = parseClockMs(typed.start)
+    const end = parseClockMs(typed.end)
     let cut: Trim | null | 'invalid' | 'order'
     if (!props.ffmpeg) cut = null
     else if (start === undefined || end === undefined) cut = 'invalid'
     else if (end !== null && end <= (start ?? 0)) cut = 'order'
     else if (!start && end === null) cut = null
-    else cut = { ...(start ? { start } : {}), ...(end !== null ? { end } : {}) }
+    else cut = { ...(start ? { start_ms: start } : {}), ...(end !== null ? { end_ms: end } : {}) }
     read[String(i.preset)] = cut
   }
   return read
@@ -310,7 +310,7 @@ function formatLabel(f: Format): string {
               v-for="f in FORMATS"
               :key="f"
               size="sm"
-              class="w-full"
+              class="h-auto min-h-9 w-full whitespace-normal"
               :variant="f === format ? 'default' : 'outline'"
               :aria-pressed="f === format"
               :data-format="f"
@@ -333,7 +333,7 @@ function formatLabel(f: Format): string {
               v-for="c in COVERS"
               :key="c"
               size="sm"
-              class="w-full"
+              class="h-auto min-h-9 w-full whitespace-normal"
               :variant="cover === c ? 'default' : 'outline'"
               :aria-pressed="cover === c"
               :data-cover="c"
@@ -360,12 +360,11 @@ function formatLabel(f: Format): string {
               />
             </label>
             <!-- A single video only: a playlist is never cut. -->
-            <div v-if="i.kind === 'video' && cuts[String(i.preset)]" class="flex items-center gap-2" :data-trim="i.preset">
+            <div v-if="i.kind === 'video' && cuts[String(i.preset)]" class="flex flex-wrap items-center gap-2" :data-trim="i.preset">
               <span class="shrink-0 text-muted-foreground">{{ t('trim_from') }}</span>
               <Input
                 v-model="cuts[String(i.preset)]!.start"
-                class="w-24"
-                inputmode="numeric"
+                class="w-28"
                 :data-trim-start="i.preset"
                 :disabled="!ffmpeg"
                 :placeholder="t('trim_start_placeholder')"
@@ -374,8 +373,7 @@ function formatLabel(f: Format): string {
               <span class="shrink-0 text-muted-foreground">{{ t('trim_to') }}</span>
               <Input
                 v-model="cuts[String(i.preset)]!.end"
-                class="w-24"
-                inputmode="numeric"
+                class="w-28"
                 :data-trim-end="i.preset"
                 :disabled="!ffmpeg"
                 :placeholder="t('trim_end_placeholder')"
