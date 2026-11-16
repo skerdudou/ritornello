@@ -302,6 +302,48 @@ describe('swipe', () => {
     expect(windowOf(w)).toBe('1–10 of 23')
   })
 
+  // Mobile browsers usually send no click after a drag past the tap slop: the
+  // swallow armed by the swipe must not eat whatever comes next.
+  const touch = (type: string, id: number, x: number, y: number, pointerType = 'touch') =>
+    new PointerEvent(type, { bubbles: true, pointerId: id, pointerType, clientX: x, clientY: y })
+  const swipeWithoutClick = async (grid: Element) => {
+    grid.dispatchEvent(touch('pointerdown', 1, 200, 100))
+    const up = touch('pointerup', 1, 100, 110)
+    grid.dispatchEvent(up)
+    await nextTick()
+    return up
+  }
+
+  it('a touch tap right after a swipe that sent no click still chooses the tile', async () => {
+    const w = mounted({ preset_count: 23 })
+    await swipeWithoutClick(w.get('[data-preset-grid]').element)
+    expect(windowOf(w)).toBe('11–20 of 23')
+    await swipe(w.get('[data-preset-button="13"]').element, [50, 50], [52, 51])
+    expect(w.emitted('choose')).toEqual([[13]])
+  })
+
+  it('a mouse click after a swipe that sent no click still chooses the tile', async () => {
+    const w = mounted({ preset_count: 23 })
+    await swipeWithoutClick(w.get('[data-preset-grid]').element)
+    const tile = w.get('[data-preset-button="13"]').element
+    tile.dispatchEvent(touch('pointerdown', 2, 50, 50, 'mouse'))
+    tile.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await nextTick()
+    expect(w.emitted('choose')).toEqual([[13]])
+  })
+
+  it('a keyboard activation long after a swipe that sent no click still chooses the tile', async () => {
+    const w = mounted({ preset_count: 23 })
+    const up = await swipeWithoutClick(w.get('[data-preset-grid]').element)
+    // No pointerdown at all (Enter or Space on a focused tile): only the time
+    // since the swipe tells it from the click that ends one.
+    const click = new MouseEvent('click', { bubbles: true })
+    Object.defineProperty(click, 'timeStamp', { value: up.timeStamp + 5000 })
+    w.get('[data-preset-button="13"]').element.dispatchEvent(click)
+    await nextTick()
+    expect(w.emitted('choose')).toEqual([[13]])
+  })
+
   it('a mostly vertical drag does not turn the page', async () => {
     const w = mounted({ preset_count: 23 })
     await swipe(w.get('[data-preset-grid]').element, [200, 100], [150, 300])
@@ -337,7 +379,7 @@ describe('swipe', () => {
 
   it('the card lets the page scroll vertically in pages mode', async () => {
     const w = mounted({ preset_count: 23 })
-    expect(w.get('[data-preset-grid]').attributes('style')).toContain('touch-action: pan-y')
+    expect(w.get('[data-preset-grid]').attributes('style')).toContain('touch-action: pan-y pinch-zoom')
     await w.get('[data-preset-layout-toggle]').trigger('click')
     expect(w.get('[data-preset-grid]').attributes('style') ?? '').not.toContain('touch-action')
   })

@@ -114,16 +114,22 @@ watch([listMode, activePreset], () => {
 
 // A horizontal swipe on the card turns the page, pages mode only (see
 // classifySwipe). Touch and pen only: a mouse drag is a text selection, not a
-// gesture. `touch-action: pan-y` on the card keeps the browser's vertical page
-// scroll; when it takes over it fires `pointercancel`, which aborts the swipe.
-// Hand-written Pointer Events: no second library for ten lines.
+// gesture. `touch-action: pan-y pinch-zoom` on the card keeps the browser's
+// vertical page scroll and the two-finger zoom the page allows; when either
+// takes over (a second finger too) it fires `pointercancel`, which aborts the
+// swipe. Hand-written Pointer Events: no second library for ten lines.
 let start: { id: number; x: number; y: number } | null = null
-let swallowClick = false
+// The click that ends a swipe arrives right after its pointerup; many mobile
+// browsers send none at all after a drag, so the swallow expires rather than
+// waiting for "the next click", which would then be an unrelated one.
+const SWALLOW_WINDOW_MS = 500
+let swallowUntil = 0
 
 function onPointerDown(e: PointerEvent) {
+  // Any new gesture, whatever the pointer, ends the swallow.
+  swallowUntil = 0
   if (e.pointerType !== 'touch' && e.pointerType !== 'pen') return
   if (listMode.value || start) return
-  swallowClick = false
   start = { id: e.pointerId, x: e.clientX, y: e.clientY }
 }
 function onPointerUp(e: PointerEvent) {
@@ -133,7 +139,7 @@ function onPointerUp(e: PointerEvent) {
   if (!direction) return
   if (direction === 'next') nextPage()
   else previousPage()
-  swallowClick = true
+  swallowUntil = e.timeStamp + SWALLOW_WINDOW_MS
 }
 function onPointerCancel() {
   start = null
@@ -142,8 +148,9 @@ function onPointerCancel() {
 // on: without this, swiping from a tile would also choose that preset and
 // change what is playing.
 function onClickCapture(e: Event) {
-  if (!swallowClick) return
-  swallowClick = false
+  const swallow = swallowUntil !== 0 && e.timeStamp <= swallowUntil
+  swallowUntil = 0
+  if (!swallow) return
   e.preventDefault()
   e.stopPropagation()
 }
@@ -157,7 +164,7 @@ const dimmed = computed(() => unavailable('Select', props.state))
   <Card
     data-preset-grid
     :data-preset-layout="listMode ? 'list' : 'pages'"
-    :style="listMode ? undefined : { touchAction: 'pan-y' }"
+    :style="listMode ? undefined : { touchAction: 'pan-y pinch-zoom' }"
     @pointerdown="onPointerDown"
     @pointerup="onPointerUp"
     @pointercancel="onPointerCancel"
