@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { api, Button, Input } from '@ritornello/ui'
+import { api, Button, Input, ReorderHandle, ReorderList } from '@ritornello/ui'
 import { computed, ref, watch } from 'vue'
 import { INTERNAL, type Data, type Send, type T } from './data'
 
@@ -110,40 +110,25 @@ watch(
   { immediate: true },
 )
 
-function move(from: number, to: number): void {
-  if (to < 0 || to >= tracks.value.length) return
+/**
+ * Moves the track at **absolute** rank `from` to absolute rank `to`.
+ *
+ * Absolute and not relative to the page: that is the index the plugin
+ * expects, and a paginated list makes them diverge from the second page on.
+ *
+ * Returns the `send` promise, which settles once the plugin's state has been
+ * re-read: the reorderable list keeps showing the dropped order until then,
+ * so the rows never flash back to the old order before the new one arrives.
+ */
+function move(from: number, to: number): Promise<unknown> {
+  if (to < 0 || to >= tracks.value.length) return Promise.resolve()
   // A reorder shuffles the ranks under the user's eyes. The open row could not
   // name the wrong file — keyed by its path, it follows its own track — but
   // one no longer knows, at a glance, which of the tracks that have just moved
   // it belongs to. Closing is the unambiguous answer. Covers the drag as well:
-  // `drop` comes through here.
+  // the list's `move` event comes through here.
   openPath.value = null
-  void props.send({ op: 'move', from, to })
-}
-
-/**
- * **Absolute** rank of the track currently being dragged, or `null`.
- *
- * Absolute and not relative to the page: that is the index the plugin
- * expects, and a paginated list makes them diverge from the second page on.
- */
-const dragging = ref<number | null>(null)
-
-/**
- * Drops the dragged track in the place of the one being hovered.
- *
- * Drag-and-drop only covers the **visible** rows: beyond two hundred tracks
- * the list is paginated, and one cannot drag onto a page that is not shown.
- * The up/down buttons, on the other hand, cross pages — so they stay there,
- * and not only for the keyboard.
- */
-function drop(to: number): void {
-  if (dragging.value === null || dragging.value === to) {
-    dragging.value = null
-    return
-  }
-  move(dragging.value, to)
-  dragging.value = null
+  return props.send({ op: 'move', from, to })
 }
 
 async function remove(i: number): Promise<void> {
@@ -241,40 +226,37 @@ function load(): void {
             <th class="w-28" />
           </tr>
         </thead>
-        <tbody>
-          <!-- Draggable rows, like the station grid of the radio plugin.
-               `dragover.prevent` is essential: without it the browser
-               refuses the drop. The rank sent to the plugin is **absolute**
-               (`offset + i`) and not the page's own.
+        <!-- Reorderable rows, driven by their handle, finger and mouse alike
+             (the same list as the plugins table of the settings page). The
+             list is handed the **visible page only**: the positions it
+             reports are relative to it, and a track on another page cannot be
+             dragged onto. The ranks sent to the plugin are **absolute**
+             (`offset + position`). The up/down buttons, on the other hand,
+             cross pages — so they stay there, and not only for the keyboard.
 
-               A `<template>` and not a bare `<tr>`: each track may be
-               followed by a second row carrying its full path, and the two
-               belong to the same iteration. -->
-          <template v-for="(p, i) in window" :key="`${offset + i}:${p.path}`">
+             Each track may be followed by a second row carrying its full
+             path, and the two belong to the same slot. Only the track's own
+             row carries the list's item attributes: the path row is not an
+             item, so it can never be a drop position. -->
+        <ReorderList
+          tag="tbody"
+          :items="window"
+          :item-key="(p, i) => `${offset + i}:${p.path}`"
+          :disabled="frozen"
+          @move="(from, to) => move(offset + from, offset + to)"
+          v-slot="{ item: p, index: i, itemAttrs }"
+        >
             <tr
+              v-bind="itemAttrs"
               data-track-row
               class="border-t border-border"
-              :class="[
-                offset + i === data.index ? 'bg-muted/50' : '',
-                dragging === offset + i ? 'opacity-50' : '',
-              ]"
-              :draggable="!frozen"
-              @dragstart="dragging = offset + i"
-              @dragover.prevent
-              @drop.prevent="drop(offset + i)"
-              @dragend="dragging = null"
+              :class="offset + i === data.index ? 'bg-muted/50' : ''"
             >
               <!-- `data-track-num` carries the **number alone**, not the cell:
                    the drag handle also lives in it, and a test reading the
                    cell's text would find the glyph in it. -->
               <td class="whitespace-nowrap tabular-nums text-muted-foreground">
-                <span
-                  class="cursor-grab select-none pr-1"
-                  :title="t('reorder_hint')"
-                  data-drag-handle
-                >
-                  ⠿
-                </span>
+                <ReorderHandle :title="t('reorder_hint')" data-drag-handle />
                 <span data-track-num>{{ offset + i + 1 }}</span>
               </td>
               <td class="py-1 pr-2">
@@ -373,8 +355,7 @@ function load(): void {
                 {{ p.path }}
               </td>
             </tr>
-          </template>
-        </tbody>
+        </ReorderList>
       </table>
 
       <Button variant="outline" data-clear :disabled="frozen" @click="clear">

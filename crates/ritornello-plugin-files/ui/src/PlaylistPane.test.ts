@@ -1,4 +1,5 @@
-import { flushPromises } from '@vue/test-utils'
+import { ReorderList } from '@ritornello/ui'
+import { flushPromises, type VueWrapper } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mountAdmin } from './harness'
 
@@ -168,50 +169,78 @@ describe('current queue pane', () => {
     expect(s.urls()).not.toContain('/api/command')
   })
 
-  it('reorders via drag-and-drop, like the station grid', async () => {
+  // The gesture itself (SortableJS) is covered by the kit's own tests; these
+  // cover what the pane does with the list's answer. `ReorderList` is
+  // generic, which `findComponent`'s typing cannot follow.
+  const list = (w: VueWrapper) =>
+    w.findComponent(ReorderList as never) as unknown as { props(k: string): unknown }
+  const dropHandler = (w: VueWrapper) =>
+    list(w).props('onMove') as (from: number, to: number) => Promise<unknown>
+
+  const LONG = Array.from({ length: 250 }, (_, i) => ({
+    path: `/m/${i}.mp3`,
+    name: `${i}`,
+    missing: false,
+  }))
+
+  it('reorders by dragging, like the station grid', async () => {
     const { w, s } = await mountAdmin({ playlist: THREE })
-    const rows = w.findAll('[data-track-row]')
-    await rows[2]!.trigger('dragstart')
-    await rows[0]!.trigger('drop')
+    await dropHandler(w)(2, 0)
     await flushPromises()
     expect(s.putsOf('move')).toEqual([{ op: 'move', from: 2, to: 0 }])
-  })
-
-  it('dropping a track onto itself requests nothing', async () => {
-    // Otherwise the slightest heavy-handed click on a row would trigger a
-    // no-op move, and a full state re-read along with it.
-    const { w, s } = await mountAdmin({ playlist: THREE })
-    const rows = w.findAll('[data-track-row]')
-    await rows[1]!.trigger('dragstart')
-    await rows[1]!.trigger('drop')
-    await flushPromises()
-    expect(s.putsOf('move')).toEqual([])
-  })
-
-  it('dropping without having picked anything up requests nothing', async () => {
-    const { w, s } = await mountAdmin({ playlist: THREE })
-    await w.findAll('[data-track-row]')[0]!.trigger('drop')
-    await flushPromises()
-    expect(s.putsOf('move')).toEqual([])
   })
 
   it('the ranks sent to the plugin are absolute, not the pages own', async () => {
     // Beyond two hundred tracks the list is paginated: confusing the
     // displayed rank with the real index would move an entirely different
     // track.
-    const long = Array.from({ length: 250 }, (_, i) => ({
-      path: `/m/${i}.mp3`,
-      name: `${i}`,
-      missing: false,
-    }))
-    const { w, s } = await mountAdmin({ playlist: long })
+    const { w, s } = await mountAdmin({ playlist: LONG })
     await w.find('[data-page-next]').trigger('click')
     await flushPromises()
-    const rows = w.findAll('[data-track-row]')
-    await rows[1]!.trigger('dragstart')
-    await rows[0]!.trigger('drop')
+    await dropHandler(w)(1, 0)
     await flushPromises()
     expect(s.putsOf('move')).toEqual([{ op: 'move', from: 101, to: 100 }])
+  })
+
+  it('only the visible page is handed to the list', async () => {
+    // The positions the list reports are relative to what it was given: it
+    // must not be given tracks that are not on screen.
+    const { w } = await mountAdmin({ playlist: LONG })
+    await w.find('[data-page-next]').trigger('click')
+    await flushPromises()
+    const items = list(w).props('items') as { name: string }[]
+    expect(items).toHaveLength(100)
+    expect(items[0]!.name).toBe('100')
+  })
+
+  it('the list cannot be dragged while frozen', async () => {
+    // A send held in flight is what freezes the pane.
+    const { w, s } = await mountAdmin({ playlist: THREE })
+    expect(list(w).props('disabled')).toBe(false)
+    let release!: () => void
+    const held = new Promise<void>((r) => (release = r))
+    const answer = s.spy.getMockImplementation() as (
+      url: string,
+      init?: RequestInit,
+    ) => Promise<Response>
+    s.spy.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') await held
+      return (await answer(url, init)) as Response
+    })
+    await w.findAll('[data-track-down]')[0]!.trigger('click')
+    await flushPromises()
+    expect(list(w).props('disabled')).toBe(true)
+    release()
+    await flushPromises()
+  })
+
+  it('the path row is not a reorder item', async () => {
+    const { w } = await mountAdmin({ playlist: THREE })
+    await w.find('[data-track-name]').trigger('click')
+    for (const row of w.findAll('[data-track-row]')) expect(row.attributes()).toHaveProperty('data-reorder-item')
+    const pathRow = w.find('[data-track-path]').element.closest('tr')!
+    expect(pathRow.hasAttribute('data-reorder-item')).toBe(false)
+    expect(w.find('[data-drag-handle]').attributes()).toHaveProperty('data-reorder-handle')
   })
 
   it('displays what a loaded m3u could not resolve', async () => {
