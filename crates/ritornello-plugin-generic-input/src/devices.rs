@@ -1,13 +1,15 @@
 use crate::bindings::Bindings;
 use crate::learn::LearnState;
+use crate::lock::{LONG_PRESS, LockKeyPress};
 use evdev::{Device, EventType};
 use ritornello_proto::{Command, InputMessage};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 /// Root of evdev nodes on a standard Linux.
 pub const INPUT_DIR: &str = "/dev/input";
@@ -117,22 +119,164 @@ pub fn key_outcome(
     bindings.resolve(device_name, code)
 }
 
-/// Same resolution as `key_outcome`, plus the autorepeat rule: a held key
-/// (evdev `value == 2`) only emits for the volume commands, marked `held` so
-/// the core paces them (the kernel repeats much faster than one step per
-/// 500 ms should go). Pure function, testable without hardware.
-pub fn key_outcome_held(
+/// The three things the kernel reports about a key: evdev `value` 1, 2, 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyEdge {
+    Press,
+    /// Kernel autorepeat while the key stays down.
+    Repeat,
+    Release,
+}
+
+impl KeyEdge {
+    pub fn from_value(value: i32) -> Option<KeyEdge> {
+        match value {
+            1 => Some(KeyEdge::Press),
+            2 => Some(KeyEdge::Repeat),
+            0 => Some(KeyEdge::Release),
+            _ => None,
+        }
+    }
+}
+
+/// What one key event asks of the plugin.
+#[derive(Debug, PartialEq)]
+pub enum Outcome {
+    /// Forward this message to the core.
+    Send(InputMessage),
+    /// The lock key went down: arm the long press, send nothing yet.
+    LockPress,
+    /// The lock key went up: disarm it.
+    LockRelease,
+    Nothing,
+}
+
+/// Same resolution as `key_outcome`, plus the two rules that depend on the
+/// event rather than on the key:
+///
+/// * the autorepeat rule: a held key only emits for the volume commands,
+///   marked `held` so the core paces them (the kernel repeats much faster than
+///   one step per 500 ms should go);
+/// * the remote lock: the key bound to `ToggleInputLock` never sends on a
+///   press (it is a *long* press, timed by `key_loop`) and works whether the
+///   remote is locked or not, since it is the way out; every other key, Power
+///   included, is ignored while `locked`. The core applies every command it
+///   receives, so this is the only place that decides to stay silent.
+///
+/// Pure function, testable without hardware.
+pub fn key_outcome_event(
     bindings: &Bindings,
     learning_device: Option<&str>,
     device_name: &str,
     code: u16,
-    held: bool,
-) -> Option<InputMessage> {
-    let cmd = key_outcome(bindings, learning_device, device_name, code)?;
-    if held && !matches!(cmd, Command::VolumeUp | Command::VolumeDown) {
-        return None;
+    edge: KeyEdge,
+    locked: bool,
+) -> Outcome {
+    let Some(cmd) = key_outcome(bindings, learning_device, device_name, code) else {
+        return Outcome::Nothing;
+    };
+    if cmd == Command::ToggleInputLock {
+        return match edge {
+            KeyEdge::Press => Outcome::LockPress,
+            KeyEdge::Release => Outcome::LockRelease,
+            KeyEdge::Repeat => Outcome::Nothing,
+        };
     }
-    Some(InputMessage { cmd, held })
+    if locked {
+        return Outcome::Nothing;
+    }
+    match edge {
+        KeyEdge::Press => Outcome::Send(InputMessage { cmd, held: false }),
+        KeyEdge::Repeat if matches!(cmd, Command::VolumeUp | Command::VolumeDown) => {
+            Outcome::Send(InputMessage { cmd, held: true })
+        }
+        KeyEdge::Repeat | KeyEdge::Release => Outcome::Nothing,
+    }
+}
+
+/// One device's key events, in order: `(evdev code, value 0 | 1 | 2)`. Runs
+/// until the sender is dropped (the node went away).
+///
+/// The loop, not the reader, owns the long press: it waits for the next event
+/// **or** the lock key's deadline, so a remote that sends no autorepeat still
+/// toggles after `LONG_PRESS`, and one that does repeat toggles once.
+pub(crate) async fn key_loop(mut events: mpsc::Receiver<(u16, i32)>, name: String, hub: Hub) {
+    let mut press = LockKeyPress::default();
+    // The code whose hold is armed. A release of that code disarms it
+    // whatever the bindings say by then: learning may have started on this
+    // device, or the table changed, during the hold, and the release then no
+    // longer resolves to `LockRelease` — yet the key is up, and the deadline
+    // must not toggle for a key nobody holds.
+    let mut armed: Option<u16> = None;
+    loop {
+        let deadline = press.deadline();
+        let event = tokio::select! {
+            ev = events.recv() => match ev {
+                Some(ev) => Some(ev),
+                None => break,
+            },
+            _ = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now)),
+                if deadline.is_some() => None,
+        };
+        let toggle = match event {
+            // The deadline passed with no event.
+            None => press.due(Instant::now()),
+            Some((code, value)) => {
+                let Some(edge) = KeyEdge::from_value(value) else {
+                    continue;
+                };
+                if edge == KeyEdge::Press {
+                    // Learning consumes the first press and emits nothing.
+                    let capture = { hub.learn.write().unwrap().capture(&name, code) };
+                    if capture {
+                        continue;
+                    }
+                }
+                if edge == KeyEdge::Release && armed == Some(code) {
+                    press.release();
+                    armed = None;
+                }
+                // No lock guard crosses an `.await`.
+                let (outcome, is_lock_key) = {
+                    let learn = hub.learn.read().unwrap();
+                    let b = hub.bindings.read().unwrap();
+                    let locked = *hub.locked.borrow();
+                    (
+                        key_outcome_event(&b, learn.device(), &name, code, edge, locked),
+                        key_outcome(&b, learn.device(), &name, code)
+                            == Some(Command::ToggleInputLock),
+                    )
+                };
+                match outcome {
+                    Outcome::Send(msg) => {
+                        tracing::debug!("{name}: key {code} -> {:?}", msg.cmd);
+                        let _ = hub.tx.send(msg).await;
+                        false
+                    }
+                    Outcome::LockPress => {
+                        press.press(Instant::now());
+                        armed = Some(code);
+                        false
+                    }
+                    Outcome::LockRelease => {
+                        press.release();
+                        armed = None;
+                        false
+                    }
+                    // An autorepeat of the lock key is a chance to notice the
+                    // deadline, not a command.
+                    Outcome::Nothing if is_lock_key && edge == KeyEdge::Repeat => {
+                        press.due(Instant::now())
+                    }
+                    Outcome::Nothing => false,
+                }
+            }
+        };
+        if toggle {
+            tracing::debug!("{name}: lock key held {LONG_PRESS:?} -> ToggleInputLock");
+            let _ = hub.tx.send(InputMessage::from(Command::ToggleInputLock)).await;
+        }
+    }
 }
 
 /// State shared between the Input half (the playback tasks) and the Admin
@@ -148,16 +292,24 @@ pub struct Hub {
     /// held across an `.await`.
     pub reported: Arc<Mutex<Reported>>,
     pub tx: mpsc::Sender<InputMessage>,
+    /// The remote lock, as the core last told the SDK. Read per event, never
+    /// across an `.await`.
+    pub locked: watch::Receiver<bool>,
 }
 
 impl Hub {
-    pub fn new(bindings: Bindings, tx: mpsc::Sender<InputMessage>) -> Hub {
+    pub fn new(
+        bindings: Bindings,
+        tx: mpsc::Sender<InputMessage>,
+        locked: watch::Receiver<bool>,
+    ) -> Hub {
         Hub {
             bindings: Arc::new(RwLock::new(bindings)),
             learn: Arc::new(RwLock::new(LearnState::default())),
             open: Arc::new(RwLock::new(BTreeMap::new())),
             reported: Arc::new(Mutex::new(Reported::default())),
             tx,
+            locked,
         }
     }
 
@@ -276,6 +428,10 @@ impl Hub {
             };
             hub.reported.lock().unwrap().node_listening(&path);
             tracing::info!("listening on device: {name} ({})", path.display());
+            // One loop per device keeps the lock key's long press apart from
+            // the others' timing; it ends when this sender is dropped.
+            let (events, rx) = mpsc::channel(64);
+            tokio::spawn(key_loop(rx, name.clone(), hub.clone()));
             loop {
                 let ev = match stream.next_event().await {
                     Ok(ev) => ev,
@@ -286,28 +442,12 @@ impl Hub {
                         break;
                     }
                 };
-                let value = ev.value();
-                // 1 = key down, 2 = kernel autorepeat while held. Release (0)
-                // stays ignored: the core paces repeats, no timer to stop here.
-                if ev.event_type() != EventType::KEY || (value != 1 && value != 2) {
+                // 1 = down, 2 = kernel autorepeat, 0 = up: `key_loop` decides.
+                if ev.event_type() != EventType::KEY || KeyEdge::from_value(ev.value()).is_none() {
                     continue;
                 }
-                if value == 1 {
-                    // Learning consumes the first press and emits nothing.
-                    let capture = { hub.learn.write().unwrap().capture(&name, ev.code()) };
-                    if capture {
-                        continue;
-                    }
-                }
-                // No lock guard crosses the send `.await`.
-                let msg = {
-                    let learn = hub.learn.read().unwrap();
-                    let b = hub.bindings.read().unwrap();
-                    key_outcome_held(&b, learn.device(), &name, ev.code(), value == 2)
-                };
-                if let Some(msg) = msg {
-                    tracing::debug!("{name}: key {} -> {:?}", ev.code(), msg.cmd);
-                    let _ = hub.tx.send(msg).await;
+                if events.send((ev.code(), ev.value())).await.is_err() {
+                    break;
                 }
             }
             hub.forget(&path);
@@ -364,7 +504,7 @@ mod tests {
 
     fn test_hub() -> (Hub, mpsc::Receiver<InputMessage>) {
         let (tx, rx) = mpsc::channel(8);
-        (Hub::new(table(), tx), rx)
+        (Hub::new(table(), tx, watch::channel(false).1), rx)
     }
 
     #[test]
@@ -482,31 +622,216 @@ mod tests {
         assert_eq!(hub.learn.read().unwrap().snapshot(), None);
     }
 
-    #[test]
-    fn key_outcome_held_marks_volume_repeats() {
-        let t = table();
-        let pressed = key_outcome_held(&t, None, "eHome", 115, false).unwrap();
-        assert_eq!(pressed, InputMessage::from(Command::VolumeUp));
-        let repeated = key_outcome_held(&t, None, "eHome", 115, true).unwrap();
-        assert_eq!(repeated.cmd, Command::VolumeUp);
-        assert!(repeated.held);
+    fn msg(cmd: Command) -> Outcome {
+        Outcome::Send(InputMessage::from(cmd))
     }
 
     #[test]
-    fn key_outcome_held_ignores_repeats_outside_volume() {
+    fn key_outcome_event_marks_volume_repeats() {
+        let t = table();
+        let pressed = key_outcome_event(&t, None, "eHome", 115, KeyEdge::Press, false);
+        assert_eq!(pressed, msg(Command::VolumeUp));
+        let repeated = key_outcome_event(&t, None, "eHome", 115, KeyEdge::Repeat, false);
+        assert_eq!(repeated, Outcome::Send(InputMessage { cmd: Command::VolumeUp, held: true }));
+    }
+
+    #[test]
+    fn key_outcome_event_ignores_repeats_outside_volume() {
         // Holding Stop or Next must not machine-gun the command: autorepeat
         // only means something for the volume.
         let mut t = table();
         t.devices[0].bindings.push(Binding::new(166, &Command::Stop));
-        assert_eq!(key_outcome_held(&t, None, "eHome", 166, true), None);
+        assert_eq!(
+            key_outcome_event(&t, None, "eHome", 166, KeyEdge::Repeat, false),
+            Outcome::Nothing
+        );
         // The fresh press still goes through.
-        assert!(key_outcome_held(&t, None, "eHome", 166, false).is_some());
+        assert_eq!(
+            key_outcome_event(&t, None, "eHome", 166, KeyEdge::Press, false),
+            msg(Command::Stop)
+        );
     }
 
     #[test]
-    fn key_outcome_held_respects_learning() {
+    fn key_outcome_event_respects_learning() {
         let t = table();
-        assert_eq!(key_outcome_held(&t, Some("eHome"), "eHome", 115, true), None);
+        assert_eq!(
+            key_outcome_event(&t, Some("eHome"), "eHome", 115, KeyEdge::Repeat, false),
+            Outcome::Nothing
+        );
+    }
+
+    /// A table whose device has the lock key (code 200) next to Power, a
+    /// source key and the volume.
+    fn lock_table() -> Bindings {
+        Bindings {
+            devices: vec![BindDevice {
+                name: "eHome".into(),
+                bindings: vec![
+                    Binding::new(115, &Command::VolumeUp),
+                    Binding::new(116, &Command::Power),
+                    Binding::new(2, &Command::Select(3)),
+                    Binding::new(200, &Command::ToggleInputLock),
+                ],
+            }],
+        }
+    }
+
+    #[test]
+    fn the_lock_key_never_sends_on_press() {
+        let t = lock_table();
+        for locked in [false, true] {
+            let o = |edge| key_outcome_event(&t, None, "eHome", 200, edge, locked);
+            assert_eq!(o(KeyEdge::Press), Outcome::LockPress);
+            assert_eq!(o(KeyEdge::Release), Outcome::LockRelease);
+            assert_eq!(o(KeyEdge::Repeat), Outcome::Nothing);
+        }
+    }
+
+    #[test]
+    fn every_other_key_is_ignored_while_locked() {
+        let t = lock_table();
+        for (code, cmd) in [(116, Command::Power), (2, Command::Select(3)), (115, Command::VolumeUp)] {
+            for edge in [KeyEdge::Press, KeyEdge::Repeat] {
+                assert_eq!(
+                    key_outcome_event(&t, None, "eHome", code, edge, true),
+                    Outcome::Nothing,
+                    "{cmd:?} {edge:?}"
+                );
+            }
+            assert_eq!(
+                key_outcome_event(&t, None, "eHome", code, KeyEdge::Press, false),
+                msg(cmd)
+            );
+        }
+    }
+
+    #[test]
+    fn autorepeat_of_another_key_is_ignored_while_locked() {
+        let t = lock_table();
+        assert_eq!(
+            key_outcome_event(&t, None, "eHome", 115, KeyEdge::Repeat, false),
+            Outcome::Send(InputMessage { cmd: Command::VolumeUp, held: true })
+        );
+        assert_eq!(
+            key_outcome_event(&t, None, "eHome", 115, KeyEdge::Repeat, true),
+            Outcome::Nothing
+        );
+    }
+
+    // --- key_loop, on the paused clock ---
+
+    const LOCK_CODE: u16 = 200;
+
+    /// A hub over `lock_table()` with its lock at `locked`, the sender of the
+    /// events a reader would forward, and the receiver of what the hub emits.
+    /// The lock sender is returned so the watch stays open.
+    fn loop_fixture(
+        locked: bool,
+    ) -> (mpsc::Sender<(u16, i32)>, mpsc::Receiver<InputMessage>, watch::Sender<bool>) {
+        let (tx, rx) = mpsc::channel(8);
+        let (lock_tx, lock_rx) = watch::channel(locked);
+        let hub = Hub::new(lock_table(), tx, lock_rx);
+        let (ev_tx, ev_rx) = mpsc::channel(64);
+        tokio::spawn(key_loop(ev_rx, "eHome".into(), hub));
+        (ev_tx, rx, lock_tx)
+    }
+
+    /// Lets the loop task run what is pending.
+    async fn settle() {
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Moves the paused clock, with the loop settled on both sides: before,
+    /// so an event just sent is stamped at the current time and not at the
+    /// advanced one; after, so what the advance made due has run.
+    async fn advance(ms: u64) {
+        settle().await;
+        tokio::time::advance(Duration::from_millis(ms)).await;
+        settle().await;
+    }
+
+    fn nothing(rx: &mut mpsc::Receiver<InputMessage>) {
+        assert!(rx.try_recv().is_err(), "nothing was expected");
+    }
+
+    async fn expect_toggle(rx: &mut mpsc::Receiver<InputMessage>) {
+        let m = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("a toggle was expected")
+            .unwrap();
+        assert_eq!(m, InputMessage::from(Command::ToggleInputLock));
+        nothing(rx);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_long_press_toggles_without_autorepeat() {
+        let (ev, mut rx, _lock) = loop_fixture(false);
+        ev.send((LOCK_CODE, 1)).await.unwrap();
+        advance(1999).await;
+        nothing(&mut rx);
+        advance(1).await;
+        expect_toggle(&mut rx).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn releasing_before_the_threshold_does_not_toggle() {
+        let (ev, mut rx, _lock) = loop_fixture(false);
+        ev.send((LOCK_CODE, 1)).await.unwrap();
+        advance(1500).await;
+        ev.send((LOCK_CODE, 0)).await.unwrap();
+        advance(5000).await;
+        nothing(&mut rx);
+    }
+
+    /// A release that no longer resolves to the lock key (the table changed
+    /// during the hold) must still disarm the hold: the key is up.
+    #[tokio::test(start_paused = true)]
+    async fn a_release_after_the_bindings_changed_still_disarms_the_hold() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let (_lock_tx, lock_rx) = watch::channel(false);
+        let hub = Hub::new(lock_table(), tx, lock_rx);
+        let bindings = hub.bindings.clone();
+        let (ev, ev_rx) = mpsc::channel(64);
+        tokio::spawn(key_loop(ev_rx, "eHome".into(), hub));
+        ev.send((LOCK_CODE, 1)).await.unwrap();
+        advance(500).await;
+        // The key no longer resolves to the lock.
+        *bindings.write().unwrap() = Bindings { devices: vec![] };
+        ev.send((LOCK_CODE, 0)).await.unwrap();
+        advance(5000).await;
+        nothing(&mut rx);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn holding_with_autorepeats_toggles_once() {
+        let (ev, mut rx, _lock) = loop_fixture(false);
+        ev.send((LOCK_CODE, 1)).await.unwrap();
+        let mut got = 0;
+        for _ in 0..60 {
+            advance(100).await;
+            ev.send((LOCK_CODE, 2)).await.unwrap();
+            advance(0).await;
+            while let Ok(m) = rx.try_recv() {
+                assert_eq!(m, InputMessage::from(Command::ToggleInputLock));
+                got += 1;
+            }
+        }
+        assert_eq!(got, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_lock_key_works_while_locked() {
+        let (ev, mut rx, _lock) = loop_fixture(true);
+        ev.send((116, 1)).await.unwrap(); // Power
+        ev.send((116, 0)).await.unwrap();
+        advance(10).await;
+        nothing(&mut rx);
+        ev.send((LOCK_CODE, 1)).await.unwrap();
+        advance(2000).await;
+        expect_toggle(&mut rx).await;
     }
 
     /// The `warn` lines `f` emits on this thread, as text.

@@ -2,6 +2,7 @@ mod admin;
 mod bindings;
 mod devices;
 mod learn;
+mod lock;
 // Only compiled under `cargo test`: `ui_placeholder_js` is not used at
 // runtime anywhere in this crate (unlike the core's `placeholder_html`, used
 // as a fallback by `web.rs`), only by `build.rs` (separate compilation, via
@@ -18,7 +19,7 @@ use anyhow::Result;
 use ritornello_plugin_sdk::InputPlugin;
 use ritornello_proto::InputMessage;
 use std::path::PathBuf;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 pub(crate) const GENERIC_INPUT_EN: &str = include_str!("locales/en.toml");
 
@@ -42,6 +43,9 @@ fn presets_root() -> PathBuf {
 /// regardless of the originating device.
 struct EvdevInput {
     rx: mpsc::Receiver<InputMessage>,
+    /// The remote lock, as the core announces it. The SDK asks for it twice
+    /// at registration, so `input_lock` hands out clones of this one sender.
+    lock: watch::Sender<bool>,
 }
 
 #[async_trait::async_trait]
@@ -51,6 +55,10 @@ impl InputPlugin for EvdevInput {
             .recv()
             .await
             .ok_or_else(|| anyhow::anyhow!("all evdev loops have ended"))
+    }
+
+    fn input_lock(&self) -> Option<watch::Sender<bool>> {
+        Some(self.lock.clone())
     }
 }
 
@@ -65,7 +73,8 @@ async fn main() -> Result<()> {
     let presets_root = presets_root();
 
     let (tx, rx) = mpsc::channel(32);
-    let hub = Hub::new(Bindings::load(&bindings_path), tx);
+    let (lock, locked) = watch::channel(false);
+    let hub = Hub::new(Bindings::load(&bindings_path), tx, locked);
     let input_root = PathBuf::from(devices::INPUT_DIR);
     let opened = hub.rescan(&input_root).await;
     tracing::info!("{opened} input device(s) opened");
@@ -80,7 +89,7 @@ async fn main() -> Result<()> {
     let admin = GenericInputAdmin { bindings_path, presets_root, input_root, hub };
     ritornello_plugin_sdk::declare_runtime!()?
         .texts([("en", GENERIC_INPUT_EN)])?
-        .input(EvdevInput { rx })?
+        .input(EvdevInput { rx, lock })?
         .admin(admin)?
         .run()
         .await
@@ -121,7 +130,7 @@ mod tests {
         // commands channel. The contract `main` must uphold is this: as
         // long as a sender lives, `next_command` waits instead of ending.
         let (tx, rx) = mpsc::channel::<InputMessage>(4);
-        let mut input = EvdevInput { rx };
+        let mut input = EvdevInput { rx, lock: watch::channel(false).0 };
         tokio::select! {
             _ = input.next_command() => panic!("next_command must not end while a sender lives"),
             _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}

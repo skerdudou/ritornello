@@ -35,7 +35,7 @@ save_error = "Fehler: {cause}"
 load_error = "Fehler beim Laden: {cause}"
 no_device = "Kein Eingabegerät erkannt"
 
-# the 23 actions
+# the 26 actions
 act_select_1 = "Favorit 1"
 act_select_2 = "Favorit 2"
 act_select_3 = "Favorit 3"
@@ -69,6 +69,7 @@ act_source_cycle = "Quelle wechseln"
 act_toggle_random = "Zufallswiedergabe"
 act_cycle_repeat = "Wiederholen"
 act_power = "Standby"
+act_input_lock = "Sperre (lange drücken)"
 
 # source shortcut rows, appended at the end of the table (one per source the
 # core announces via `/api/presets`, plus one for a source still bound but

@@ -866,6 +866,14 @@ pub struct PlayerState {
     /// Absent when none is, so no existing frame changes shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_alarm: Option<NextAlarm>,
+    /// The remote lock is on: an input plugin that honours it is swallowing
+    /// its keys. This is the core's own state (`Core::input_locked`, set by
+    /// `ToggleInputLock` and `SetInputLock`, forgotten on restart), published
+    /// so the SPA shows the padlock. (The SDK derives `Announcement::input_lock`
+    /// from `InputPlugin::input_lock`, not this field.) Absent when off, so no
+    /// existing frame changes shape.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub input_locked: bool,
     #[serde(flatten)]
     pub track: Track,
 }
@@ -1010,6 +1018,18 @@ mod tests {
         let state: PlayerState = serde_json::from_str(r#"{"source":"radio","volume":10,"muted":false,"standby":false,"preset":null,"preset_count":null,"preset_name":null}"#).unwrap();
         assert_eq!(state.sleep_timer, None);
         assert_eq!(state.next_alarm, None);
+    }
+
+    #[test]
+    fn input_locked_is_absent_when_off_and_round_trips_when_on() {
+        let json = serde_json::to_string(&PlayerState::default()).unwrap();
+        assert!(!json.contains("input_locked"), "{json}");
+        let off: PlayerState = serde_json::from_str(r#"{"source":"radio","volume":10,"muted":false,"standby":false,"preset":null,"preset_count":null,"preset_name":null}"#).unwrap();
+        assert!(!off.input_locked);
+        let on = PlayerState { input_locked: true, ..Default::default() };
+        let json = serde_json::to_string(&on).unwrap();
+        assert!(json.contains(r#""input_locked":true"#), "{json}");
+        assert_eq!(serde_json::from_str::<PlayerState>(&json).unwrap(), on);
     }
 
     #[test]

@@ -722,6 +722,12 @@ export interface PlayerPayload {
   sleep_timer?: SleepTimerState
   /** The next alarm to fire, absent when none is enabled. See `NextAlarm`. */
   next_alarm?: NextAlarm
+  /**
+   * The remote lock: `true` while the input plugins that honour it (not the
+   * page, not mpd) ignore physical keys. Absent when unlocked. Held in memory
+   * by the core, so a restart forgets it.
+   */
+  input_locked?: boolean
 }
 /** What a sleep timer does when its time is up. Mirrors `ritornello_proto::SleepMode`. */
 export type SleepMode = 'immediate' | 'fade' | 'end_of_track'

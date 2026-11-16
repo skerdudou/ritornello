@@ -7,9 +7,20 @@ impl<P: Player> Core<P> {
         // In standby only the commands that wake the device act: the Power
         // key, and choosing a source — the owner's decision, so that picking
         // a source on the page, the remote or an MPD client turns the device
-        // on there instead of doing nothing. Everything else, presets and
-        // volume included, is still ignored.
-        if self.standby && !matches!(cmd, Command::Power | Command::SourceCycle | Command::SelectSource(_)) {
+        // on there instead of doing nothing. The remote lock is the other
+        // exception: it must be lockable and unlockable while the device
+        // sleeps, or a locked remote could never be freed in standby.
+        // Everything else, presets and volume included, is still ignored.
+        if self.standby
+            && !matches!(
+                cmd,
+                Command::Power
+                    | Command::SourceCycle
+                    | Command::SelectSource(_)
+                    | Command::ToggleInputLock
+                    | Command::SetInputLock(_)
+            )
+        {
             return Ok(());
         }
         // Pause and Stop during a sleep fade, or while it waits for the end
@@ -28,6 +39,23 @@ impl<P: Player> Core<P> {
         // partial state reached is what the UI must show.
         self.publish_state();
         outcome
+    }
+
+    /// Sets the remote lock and says so on screen.
+    ///
+    /// Absolute, so that a `Toggle` and a `Set` meet in one place and a `Set`
+    /// repeated is harmless. The lock is only state and feedback here: the
+    /// input plugins that opted in read it from the published state and
+    /// refuse their own keys; the core keeps applying every command it
+    /// receives. Not persisted — see the field. The overlay is shown even
+    /// when the value did not change, so that pressing the unlock key on an
+    /// unlocked device still answers.
+    pub(super) async fn set_input_lock(&mut self, locked: bool) {
+        self.input_locked = locked;
+        tracing::info!("remote lock: {}", if locked { "on" } else { "off" });
+        let key = if locked { "overlay_input_locked" } else { "overlay_input_unlocked" };
+        let text = self.catalog.read().await.get(key).to_string();
+        self.show_message(text);
     }
 
     /// Absolute volume, the only way in for a setting that comes from no key:
@@ -665,6 +693,8 @@ impl<P: Player> Core<P> {
             }
             Command::ExtendSleepTimer(minutes) => self.extend_sleep_timer(minutes).await,
             Command::CancelSleepTimer => self.cancel_sleep_timer().await,
+            Command::ToggleInputLock => self.set_input_lock(!self.input_locked).await,
+            Command::SetInputLock(locked) => self.set_input_lock(locked).await,
         }
         Ok(())
     }
@@ -1752,5 +1782,91 @@ mod tests {
         let np = np_rx.borrow().clone();
         assert_eq!(np.identity, None);
         assert!(!np.armed);
+    }
+
+    fn overlay_text(core: &Core<FakePlayer>) -> Option<String> {
+        match core.player_state().overlay {
+            Some(Overlay::Message { text, .. }) => Some(text),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn toggle_input_lock_flips_and_publishes() {
+        let (mut core, _pc, _sc, rx, _d) = setup();
+        core.handle_command(Command::ToggleInputLock).await.unwrap();
+        assert!(rx.borrow().input_locked);
+        assert!(core.player_state().input_locked);
+        assert_eq!(overlay_text(&core).as_deref(), Some("LOCKED"));
+
+        core.handle_command(Command::ToggleInputLock).await.unwrap();
+        assert!(!rx.borrow().input_locked);
+        assert_eq!(overlay_text(&core).as_deref(), Some("UNLOCKED"));
+    }
+
+    #[tokio::test]
+    async fn set_input_lock_is_absolute() {
+        let (mut core, _pc, _sc, rx, _d) = setup();
+        core.handle_command(Command::SetInputLock(true)).await.unwrap();
+        core.handle_command(Command::SetInputLock(true)).await.unwrap();
+        assert!(rx.borrow().input_locked, "a second Set(true) must not flip it back, as a toggle would");
+        core.handle_command(Command::SetInputLock(false)).await.unwrap();
+        assert!(!rx.borrow().input_locked);
+    }
+
+    #[tokio::test]
+    async fn the_lock_toggles_in_standby() {
+        let (mut core, _pc, _sc, rx, _d) = setup();
+        core.start_in_standby().await.unwrap();
+        assert!(core.player_state().standby, "otherwise the test proves nothing");
+        core.handle_command(Command::ToggleInputLock).await.unwrap();
+        assert!(rx.borrow().input_locked, "a remote must be lockable while the device sleeps");
+        assert!(core.player_state().standby, "locking must not wake the device");
+        core.handle_command(Command::SetInputLock(false)).await.unwrap();
+        assert!(!rx.borrow().input_locked, "and unlockable too, or it could never be freed");
+        core.handle_command(Command::SetInputLock(true)).await.unwrap();
+        assert!(rx.borrow().input_locked, "Set(true) passes the standby gate as well as Set(false)");
+    }
+
+    #[tokio::test]
+    async fn the_core_applies_commands_whatever_the_lock() {
+        // The lock is honoured by the input plugins that opted in, never by
+        // the core: mpd is not locked, and the page is never locked. What
+        // reaches `handle_input` is applied, locked or not.
+        let (mut core, _pc, _sc, _rx, _d) = setup_persisted(PersistedState { volume: 40, ..Default::default() });
+        core.handle_command(Command::SetInputLock(true)).await.unwrap();
+        core.handle_input(InputMessage::from(Command::VolumeUp)).await.unwrap();
+        assert_eq!(core.player_state().volume, 45);
+        assert!(core.player_state().input_locked, "and the lock is still on");
+    }
+
+    #[tokio::test]
+    async fn the_lock_is_not_persisted() {
+        let (mut core, _pc, _sc, _rx, d) = setup();
+        core.handle_command(Command::SetInputLock(true)).await.unwrap();
+        // A volume step writes `state.json`; the lock was on when it did.
+        core.handle_command(Command::VolumeUp).await.unwrap();
+        let path = d.path().join("state.json");
+        let text = std::fs::read_to_string(&path).expect("the volume step persisted");
+        assert!(!text.contains("input_lock") && !text.contains("locked"), "no lock field in the persisted state: {text}");
+        let (reborn, _pc, _sc, _rx, _d2) = setup_persisted(crate::state::load(&path));
+        assert!(!reborn.player_state().input_locked, "a restart unlocks");
+    }
+
+    #[tokio::test]
+    async fn the_lock_overlay_speaks_the_device_language() {
+        let (mut core, _pc, _sc, _rx, _d) = setup();
+        {
+            let mut registry = core.registry.write().await;
+            let mut layers = ritornello_i18n::ModuleLayers::new("core");
+            layers.insert("en", ritornello_i18n::Layer::parse(crate::i18n::EN).unwrap());
+            layers.insert("fr", ritornello_i18n::Layer::parse(&fr_pack()).unwrap());
+            registry.insert_announced("core", layers);
+        }
+        core.set_locale("fr".into()).await.unwrap();
+        core.handle_command(Command::SetInputLock(true)).await.unwrap();
+        assert_eq!(overlay_text(&core).as_deref(), Some("VERROUILLÉ"));
+        core.handle_command(Command::SetInputLock(false)).await.unwrap();
+        assert_eq!(overlay_text(&core).as_deref(), Some("DÉVERROUILLÉ"));
     }
 }

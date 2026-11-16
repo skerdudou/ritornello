@@ -1793,6 +1793,10 @@ what made that migration verifiable.
   - `next_alarm` — `{"weekday":"monday","hour":7,"minute":0}`, the next
     enabled alarm, in the device's local time; it moves at each minute check
     and with each change of the alarm list.
+
+  From `display` contract 1.4 it also carries `input_locked` — `true` while
+  the core's remote lock is on (see the `input` contract 1.2 lock below),
+  **absent** when it is off; the core forgets the lock on restart.
 - `{"frame":"catalog","data":{…}}` — the declared sources, in
   `SourceCycle` order, and for each one that can enumerate them its named
   presets (see [`ListPresets`](#ritornello-plugin-radio--internet-radio) in
@@ -2032,6 +2036,39 @@ The core drops all three in standby. This plugin binds none of them — a
 physical key for the timer is out of scope — but any input plugin may send
 them; the web page's menu does (see [Sleep timer and
 alarms](interface.md#sleep-timer-and-alarms)).
+
+`input` contract 1.2 adds the **remote lock**: two commands, `ToggleInputLock`
+and `SetInputLock(bool)`, and a plugin-side opt-in. A plugin that honours the
+lock overrides `InputPlugin::input_lock`, returning the sender of a `watch`
+channel it reads; the SDK announces that as `input_lock` (omitted from the
+announcement when false). Only such a plugin ever receives anything from the
+core on its input socket, and the only frame the core writes back is
+`{"frame":"lock","locked":true|false}` — the current value at connection, then
+once on each change of it. A plugin that did not opt in is never written to,
+and an unknown frame, or an unreadable line, is logged and skipped by the SDK's
+reader rather than ending it. A plugin that opts in without the SDK should
+know that if the core's lock writer gives up (a write blocked past its 2-second
+deadline, or an error), it closes its write side and the plugin reads EOF: that
+is not the core going away, and the commands the plugin sends keep flowing. The
+core does **not** filter commands itself:
+what a locked state means for its own keys is the plugin's decision (the MPD
+plugin does not opt in: phone apps are an adult's remote).
+
+This plugin opts in. Its "Lock (long press)" action binds a key to
+`ToggleInputLock`, and the hold is timed **by the plugin**, not counted in
+autorepeats: a press arms a 2-second deadline, a release disarms it, and the
+toggle is sent when the deadline passes — whether the remote's receiver repeats
+the held key (an autorepeat only lets the plugin notice the deadline) or sends
+one press and one release. One hold toggles once; the key must be released and
+pressed again to toggle back. The lock key never sends anything on a plain
+press, and it keeps working while locked, since it is the way out. While
+locked, **every other key is ignored — Power included**, and so are their
+autorepeats; the core applies whatever it receives, so this is the only place
+that stays silent. Learning is unaffected: a key being learned is captured, not
+interpreted, locked or not. The state belongs to the core: the plugin only
+mirrors the `lock` frames the SDK feeds its `watch`, so a restarted plugin
+comes back locked if the core still is (it is told at connection), and a core
+restart unlocks.
 
 **Updating an existing installation** (old hard-coded-keyboard
 `ritornello-plugin-mce`): the old `deploy.sh` removed the

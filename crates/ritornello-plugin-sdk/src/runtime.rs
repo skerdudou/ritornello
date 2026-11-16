@@ -51,6 +51,10 @@ struct Half {
     /// metadata plugin. Kept here for the same reason as `covers`: read from
     /// `MetadataPlugin::enriches_armed` before the plugin is moved.
     enriches_armed: bool,
+    /// Does this half honour the remote lock? Always `false` outside of an
+    /// input. Kept here for the same reason as `covers`: read from
+    /// `InputPlugin::input_lock` before the plugin is moved.
+    input_lock: bool,
     serve: Pin<Box<dyn Future<Output = Result<()>> + Send>>,
 }
 
@@ -238,6 +242,7 @@ impl Runtime {
             lyrics: false,
             icon,
             enriches_armed: false,
+            input_lock: false,
             serve: Box::pin(serve_source(l, plugin)),
         });
         Ok(self)
@@ -258,6 +263,7 @@ impl Runtime {
             lyrics,
             icon: None,
             enriches_armed: false,
+            input_lock: false,
             serve: Box::pin(serve_display(l, plugin)),
         });
         Ok(self)
@@ -265,12 +271,16 @@ impl Runtime {
 
     pub fn input(mut self, plugin: impl InputPlugin) -> Result<Self> {
         let l = bind_input(&crate::socket_kind(&self.prefix, PluginKind::Input))?;
+        // Read **before** the move into `serve_input`, like `covers` in
+        // `display()`.
+        let input_lock = plugin.input_lock().is_some();
         self.halves.push(Half {
             kind: PluginKind::Input,
             covers: false,
             lyrics: false,
             icon: None,
             enriches_armed: false,
+            input_lock,
             serve: Box::pin(serve_input(l, plugin)),
         });
         Ok(self)
@@ -286,6 +296,7 @@ impl Runtime {
             lyrics: false,
             icon: None,
             enriches_armed,
+            input_lock: false,
             serve: Box::pin(serve_metadata(l, plugin)),
         });
         Ok(self)
@@ -322,6 +333,9 @@ impl Runtime {
             // Derived like `covers`: from the registered metadata half's own
             // `MetadataPlugin::enriches_armed`.
             enriches_armed: self.halves.iter().any(|h| h.enriches_armed),
+            // Derived like `covers`: from the registered input half's own
+            // `InputPlugin::input_lock`.
+            input_lock: self.halves.iter().any(|h| h.input_lock),
             protocol: ritornello_proto::PROTOCOL_VERSION,
             // Derived like `kinds`: one contract per registered half, plus
             // `admin` when an admin page is served. An author cannot claim a
@@ -538,6 +552,52 @@ mod tests {
         async fn next_command(&mut self) -> anyhow::Result<ritornello_proto::InputMessage> {
             self.rx.recv().await.ok_or_else(|| anyhow::anyhow!("channel closed"))
         }
+    }
+
+    /// An input that opts in to the remote lock, or not, by constructor.
+    struct LockableInput(bool);
+
+    #[async_trait::async_trait]
+    impl crate::InputPlugin for LockableInput {
+        async fn next_command(&mut self) -> anyhow::Result<ritornello_proto::InputMessage> {
+            std::future::pending().await
+        }
+        fn input_lock(&self) -> Option<tokio::sync::watch::Sender<bool>> {
+            self.0.then(|| tokio::sync::watch::channel(false).0)
+        }
+    }
+
+    /// `input_lock` is **derived** from the registered input half, in both
+    /// directions, and a plain input that overrides nothing announces `false`.
+    #[tokio::test]
+    async fn an_input_that_honours_the_lock_is_announced_so() {
+        for opts_in in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let register = dir.path().join("register.sock");
+            let listener = UnixListener::bind(&register).unwrap();
+            let prefix = dir.path().join("remote");
+            let rt = Runtime::new("remote".into(), register.clone(), prefix.clone(), "0.0.0-test", None)
+                .input(LockableInput(opts_in))
+                .unwrap();
+            tokio::spawn(async move { rt.run().await.unwrap() });
+            let a = tokio::time::timeout(std::time::Duration::from_secs(5), read_announcement(&listener))
+                .await
+                .expect("announcement");
+            assert_eq!(a.input_lock, opts_in);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let register = dir.path().join("register.sock");
+        let listener = UnixListener::bind(&register).unwrap();
+        let prefix = dir.path().join("plain");
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        let rt = Runtime::new("plain".into(), register.clone(), prefix.clone(), "0.0.0-test", None)
+            .input(PlaceholderInput { rx })
+            .unwrap();
+        tokio::spawn(async move { rt.run().await.unwrap() });
+        let a = tokio::time::timeout(std::time::Duration::from_secs(5), read_announcement(&listener))
+            .await
+            .expect("announcement");
+        assert!(!a.input_lock);
     }
 
     /// Reads the single announcement deposited on a register socket.

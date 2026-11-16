@@ -5,18 +5,24 @@ import {
 } from './preset-toml'
 
 describe('ACTIONS', () => {
-  it('covers the 25 protocol actions', () => {
-    expect(ACTIONS).toHaveLength(25)
+  it('covers the 26 protocol actions', () => {
+    expect(ACTIONS).toHaveLength(26)
     expect(ACTIONS.slice(0, 9).map((a) => a.cmd.arg)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
     expect(ACTIONS.slice(0, 9).every((a) => a.cmd.cmd === 'Select')).toBe(true)
     expect(ACTIONS.slice(9).map((a) => a.cmd.cmd)).toEqual([
       'Select', 'Plus10', 'VolumeUp', 'VolumeDown', 'Mute', 'PlayPause', 'Stop',
       'SeekBackward', 'SeekForward', 'Next', 'Prev', 'Eject', 'SourceCycle',
-      'ToggleRandom', 'CycleRepeat', 'Power',
+      'ToggleRandom', 'CycleRepeat', 'Power', 'ToggleInputLock',
     ])
     // The 0 key and +10 are inserted right after act_select_9.
     expect(ACTIONS[9]).toEqual({ key: 'act_select_0', cmd: { cmd: 'Select', arg: 0 } })
     expect(ACTIONS[10]).toEqual({ key: 'act_plus10', cmd: { cmd: 'Plus10' } })
+  })
+  it('offers the lock as a toggle, never the absolute form', () => {
+    // A physical key does not know whether the remote is locked, so the page
+    // binds the toggle; `SetInputLock` is the web remote's absolute form.
+    expect(ACTIONS.find((a) => a.key === 'act_input_lock')?.cmd).toEqual({ cmd: 'ToggleInputLock' })
+    expect(ACTIONS.some((a) => a.cmd.cmd === 'SetInputLock')).toBe(false)
   })
 
   it('offers the two seek actions, after transport', () => {

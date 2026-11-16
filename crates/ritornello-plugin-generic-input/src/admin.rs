@@ -156,7 +156,7 @@ mod tests {
             }],
         };
         let (tx, rx) = mpsc::channel(8);
-        let hub = Hub::new(bindings, tx);
+        let hub = Hub::new(bindings, tx, tokio::sync::watch::channel(false).1);
         hub.open
             .write()
             .unwrap()

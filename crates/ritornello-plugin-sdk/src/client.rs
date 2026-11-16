@@ -11,7 +11,8 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::UnixStream;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
 
 /// What a Source reports spontaneously or alongside a response: a correction
 /// of the identity of what is playing, a status, a preset.
@@ -648,11 +649,96 @@ pub fn visible_to(np: &NowPlaying, enriches_armed: bool) -> NowPlaying {
 /// Accepts the full envelope (`{"cmd":...,"held":true}`) as well as the bare
 /// pre-Task 1 shape (`{"cmd":...}`): `InputMessage` deserializes both, with
 /// `held` falling back to `false` when absent.
-pub async fn run_input_client(socket_path: &Path, cmd_tx: mpsc::Sender<InputMessage>) -> Result<()> {
+///
+/// With `lock: Some(state)` (only for a plugin that announced `input_lock`)
+/// the socket also carries the remote lock back: a writer task writes
+/// `InputFrame::Lock` with the current `input_locked` at once, then once per
+/// **change** of that field and never for any other change of the state. With
+/// `None` nothing is ever written, so a plugin that did not opt in sees the
+/// same bytes as before.
+pub async fn run_input_client(
+    socket_path: &Path,
+    cmd_tx: mpsc::Sender<InputMessage>,
+    lock: Option<watch::Receiver<PlayerState>>,
+) -> Result<()> {
+    run_input_client_with_timeout(socket_path, cmd_tx, lock, INPUT_LOCK_WRITE_TIMEOUT).await
+}
+
+/// Ceiling on one lock-frame write. A plugin that stops reading its socket
+/// would otherwise leave the writer parked forever on a full buffer; the
+/// writer gives up instead (one `warn`) and the commands, read by another
+/// task, keep flowing.
+const INPUT_LOCK_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Aborts its task when dropped: the lock writer ends with the reader.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Writes the lock to the plugin: the current value, then each change of
+/// `input_locked`. Runs on its own task so that a blocked write can never
+/// hold up the read loop, nor (it only borrows the watch) the publisher that
+/// toggles the lock.
+async fn write_lock_frames(mut write: OwnedWriteHalf, mut state: watch::Receiver<PlayerState>, timeout: Duration) {
+    let mut last = state.borrow_and_update().input_locked;
+    loop {
+        let frame = ritornello_proto::InputFrame::Lock { locked: last };
+        let line = match serde_json::to_string(&frame) {
+            Ok(l) => format!("{l}\n"),
+            Err(e) => {
+                tracing::warn!("cannot serialize the lock frame: {e}");
+                return;
+            }
+        };
+        match tokio::time::timeout(timeout, write.write_all(line.as_bytes())).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!("writing the lock to the input plugin failed, no longer relaying it: {e}");
+                return;
+            }
+            Err(_) => {
+                tracing::warn!("the input plugin does not read its socket, no longer relaying the lock");
+                return;
+            }
+        }
+        // Wait for a change of the field itself: a publish that touched only
+        // the volume wakes `changed()` but is not written.
+        loop {
+            if state.changed().await.is_err() {
+                return;
+            }
+            let now = state.borrow_and_update().input_locked;
+            if now != last {
+                last = now;
+                break;
+            }
+        }
+    }
+}
+
+async fn run_input_client_with_timeout(
+    socket_path: &Path,
+    cmd_tx: mpsc::Sender<InputMessage>,
+    lock: Option<watch::Receiver<PlayerState>>,
+    write_timeout: Duration,
+) -> Result<()> {
     let stream = UnixStream::connect(socket_path)
         .await
         .with_context(|| format!("connecting to {}", socket_path.display()))?;
-    let mut lines = BufReader::new(stream).lines();
+    let (read, write) = stream.into_split();
+    // Held for the whole function: without a writer the write half is simply
+    // kept open, never written to.
+    let mut _held_write = None;
+    let mut _writer = None;
+    match lock {
+        Some(state) => _writer = Some(AbortOnDrop(tokio::spawn(write_lock_frames(write, state, write_timeout)))),
+        None => _held_write = Some(write),
+    }
+    let mut lines = BufReader::new(read).lines();
     while let Some(line) = lines.next_line().await? {
         match serde_json::from_str::<InputMessage>(&line) {
             Ok(msg) => {
@@ -708,7 +794,7 @@ mod tests {
         assert!(!serious);
         assert!(!line.contains("play request"), "{line}");
     }
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     #[tokio::test]
@@ -2005,7 +2091,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         let socket_for_client = socket.clone();
         tokio::spawn(async move {
-            let _ = run_input_client(&socket_for_client, tx).await;
+            let _ = run_input_client(&socket_for_client, tx, None).await;
         });
         let (mut stream, _) = listener.accept().await.unwrap();
         // A plain line from a pre-envelope plugin, then a held line.
@@ -2015,6 +2101,139 @@ mod tests {
         let second = rx.recv().await.unwrap();
         assert_eq!(second.cmd, ritornello_proto::Command::VolumeDown);
         assert!(second.held);
+    }
+
+    /// The plugin side of an input socket for the lock tests: a listener, the
+    /// client running against it, and the accepted stream (read half buffered).
+    struct LockRig {
+        plugin: tokio::net::UnixStream,
+        cmd_rx: mpsc::Receiver<InputMessage>,
+        _dir: tempfile::TempDir,
+    }
+
+    async fn lock_rig(
+        lock: Option<watch::Receiver<PlayerState>>,
+        write_timeout: std::time::Duration,
+    ) -> LockRig {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("input.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (tx, cmd_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            let _ = run_input_client_with_timeout(&socket, tx, lock, write_timeout).await;
+        });
+        let (plugin, _) = tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
+            .await
+            .expect("the client connects")
+            .unwrap();
+        LockRig { plugin, cmd_rx, _dir: dir }
+    }
+
+    fn state_with_lock(locked: bool) -> PlayerState {
+        PlayerState { input_locked: locked, ..Default::default() }
+    }
+
+    async fn read_one_line(lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>) -> String {
+        tokio::time::timeout(std::time::Duration::from_secs(1), lines.next_line())
+            .await
+            .expect("a line within 1 s")
+            .unwrap()
+            .expect("not EOF")
+    }
+
+    #[tokio::test]
+    async fn the_current_lock_is_written_at_connection() {
+        let (_tx, rx) = watch::channel(state_with_lock(true));
+        let rig = lock_rig(Some(rx), INPUT_LOCK_WRITE_TIMEOUT).await;
+        let (read, _w) = rig.plugin.into_split();
+        let mut lines = BufReader::new(read).lines();
+        assert_eq!(read_one_line(&mut lines).await, r#"{"frame":"lock","locked":true}"#);
+    }
+
+    #[tokio::test]
+    async fn only_a_change_of_the_lock_is_written() {
+        let (tx, rx) = watch::channel(state_with_lock(true));
+        let rig = lock_rig(Some(rx), INPUT_LOCK_WRITE_TIMEOUT).await;
+        let (read, _w) = rig.plugin.into_split();
+        let mut lines = BufReader::new(read).lines();
+        assert_eq!(read_one_line(&mut lines).await, r#"{"frame":"lock","locked":true}"#);
+        for volume in [10, 20, 30] {
+            tx.send_modify(|s| s.volume = volume);
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(300), lines.next_line()).await.is_err(),
+            "a change of another field must write nothing"
+        );
+        tx.send_modify(|s| s.input_locked = false);
+        assert_eq!(read_one_line(&mut lines).await, r#"{"frame":"lock","locked":false}"#);
+    }
+
+    #[tokio::test]
+    async fn a_plugin_that_did_not_opt_in_is_never_written_to() {
+        let (tx, _rx) = watch::channel(state_with_lock(false));
+        let mut rig = lock_rig(None, INPUT_LOCK_WRITE_TIMEOUT).await;
+        for i in 0..100 {
+            tx.send_modify(|s| s.input_locked = i % 2 == 0);
+        }
+        let mut buf = [0u8; 64];
+        let read = tokio::time::timeout(std::time::Duration::from_millis(300), rig.plugin.read(&mut buf)).await;
+        assert!(read.is_err(), "nothing must be written, got {read:?}");
+        rig.plugin.write_all(b"{\"cmd\":\"Next\"}\n").await.unwrap();
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(1), rig.cmd_rx.recv())
+            .await
+            .expect("the command arrives")
+            .unwrap();
+        assert_eq!(msg.cmd, ritornello_proto::Command::Next);
+    }
+
+    /// The write deadline itself. The test below this one never fills the
+    /// socket buffer (an even number of flips between two yields means the
+    /// writer sees no change), so it cannot reach the timeout. Here the writer
+    /// runs against a peer that never reads, and it gets a change to write
+    /// after **every** flip, until well past a Unix socket's buffer (about
+    /// 208 KB, i.e. ~7 000 frames of ~31 bytes): a write must then block, and
+    /// the writer must give up within its deadline.
+    #[tokio::test]
+    async fn a_writer_facing_a_full_socket_gives_up_within_its_deadline() {
+        let (ours, _peer_that_never_reads) = tokio::net::UnixStream::pair().unwrap();
+        let (_read, write) = ours.into_split();
+        let (tx, rx) = watch::channel(state_with_lock(false));
+        let writer = tokio::spawn(write_lock_frames(write, rx, std::time::Duration::from_millis(200)));
+        for _ in 0..100_000u32 {
+            tx.send_modify(|s| s.input_locked = !s.input_locked);
+            tokio::task::yield_now().await;
+            if writer.is_finished() {
+                break;
+            }
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(3), writer)
+            .await
+            .expect("the writer must give up on its own, not stay parked on a full socket")
+            .unwrap();
+    }
+
+    /// A plugin that never reads must neither stall the toggling nor the
+    /// commands: the writer is its own task, bounded by a timeout.
+    #[tokio::test]
+    async fn a_lock_reader_that_never_reads_neither_blocks_toggling_nor_commands() {
+        let (tx, rx) = watch::channel(state_with_lock(false));
+        let mut rig = lock_rig(Some(rx), std::time::Duration::from_millis(200)).await;
+        let flips = async {
+            for i in 0..100_000u32 {
+                tx.send_modify(|s| s.input_locked = !s.input_locked);
+                if i % 100 == 0 {
+                    tokio::task::yield_now().await;
+                }
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), flips).await.expect("toggling never blocks");
+        rig.plugin.write_all(b"{\"cmd\":\"Next\"}\n").await.unwrap();
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(1), rig.cmd_rx.recv())
+            .await
+            .expect("the command arrives although nobody reads the lock")
+            .unwrap();
+        assert_eq!(msg.cmd, ritornello_proto::Command::Next);
     }
 
     #[tokio::test]

@@ -148,6 +148,16 @@ mod tests {
         assert!(!ritornello_i18n::try_parse(MPD_EN).unwrap().is_empty());
     }
 
+    /// The owner's decision: the phone apps speaking MPD are an adult's remote
+    /// control, and the lock is there to keep a child from the device's own
+    /// keys. This plugin therefore never opts in, and the core never writes to
+    /// its socket.
+    #[test]
+    fn mpd_does_not_honour_the_remote_lock() {
+        let (_tx, rx) = mpsc::channel(1);
+        assert!(MpdInput { rx }.input_lock().is_none());
+    }
+
     #[test]
     fn every_file_lives_in_the_plugin_s_own_directory() {
         let d = std::path::Path::new("/x/plugins/mpd");

@@ -63,6 +63,44 @@ impl core::Source for SourceClient {
     }
 }
 
+/// Connects to **one** input plugin and relays its commands to the core, in
+/// its own task.
+///
+/// One function for both wiring sites — startup rendezvous and hot wiring —
+/// so an input that arrives late is served exactly like one that was there at
+/// launch, the lock included.
+///
+/// The opt-in decision lives **here**, not at the two call sites: `input_lock`
+/// is the announcement's flag and `state_rx` the core's state receiver, and
+/// the plugin gets a clone of it (so the SDK writes the current lock at
+/// connection and on each change) only when it announced `input_lock`. A
+/// plugin that did not opt in receives no frame it does not know. A clone of
+/// the state receiver is enough, however stale its version: the writer sends
+/// the current value at once rather than waiting for a change (see the note on
+/// `main`'s `state_rx` at `spawn_display_relay`).
+///
+/// `run_input_client` **never** returns `Ok`: it exits with an error both on
+/// EOF and on the core's channel closing. The second case reports into the
+/// void — the loop is gone, its receiver with it — so it does not need to be
+/// distinguished.
+fn spawn_input_relay(
+    name: String,
+    socket: PathBuf,
+    cmd_tx: mpsc::Sender<InputMessage>,
+    input_lock: bool,
+    state_rx: &watch::Receiver<PlayerState>,
+    unreachable: mpsc::Sender<(String, u64)>,
+    wiring: u64,
+) {
+    let lock = input_lock.then(|| state_rx.clone());
+    tokio::spawn(async move {
+        if let Err(e) = run_input_client(&socket, cmd_tx, lock).await {
+            tracing::warn!("input plugin {name} disconnected: {e}");
+        }
+        let _ = unreachable.send((name, wiring)).await;
+    });
+}
+
 /// Relays the state to **one** display, in its own task.
 ///
 /// One task per display, not one task looping over N clients: that is what
@@ -1046,20 +1084,15 @@ async fn hotplug<P: player::Player>(
                 }
             },
             PluginKind::Input => {
-                let tx = children.cmd_tx.clone();
-                let socket_for_task = socket.clone();
-                let task_name = name.clone();
-                let unreachable = children.unreachable_tx.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = run_input_client(&socket_for_task, tx).await {
-                        tracing::warn!("input plugin {task_name} disconnected: {e}");
-                    }
-                    // `run_input_client` **never** returns `Ok`: it exits with an
-                    // error both on EOF and on the core's channel closing. The
-                    // second case reports into the void — the loop is gone, its
-                    // receiver with it — so it does not need to be distinguished.
-                    let _ = unreachable.send((task_name, wiring)).await;
-                });
+                spawn_input_relay(
+                    name.clone(),
+                    socket.clone(),
+                    children.cmd_tx.clone(),
+                    announcement.input_lock,
+                    &children.state_rx,
+                    children.unreachable_tx.clone(),
+                    wiring,
+                );
                 lines.push(announced_plugin_line(&name, "input", true, &announcement, &limited));
             }
             PluginKind::Metadata => {
@@ -2080,22 +2113,20 @@ async fn main() -> Result<()> {
                     }
                 },
                 PluginKind::Input => {
-                    let tx = cmd_tx.clone();
-                    let socket_for_task = socket.clone();
-                    let task_name = name.clone();
-                    let unreachable = unreachable_tx.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = run_input_client(&socket_for_task, tx).await {
-                            tracing::warn!("input plugin {task_name} disconnected: {e}");
-                        }
-                        // `0`: this is the startup rendezvous's wiring, and
-                        // `wirings` does not carry any entry for it yet — its
-                        // default value is therefore read as `0` on the
-                        // loop's side, which makes this socket the current
-                        // incarnation as long as no one has rewired this
-                        // name.
-                        let _ = unreachable.send((task_name, 0)).await;
-                    });
+                    // Wiring `0`: this is the startup rendezvous's, and
+                    // `wirings` does not carry any entry for it yet — its
+                    // default value is therefore read as `0` on the loop's
+                    // side, which makes this socket the current incarnation
+                    // as long as no one has rewired this name.
+                    spawn_input_relay(
+                        name.clone(),
+                        socket.clone(),
+                        cmd_tx.clone(),
+                        announcement.input_lock,
+                        &state_rx,
+                        unreachable_tx.clone(),
+                        0,
+                    );
                     plugin_statuses.push(announced_plugin_line(name, "input", true, announcement, &limited));
                 }
                 PluginKind::Metadata => {
@@ -3604,6 +3635,7 @@ mod toggle_tests {
                 covers: false,
                 lyrics: false,
                 enriches_armed: false,
+                input_lock: false,
                 ui_version: None,
                 protocol: ritornello_proto::PROTOCOL_VERSION,
                 contracts: [Contract::Display, Contract::Admin]
@@ -3641,6 +3673,7 @@ mod toggle_tests {
             covers: false,
             lyrics: false,
             enriches_armed: false,
+            input_lock: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
             contracts: BTreeMap::from([(Contract::of_kind(kind), Contract::of_kind(kind).current())]),
@@ -4554,6 +4587,7 @@ mod toggle_tests {
             covers: false,
             lyrics: false,
             enriches_armed: false,
+            input_lock: false,
             ui_version: None,
             protocol: foreign,
             contracts: Default::default(),
@@ -4606,6 +4640,7 @@ mod toggle_tests {
             covers: false,
             lyrics: false,
             enriches_armed: false,
+            input_lock: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
             contracts: BTreeMap::from([(Contract::Display, Contract::Display.current())]),
@@ -4650,6 +4685,7 @@ mod toggle_tests {
             covers: false,
             lyrics: false,
             enriches_armed: false,
+            input_lock: false,
             ui_version: None,
             protocol: foreign,
             contracts: Default::default(),
@@ -4699,6 +4735,7 @@ mod toggle_tests {
             covers: false,
             lyrics: false,
             enriches_armed: false,
+            input_lock: false,
             ui_version: None,
             protocol: foreign,
             contracts: Default::default(),
@@ -4758,6 +4795,7 @@ mod toggle_tests {
             covers: false,
             lyrics: false,
             enriches_armed: false,
+            input_lock: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION + 1,
             contracts: Default::default(),
@@ -4781,6 +4819,12 @@ mod toggle_tests {
         );
     }
 
+    /// The first display minor newer than this core's, a limited plugin's.
+    fn newer_display() -> ContractVersion {
+        let v = Contract::Display.current();
+        ContractVersion::new(v.major, v.minor + 1)
+    }
+
     /// The gap a display contract at `plugin` makes with this core's.
     fn display_gap(plugin: ContractVersion) -> ContractGap {
         ContractGap { contract: Contract::Display, plugin, core: Contract::Display.current() }
@@ -4796,6 +4840,7 @@ mod toggle_tests {
             covers: false,
             lyrics: false,
             enriches_armed: false,
+            input_lock: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
             contracts: BTreeMap::from([
@@ -4808,6 +4853,78 @@ mod toggle_tests {
             catalog: None,
             icon: None,
         }
+    }
+
+    /// An input-only announcement, at this core's contracts, that does or does
+    /// not opt in to the remote lock.
+    fn lock_input(input_lock: bool) -> Announcement {
+        Announcement {
+            name: "mpd".into(),
+            kinds: vec![PluginKind::Input],
+            admin: false,
+            covers: false,
+            lyrics: false,
+            enriches_armed: false,
+            input_lock,
+            ui_version: None,
+            protocol: ritornello_proto::PROTOCOL_VERSION,
+            contracts: BTreeMap::from([(Contract::Input, Contract::Input.current())]),
+            version: Some("0.2.0".into()),
+            repository: None,
+            catalog: None,
+            icon: None,
+        }
+    }
+
+    /// Hot-wires an input while the core's lock is on, with a listener
+    /// standing in for the plugin's input socket, and returns the first line
+    /// the plugin receives within `wait` (`None` when nothing arrives).
+    async fn first_line_after_wiring(input_lock: bool, wait: std::time::Duration) -> Option<String> {
+        use tokio::io::AsyncBufReadExt;
+        let mut b = bench();
+        let socket = ritornello_plugin_sdk::socket_kind(&b.children.sockets_dir.join("mpd"), PluginKind::Input);
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        b.core.handle_command(ritornello_proto::Command::SetInputLock(true)).await.unwrap();
+        assert!(b.children.state_rx.borrow().input_locked, "bench precondition: the lock is published");
+
+        hotplug(
+            lock_input(input_lock),
+            &b.children,
+            &mut b.core,
+            &mut b.gathered,
+            &b.kill_triggers,
+            &mut b.non_supervised,
+            1,
+        )
+        .await;
+        assert!(b.gathered.announcements.contains_key("mpd"), "bench precondition: the input was wired");
+
+        let (stream, _) = tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
+            .await
+            .expect("the core connects to the input socket")
+            .unwrap();
+        let mut lines = tokio::io::BufReader::new(stream).lines();
+        match tokio::time::timeout(wait, lines.next_line()).await {
+            Ok(Ok(line)) => line,
+            _ => None,
+        }
+    }
+
+    /// A plugin that opted in learns the current lock at once, whatever the
+    /// version its state receiver carries (a hot-wired clone is stale):
+    /// without it, a remote rewired while locked would be free.
+    #[tokio::test]
+    async fn a_rewired_lock_honouring_input_receives_the_current_lock() {
+        let line = first_line_after_wiring(true, std::time::Duration::from_secs(5)).await;
+        assert_eq!(line.as_deref(), Some(r#"{"frame":"lock","locked":true}"#));
+    }
+
+    /// The other half: a plugin that did not opt in is sent nothing, since a
+    /// frame it does not know is an error to it.
+    #[tokio::test]
+    async fn a_rewired_input_that_did_not_opt_in_receives_no_lock_frame() {
+        let line = first_line_after_wiring(false, std::time::Duration::from_millis(300)).await;
+        assert_eq!(line, None);
     }
 
     #[tokio::test]
@@ -4832,7 +4949,7 @@ mod toggle_tests {
             json["incompatible"],
             serde_json::json!({
                 "reason": "major",
-                "gaps": [{"contract": "display", "plugin": {"major": 2, "minor": 0}, "core": {"major": 1, "minor": 3}}],
+                "gaps": [{"contract": "display", "plugin": {"major": 2, "minor": 0}, "core": {"major": 1, "minor": Contract::Display.current().minor}}],
             }),
             "{json}"
         );
@@ -4892,7 +5009,8 @@ mod toggle_tests {
         // reason that is not this test's.
         let socket = ritornello_plugin_sdk::socket_kind(&b.children.sockets_dir.join("mpd"), PluginKind::Display);
         let _display = tokio::net::UnixListener::bind(&socket).unwrap();
-        let a = mpd_like(ContractVersion::new(1, 4));
+        let newer = newer_display();
+        let a = mpd_like(newer);
 
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
 
@@ -4910,7 +5028,7 @@ mod toggle_tests {
             assert_eq!(line.incompatible, None);
             assert_eq!(
                 line.limited,
-                vec![display_gap(ContractVersion::new(1, 4))],
+                vec![display_gap(newer)],
                 "the {} line must name the display contract, and only it",
                 line.kind
             );
@@ -4934,6 +5052,7 @@ mod toggle_tests {
             covers: false,
             lyrics: false,
             enriches_armed: false,
+            input_lock: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
             contracts: BTreeMap::from([(Contract::Display, Contract::Display.current())]),
@@ -4966,6 +5085,7 @@ mod toggle_tests {
             covers: false,
             lyrics: false,
             enriches_armed: false,
+            input_lock: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
             contracts: BTreeMap::from([(Contract::Display, Contract::Display.current())]),
@@ -4997,6 +5117,7 @@ mod toggle_tests {
             covers: false,
             lyrics: false,
             enriches_armed: false,
+            input_lock: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
             contracts: BTreeMap::from([(Contract::Display, Contract::Display.current())]),
@@ -5035,6 +5156,7 @@ mod toggle_tests {
             covers: false,
             lyrics: false,
             enriches_armed: false,
+            input_lock: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
             contracts: BTreeMap::from([(Contract::Display, Contract::Display.current())]),
@@ -5085,6 +5207,7 @@ mod toggle_tests {
             covers: false,
             lyrics: false,
             enriches_armed: false,
+            input_lock: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
             contracts: BTreeMap::from([(Contract::Display, Contract::Display.current())]),
@@ -5116,6 +5239,7 @@ mod toggle_tests {
             covers: false,
             lyrics: false,
             enriches_armed: false,
+            input_lock: false,
             ui_version: None,
             protocol: ritornello_proto::PROTOCOL_VERSION,
             contracts: BTreeMap::from([(Contract::Display, Contract::Display.current())]),
@@ -5150,6 +5274,7 @@ mod toggle_tests {
             covers: false,
             lyrics: false,
             enriches_armed: false,
+            input_lock: false,
             ui_version: Some("3".into()),
             protocol: ritornello_proto::PROTOCOL_VERSION,
             contracts: BTreeMap::from([

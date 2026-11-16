@@ -430,8 +430,8 @@ mod tests {
         assert_eq!(
             stamped["contracts"],
             serde_json::json!({
-                "display": {"major": 1, "minor": 3},
-                "input": {"major": 1, "minor": 1},
+                "display": {"major": 1, "minor": ritornello_proto::Contract::Display.current().minor},
+                "input": {"major": 1, "minor": ritornello_proto::Contract::Input.current().minor},
                 "admin": {"major": 1, "minor": 0},
             })
         );
@@ -1113,6 +1113,7 @@ mod tests {
                     covers: false,
                     lyrics: false,
                     enriches_armed: false,
+                    input_lock: false,
                     ui_version: None,
                     protocol: ritornello_proto::PROTOCOL_VERSION,
                     contracts: std::collections::BTreeMap::from([(
@@ -1135,6 +1136,7 @@ mod tests {
                 covers: false,
                 lyrics: false,
                 enriches_armed: false,
+                input_lock: false,
                 ui_version: None,
                 protocol: ritornello_proto::PROTOCOL_VERSION,
                 contracts: std::collections::BTreeMap::from([

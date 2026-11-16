@@ -11,14 +11,15 @@ and a single set of components; the difference between the phone and the
 desktop arrangement is Tailwind breakpoints, not two separate views (see
 "Layout" below).
 
-The page embeds buttons for 10 of the protocol's 24 commands: standby,
-source switch, mute, previous/next, play/pause, stop, eject, and the two
-play modes, random and repeat (see "Transport" below). Three more
+The page embeds buttons for 11 of the protocol's 26 commands: standby,
+source switch, mute, previous/next, play/pause, stop, eject, the two
+play modes, random and repeat (see "Transport" below), and the remote
+lock's padlock (see "The remote lock" below). Three more
 commands are sent by controls that are not buttons — the preset tiles send
 `Select`, the progress bar sends `SeekTo`, the volume slider sends
 `SetVolume`. Three are the sleep timer's menu — `SetSleepTimer`,
 `ExtendSleepTimer`, `CancelSleepTimer` (see [Sleep timer and
-alarms](#sleep-timer-and-alarms)). The remaining eight belong elsewhere: `VolumeUp`/`VolumeDown`
+alarms](#sleep-timer-and-alarms)). The remaining nine belong elsewhere: `VolumeUp`/`VolumeDown`
 and `SeekForward`/`SeekBackward` are the physical remote's hold-to-repeat
 and step keys (see "Physical remote" below) — the web page dropped its own
 ±5%-volume and ±`seek_step_s`-seek buttons in this refonte, in favour of
@@ -31,7 +32,10 @@ for the MPD server plugin, whose clients send `load` — see
 [plugins.md](plugins.md); and `ToggleRandom`/`CycleRepeat` are the
 physical remote's own form of the two play-mode keys, sent instead of the
 web page's absolute `SetRandom`/`SetRepeat` because a physical key does
-not know the current value of the mode it moves — see "Physical remote".
+not know the current value of the mode it moves — see "Physical remote";
+and `ToggleInputLock` is the same story for the remote lock, sent by a
+physical key's long press where the page's padlock sends the absolute
+`SetInputLock`.
 
 `Next`/`Prev` are interpreted by the active source: preset for the radio,
 track for the CD player — these are not two distinct command pairs, only a
@@ -281,6 +285,31 @@ Two further optional fields of the same `Morceau` feed the track block:
 **omitted** from the frame rather than sent as `null` or `[]`, so a frame
 without them is byte-for-byte what it was before they existed; the SPA
 types them optional for the same reason.
+
+### The remote lock
+
+A padlock key sits in the Player card header, just before the standby key.
+It shows the state of the **remote lock** — closed and filled while locked,
+open and outlined otherwise, with a label that says what a tap does ("Remote
+locked: tap to unlock" / "Remote unlocked: tap to lock") — and a simple tap
+flips it, sending the absolute `SetInputLock` (`{"cmd":"SetInputLock","arg":true}`
+to lock, `false` to unlock): the page knows the current value, so it does not
+need the toggle. The state arrives on the `/api/player` stream as
+`input_locked`, **omitted** while unlocked, so another tab or a key press on
+the remote moves the padlock too.
+
+What the lock does is ignore the keys of the input plugins that **honour**
+it: `generic-input` does (the infrared or keyboard device), `mpd` does not
+(a client of the network protocol is not a hand on the remote), and the page
+is never locked — otherwise nobody could unlock it. The padlock is therefore
+never greyed: both lock commands pass the core's standby gate, so a locked
+remote can be unlocked whatever the device is doing. The lock is held in
+memory only: **a core restart forgets it**, and the device comes back
+unlocked.
+
+The padlock counts in the header's width budget (`headerMode`), like the
+sleep timer and standby keys it closes the row with: a header too narrow for
+the source icons plus it falls back to the cycle key.
 
 ### What Stop leaves on screen
 
@@ -701,7 +730,8 @@ individual plugins are untouched and keep their own glyphs.
 
 If a key does not respond, open `http://<host>:8080/plugins/generic-input/`,
 pick the device from the list (a device just plugged in appears on its
-own within five seconds; "Refresh" lists it at once), click "Learn" on the action's row, press the key, then "Save". No
+own within five seconds; "Refresh" lists it at once), click "Learn" on the
+action's row, press the key, then "Save". No
 restart is needed: the table is re-read on every key press. To start from
 a base, load the `mce` or `keyboard` preset.
 
@@ -727,6 +757,16 @@ Two of the table's rows are the **toggle** form of the two play modes,
 way to know the current value of the mode it moves, only to step it, and
 the one "Repeat" key steps through the same cycle as the web button, off,
 all, one, then off again.
+
+**Locking the remote.** One more row, "Lock (long press)", binds the key
+that locks and unlocks the remote: holding it for two seconds sends
+`ToggleInputLock`. It is a **hold** rather than a press so that a stray
+touch cannot lock the device, and no preset binds it by default — the owner
+picks the key with "Learn" like any other. While locked, the plugin ignores
+every other key; only this long press still gets through, so the remote can
+always be unlocked from where it is held. The device answers on the
+displays with a LOCKED / UNLOCKED message (the console's included), and on the web page with the padlock (see "The
+remote lock" above). The lock is forgotten when the core restarts.
 
 **A row per installed source, appended at the end of the table.** Below
 the fixed actions, the page lists every source the core currently

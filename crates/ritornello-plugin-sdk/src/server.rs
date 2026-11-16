@@ -934,6 +934,23 @@ use ritornello_proto::InputMessage;
 #[async_trait::async_trait]
 pub trait InputPlugin: Send + 'static {
     async fn next_command(&mut self) -> Result<InputMessage>;
+
+    /// Opts this plugin in to the **remote lock**: returns the sender of a
+    /// `watch` channel the plugin reads to know whether it must ignore the
+    /// keys it is responsible for. `None` (the default) means the plugin does
+    /// not honour the lock, and the core never writes to its socket.
+    ///
+    /// Called twice, both at registration: by `Runtime::input` (to announce
+    /// `input_lock`, before the plugin is moved into its loop, like `covers`)
+    /// and by `serve_input` (to feed the channel from the core's
+    /// `InputFrame::Lock` frames). It must therefore return a **clone of a
+    /// sender the plugin holds**, never a new channel on each call, or the
+    /// plugin would watch a channel nobody writes to. The core does not filter
+    /// commands itself: the plugin decides what a locked state means for its
+    /// own keys.
+    fn input_lock(&self) -> Option<tokio::sync::watch::Sender<bool>> {
+        None
+    }
 }
 
 /// Binds an input's socket, without serving yet.
@@ -954,12 +971,69 @@ pub fn bind_input(socket_path: &Path) -> Result<UnixListener> {
 /// bytes on the wire stay unchanged for non-held commands — a core from
 /// before Task 1 would deserialize the frame without seeing anything new in
 /// it.
+///
+/// A plugin that opted in (`InputPlugin::input_lock`) also gets a reader on
+/// the read half: the core writes `InputFrame::Lock` there, and each one
+/// lands in the plugin's `watch`. The reader runs in its own task, so a slow
+/// or silent core can never delay a command going the other way, and its end
+/// (EOF, read error) ends only the reader. A plugin that did not opt in keeps
+/// the read half open and never reads it, exactly as before.
 pub async fn serve_input(listener: UnixListener, mut plugin: impl InputPlugin) -> Result<()> {
+    let lock = plugin.input_lock();
     let (stream, _) = listener.accept().await?;
-    let (_read, mut write) = stream.into_split();
+    let (read, mut write) = stream.into_split();
+    // Held for the whole function when nobody reads it.
+    let mut _held_read = None;
+    let mut _reader = None;
+    match lock {
+        Some(tx) => _reader = Some(AbortOnDrop(tokio::spawn(read_lock_frames(read, tx)))),
+        None => _held_read = Some(read),
+    }
     loop {
         let msg = plugin.next_command().await?;
         write.write_all(format!("{}\n", serde_json::to_string(&msg)?).as_bytes()).await?;
+    }
+}
+
+/// Aborts its task when dropped, so the lock reader cannot outlive
+/// `serve_input`.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Reads the core's `InputFrame` lines and applies them to the plugin's lock.
+///
+/// Bounded like the display reader (`read_line_bounded`, `MAX_LINE`), and
+/// tolerant the same way: a line that is too long, not UTF-8 or not a known
+/// frame is logged and skipped, so a newer core's frame never ends the
+/// reader. Only EOF or a read error does, and that ends only this task.
+async fn read_lock_frames(read: tokio::net::unix::OwnedReadHalf, tx: tokio::sync::watch::Sender<bool>) {
+    use ritornello_proto::InputFrame;
+    let mut reader = tokio::io::BufReader::new(read);
+    let mut buffer = Vec::new();
+    loop {
+        match read_line_bounded(&mut reader, &mut buffer, MAX_LINE).await {
+            Ok(LineRead::Line) => match serde_json::from_slice::<InputFrame>(&buffer) {
+                // `send_replace`, not `send`: it stores the value even when
+                // the plugin dropped every receiver.
+                Ok(InputFrame::Lock { locked }) => {
+                    tx.send_replace(locked);
+                }
+                Err(e) => tracing::warn!("unreadable frame from the core on the input socket ignored: {e}"),
+            },
+            Ok(LineRead::TooLong(n)) => {
+                tracing::warn!("input frame from the core ignored: {n} bytes exceed the line limit")
+            }
+            Ok(LineRead::Eof) => return,
+            Err(e) => {
+                tracing::warn!("reading the core's input frames failed: {e}");
+                return;
+            }
+        }
     }
 }
 
@@ -3215,6 +3289,87 @@ mod input_tests {
             }
             Ok(self.remaining.remove(0))
         }
+    }
+
+    /// Commands from a channel, and an opt-in to the remote lock.
+    struct LockedCommands {
+        rx: tokio::sync::mpsc::Receiver<InputMessage>,
+        lock: tokio::sync::watch::Sender<bool>,
+    }
+
+    #[async_trait::async_trait]
+    impl InputPlugin for LockedCommands {
+        async fn next_command(&mut self) -> anyhow::Result<InputMessage> {
+            self.rx.recv().await.ok_or_else(|| anyhow::anyhow!("closed"))
+        }
+        fn input_lock(&self) -> Option<tokio::sync::watch::Sender<bool>> {
+            Some(self.lock.clone())
+        }
+    }
+
+    /// Serves a `LockedCommands` and connects to it as the core would.
+    async fn connect_locked() -> (
+        tokio::net::UnixStream,
+        tokio::sync::mpsc::Sender<InputMessage>,
+        tokio::sync::watch::Receiver<bool>,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("input.sock");
+        let (cmd_tx, rx) = tokio::sync::mpsc::channel(8);
+        let (lock, lock_rx) = tokio::sync::watch::channel(false);
+        let listener = bind_input(&socket).unwrap();
+        tokio::spawn(async move {
+            let _ = serve_input(listener, LockedCommands { rx, lock }).await;
+        });
+        let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        (stream, cmd_tx, lock_rx, dir)
+    }
+
+    async fn changed_within_1s(rx: &mut tokio::sync::watch::Receiver<bool>) {
+        tokio::time::timeout(std::time::Duration::from_secs(1), rx.changed())
+            .await
+            .expect("the watch changes within 1 s")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_lock_frame_reaches_the_plugin_s_watch() {
+        use tokio::io::AsyncWriteExt;
+        let (mut stream, _cmd_tx, mut lock_rx, _dir) = connect_locked().await;
+        stream.write_all(b"{\"frame\":\"lock\",\"locked\":true}\n").await.unwrap();
+        changed_within_1s(&mut lock_rx).await;
+        assert!(*lock_rx.borrow_and_update());
+        // An unknown frame must not end the reader.
+        stream.write_all(b"{\"frame\":\"later\"}\n{\"frame\":\"lock\",\"locked\":false}\n").await.unwrap();
+        changed_within_1s(&mut lock_rx).await;
+        assert!(!*lock_rx.borrow_and_update());
+    }
+
+    #[tokio::test]
+    async fn commands_keep_flowing_while_the_core_writes_lock_frames() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let (stream, cmd_tx, mut lock_rx, _dir) = connect_locked().await;
+        let (read, mut write) = stream.into_split();
+        let mut lines = tokio::io::BufReader::new(read).lines();
+        for (i, locked) in [true, false, true].into_iter().enumerate() {
+            write
+                .write_all(format!("{{\"frame\":\"lock\",\"locked\":{locked}}}\n").as_bytes())
+                .await
+                .unwrap();
+            cmd_tx.send(InputMessage::from(Command::Select(i as u8))).await.unwrap();
+            let line = tokio::time::timeout(std::time::Duration::from_secs(1), lines.next_line())
+                .await
+                .expect("a command within 1 s")
+                .unwrap()
+                .expect("not EOF");
+            assert_eq!(
+                serde_json::from_str::<InputMessage>(&line).unwrap(),
+                InputMessage::from(Command::Select(i as u8))
+            );
+        }
+        changed_within_1s(&mut lock_rx).await;
+        assert!(*lock_rx.borrow_and_update());
     }
 
     #[tokio::test]

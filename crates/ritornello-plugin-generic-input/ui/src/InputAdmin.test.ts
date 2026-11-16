@@ -16,7 +16,7 @@ const CATALOG = {
   conflict_code: 'le code {code} est déjà affecté à {action}',
   conflict_dup: 'le code {code} est saisi deux fois',
   save_conflicts: 'Corrigez les codes en double avant d’enregistrer',
-  act_mute: 'Muet', act_power: 'Veille',
+  act_mute: 'Muet', act_power: 'Veille', act_input_lock: 'Verrou',
   // Stand-ins for the catalogue keys task 4 adds to the shipped locales
   // (`act_select_source`/`act_select_source_unknown`): same `{source}`
   // placeholder shape, so a source row's label already resolves to the
@@ -122,9 +122,9 @@ describe('InputAdmin', () => {
   })
   afterEach(() => vi.useRealTimers())
 
-  it('lists the devices, the presets and the 25 actions', async () => {
+  it('lists the devices, the presets and the 26 actions', async () => {
     const { w } = await mountLoaded()
-    expect(w.findAll('[data-action-row]')).toHaveLength(25)
+    expect(w.findAll('[data-action-row]')).toHaveLength(26)
     expect(w.find('[data-device-select]').exists()).toBe(true)
   })
 
@@ -140,12 +140,12 @@ describe('InputAdmin', () => {
     const w = mountView()
     await flushPromises()
     const rows = w.findAll('[data-action-row]')
-    expect(rows).toHaveLength(27)
-    expect(rows[25]!.find('td').text()).toBe('radio')
-    expect(rows[26]!.find('td').text()).toBe('files')
+    expect(rows).toHaveLength(28)
+    expect(rows[26]!.find('td').text()).toBe('radio')
+    expect(rows[27]!.find('td').text()).toBe('files')
   })
 
-  it('keeps the 25 fixed rows and shows no error when the source catalogue call fails', async () => {
+  it('keeps the 26 fixed rows and shows no error when the source catalogue call fails', async () => {
     const spy = vi.fn(async (u: string, init?: RequestInit) => {
       if (init?.method === 'PUT') return new Response(null, { status: 204 })
       if (u === '/api/presets') return new Response(null, { status: 500 })
@@ -154,7 +154,7 @@ describe('InputAdmin', () => {
     vi.stubGlobal('fetch', spy)
     const w = mountView()
     await flushPromises()
-    expect(w.findAll('[data-action-row]')).toHaveLength(25)
+    expect(w.findAll('[data-action-row]')).toHaveLength(26)
     expect(w.text()).not.toContain('Erreur')
   })
 
@@ -173,7 +173,7 @@ describe('InputAdmin', () => {
     vi.stubGlobal('fetch', spy)
     const w = mountView()
     await flushPromises()
-    expect(w.findAll('[data-action-row]')).toHaveLength(25)
+    expect(w.findAll('[data-action-row]')).toHaveLength(26)
   })
 
   it("a source row's conflict message names the other row without translating it a second time", async () => {
@@ -335,6 +335,12 @@ describe('InputAdmin', () => {
     // "Muet" already carries code 9: without the box checked, the captured
     // code takes its place instead of being added to it.
     const { value } = await learnAndCapture('Muet', 42)
+    expect(value()).toBe('42')
+    expect(popup()).toBeNull()
+  })
+
+  it('learning: the lock action row takes the captured code like any other', async () => {
+    const { value } = await learnAndCapture('Verrou', 42)
     expect(value()).toBe('42')
     expect(popup()).toBeNull()
   })

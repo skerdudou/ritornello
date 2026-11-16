@@ -253,6 +253,7 @@ impl<P: Player> Core<P> {
             sleep_timer: self.sleep_timer_state(),
             // Kept by `refresh_next_alarm`, not computed here: see the field.
             next_alarm: self.next_alarm,
+            input_locked: self.input_locked,
             track: {
                 let mut m = self.metadata.state();
                 // Precedence: the duration measured by mpv wins over the one

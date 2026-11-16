@@ -41,7 +41,7 @@ pub mod register;
 pub mod source;
 
 pub use admin::{AdminReq, AdminRequest, AdminResponse, AdminResult};
-pub use command::{Command, InputMessage, Repeat, SleepMode};
+pub use command::{Command, InputFrame, InputMessage, Repeat, SleepMode};
 pub use contract::{
     Contract, ContractVersion, ADMIN_CONTRACT, DISPLAY_CONTRACT, INPUT_CONTRACT, METADATA_CONTRACT,
     SOURCE_CONTRACT,

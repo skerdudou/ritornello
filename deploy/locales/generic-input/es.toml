@@ -35,7 +35,7 @@ save_error = "Error: {cause}"
 load_error = "Error al cargar: {cause}"
 no_device = "No se detectó ningún dispositivo de entrada"
 
-# the 23 actions
+# the 26 actions
 act_select_1 = "Presintonía 1"
 act_select_2 = "Presintonía 2"
 act_select_3 = "Presintonía 3"
@@ -68,6 +68,7 @@ act_source_cycle = "Cambiar de fuente"
 act_toggle_random = "Aleatorio"
 act_cycle_repeat = "Repetir"
 act_power = "En espera"
+act_input_lock = "Bloqueo (pulsación larga)"
 
 # source shortcut rows, appended at the end of the table (one per source the
 # core announces via `/api/presets`, plus one for a source still bound but
