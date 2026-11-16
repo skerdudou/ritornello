@@ -33,10 +33,14 @@ const props = withDefaults(defineProps<{
    * A prop and not an emit, so the component can await what it returns:
    * the dropped order stays on screen until that settles. `from` and `to` are
    * positions **among reorderable items**, as Sortable counts them, in the
-   * parent's `items`. No second drop until the returned promise settles: the
-   * list is disabled meanwhile.
+   * list as it was when the drag began. `item` is the row the finger held,
+   * taken from that same list: when `items` changed during the drag (a poll),
+   * `items` no longer agrees with `from`, and `item` is what names the row.
+   * No second drop until the returned promise settles: the list is disabled
+   * meanwhile. A throw puts the list back and is logged; a rejection only
+   * puts it back, the parent being the one to report a refusal.
    */
-  onMove?: (from: number, to: number) => unknown
+  onMove?: (from: number, to: number, item: T) => unknown
 }>(), {
   tag: "div",
   disabled: false,
@@ -86,12 +90,17 @@ function onEnd(e: SortableEvent) {
   snapshot.value = null
   const { oldDraggableIndex: from, newDraggableIndex: to } = e
   if (from == null || to == null || from === to || !props.onMove) return
+  // The grabbed row, read from the list the positions count: the snapshot.
+  const item = base.filter(isReorderable)[from]
+  if (item === undefined) return
   pending.value = moveAmong(base, isReorderable, from, to)
   let answer: unknown
   try {
-    answer = props.onMove(from, to)
-  } catch {
+    answer = props.onMove(from, to, item)
+  } catch (e) {
+    // A defect in the caller, which nothing else would ever show.
     pending.value = null
+    console.error(e)
     return
   }
   // Whatever the answer -- accepted, refused, failed -- the parent's list is

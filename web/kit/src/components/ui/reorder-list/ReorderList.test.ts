@@ -98,7 +98,7 @@ describe('ReorderList', () => {
     drop(w, 'c', 'a', 2, 0)
     await nextTick()
     expect(onMove).toHaveBeenCalledTimes(1)
-    expect(onMove).toHaveBeenCalledWith(2, 0)
+    expect(onMove).toHaveBeenCalledWith(2, 0, 'c')
     expect(order(w)).toEqual(['c', 'a', 'b'])
     // The parent's list, not the dropped one, is the truth once it answers:
     // it may differ (another client moved something meanwhile).
@@ -155,7 +155,11 @@ describe('ReorderList', () => {
     expect(option).not.toHaveBeenCalledWith('disabled', false)
   })
 
-  it('an onMove that throws puts the list back and unlocks it', async () => {
+  it('an onMove that throws puts the list back, unlocks it and logs the error', async () => {
+    // Logged rather than swallowed: a throw is a defect in the caller, and
+    // nothing else would ever show it. (A rejection stays silent: that is a
+    // refusal, and the parent reports it.)
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
     const w = mountList(
       { onMove: vi.fn(() => { throw new Error('boom') }) },
       (p) => h('li', { ...p.itemAttrs, 'data-k': p.item }, [h(ReorderHandle)]),
@@ -165,6 +169,9 @@ describe('ReorderList', () => {
     expect(order(w)).toEqual(['a', 'b', 'c'])
     expect(option).not.toHaveBeenCalledWith('disabled', true)
     expect(w.find('[data-reorder-handle]').classes()).toContain('cursor-grab')
+    expect(error).toHaveBeenCalledTimes(1)
+    expect(error.mock.calls[0]![0]).toEqual(new Error('boom'))
+    error.mockRestore()
   })
 
   it('a drop in place calls nothing', async () => {
@@ -206,6 +213,23 @@ describe('ReorderList', () => {
     expect(order(w)).toEqual(['x', 'a', 'b', 'c'])
   })
 
+  it('hands onMove the grabbed item from the list as it was when the drag began', async () => {
+    // `from` counts the rows on screen, which are the snapshot taken at the
+    // grab: a poll that changed `items` meanwhile shifts the parent's list,
+    // and `items[from]` would name another row. The third argument is the
+    // one the finger actually held.
+    const onMove = vi.fn(() => new Promise(() => {}))
+    const w = mountList({ onMove })
+    const item = li(w, 'a')
+    opts.onStart({ item })
+    await w.setProps({ items: ['x', 'a', 'b', 'c'] })
+    await nextTick()
+    w.element.insertBefore(item, null)
+    opts.onEnd({ item, from: w.element, oldDraggableIndex: 0, newDraggableIndex: 2 })
+    await nextTick()
+    expect(onMove).toHaveBeenCalledWith(0, 2, 'a')
+  })
+
   it('only reorderable items are marked and counted', async () => {
     const onMove = vi.fn(() => new Promise(() => {}))
     const w = mountList({ onMove, reorderable: (x: string) => x !== 'b' })
@@ -214,7 +238,7 @@ describe('ReorderList', () => {
     expect(li(w, 'c').hasAttribute('data-reorder-item')).toBe(true)
     drop(w, 'c', 'a', 1, 0)
     await nextTick()
-    expect(onMove).toHaveBeenCalledWith(1, 0)
+    expect(onMove).toHaveBeenCalledWith(1, 0, 'c')
     expect(order(w)).toEqual(['c', 'b', 'a'])
   })
 })
