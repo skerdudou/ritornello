@@ -429,6 +429,16 @@ describe('RadioAdmin', () => {
     expect((w.find('[data-station-name]').element as HTMLInputElement).value).toBe('FIP')
   })
 
+  it("a search result's label may wrap instead of pushing its Add button off the row", async () => {
+    const { w } = await mountLoaded({
+      stations: [],
+      search: [{ name: 'FIP', url: 'http://fip', codec: 'MP3', bitrate: 128, country: 'FR' }],
+    })
+    const label = w.find('[data-add-result]').element.parentElement!.querySelector('span')!
+    expect(label.classList.contains('min-w-0')).toBe(true)
+    expect(label.classList.contains('wrap-anywhere')).toBe(true)
+  })
+
   // --- The first render, before any answer -------------------------------
 
   describe('while the first answer is still in flight', () => {

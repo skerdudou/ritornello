@@ -241,3 +241,23 @@ test('on a phone: the presets card toggles list and pages, and a vertical drag o
   await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(before)
 })
+
+test('on a phone: a station takes two lines, its name then its address, each wide enough to read', async ({ page }) => {
+  await page.goto('/plugins/radio/')
+  const row = page.locator('[data-station-row]').first()
+  const name = await row.locator('[data-station-name]').boundingBox()
+  const url = await row.locator('[data-station-url]').boundingBox()
+  if (!name || !url) throw new Error('station inputs not visible')
+  expect(name.width).toBeGreaterThanOrEqual(180)
+  expect(url.width).toBeGreaterThanOrEqual(180)
+  expect(url.y).toBeGreaterThanOrEqual(name.y + name.height)
+})
+
+test('at desktop width the station table keeps its header row', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await page.goto('/plugins/radio/')
+  await expect(page.locator('[data-plugin-content] thead')).toBeVisible()
+  const name = await page.locator('[data-station-name]').first().boundingBox()
+  const url = await page.locator('[data-station-url]').first().boundingBox()
+  expect(Math.abs(name!.y - url!.y)).toBeLessThan(2) // same line
+})
