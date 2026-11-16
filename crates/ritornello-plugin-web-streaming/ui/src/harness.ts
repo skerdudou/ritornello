@@ -4,7 +4,7 @@
 // import it; nothing in `src/index.ts` reaches it, so it never enters the
 // built package.
 
-import { flushPromises, mount } from '@vue/test-utils'
+import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { vi } from 'vitest'
@@ -125,9 +125,19 @@ export function server(initial: Partial<Data> = {}): Server {
  */
 export async function mountAdmin(initial: Partial<Data> = {}) {
   const s = server(initial)
-  const w = mount(WebStreamingAdmin, { props: { catalog: CATALOG, base: BASE }, attachTo: document.body })
+  const w = mountPage()
   await flushPromises()
   return { w, s }
+}
+
+/** The pages mounted since the last `cleanup`, which unmounts them. */
+const mounted: VueWrapper[] = []
+
+/** Mounts the page, on whatever `fetch` the test stubbed; `cleanup` unmounts it. */
+export function mountPage(): VueWrapper<InstanceType<typeof WebStreamingAdmin>> {
+  const w = mount(WebStreamingAdmin, { props: { catalog: CATALOG, base: BASE }, attachTo: document.body })
+  mounted.push(w)
+  return w
 }
 
 /** An element of the open dialog (`wrapper.find()` never finds it: portal). */
@@ -150,7 +160,18 @@ export async function typeDialog(selector: string, value: string): Promise<void>
   await flushPromises()
 }
 
-/** The portals are not cleaned by unmounting: empty the body between tests. */
+/**
+ * Unmounts every page, then empties the body (the portals are not cleaned by
+ * unmounting). In that order: a page cannot unmount once its nodes are gone.
+ *
+ * Emptying the body alone unmounts nothing, and a page left alive keeps its
+ * timers. The share retry is a 10 s interval, real when its test did not fake
+ * time: once the file ran for more than 10 real seconds (a loaded CI
+ * machine), a page from an earlier test read through the `fetch` of the
+ * current one, and a polling test counted one read too many ("expected 10 to
+ * be 9", "6 instead of 5").
+ */
 export function cleanup(): void {
+  for (const w of mounted.splice(0)) w.unmount()
   document.body.innerHTML = ''
 }
