@@ -9693,4 +9693,41 @@ mod tests {
             assert_eq!(state.major_update_waiting, expected);
         }
     }
+
+    /// **An update never starts a switched-off plugin.** The order channel is
+    /// held by the test: nothing may be queued on it for a plugin that is off.
+    #[tokio::test]
+    async fn restarting_after_an_update_leaves_a_switched_off_plugin_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut worker = switched_off(dir.path(), &binary_with("0.2.0", Some(OURS)));
+        let (tx, mut rx) = mpsc::channel::<PluginOrder>(8);
+        worker.plugins_tx = tx;
+        // Bounded: were the guard gone, the call would wait for an ack that
+        // never comes.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            worker.restart_plugin("radio"),
+        )
+        .await;
+        assert!(rx.try_recv().is_err(), "a switched-off plugin must receive no order");
+    }
+
+    /// The positive control: the same rig with the plugin on does queue the
+    /// order, so the test above cannot pass on a broken channel.
+    #[tokio::test]
+    async fn restarting_after_an_update_relaunches_an_enabled_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut worker = worker_at(dir.path(), one_line(PluginStatus::kind("radio", "source", true, false)));
+        let (tx, mut rx) = mpsc::channel::<PluginOrder>(8);
+        worker.plugins_tx = tx;
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            worker.restart_plugin("radio"),
+        )
+        .await;
+        // `rx` is still alive here, so the send succeeded and the order waits.
+        let order = rx.try_recv().expect("an enabled plugin is relaunched");
+        assert_eq!(order.name, "radio");
+        assert!(matches!(order.action, PluginAction::Restart));
+    }
 }
