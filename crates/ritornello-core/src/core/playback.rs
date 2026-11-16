@@ -121,6 +121,9 @@ impl<P: Player> Core<P> {
             // mpv rebuilds the chain from `af` for every file, dropping the
             // gains `af-command` set: rewrite it now, while it costs no click.
             Event::FileStarting => self.reapply_equalizer().await,
+            // The chain takes `af-command` from here on (not from the file
+            // start): send what changed while the file was loading.
+            Event::PlaybackRestarted => self.equalizer_live().await,
             Event::PlaybackIdle => {
                 // First, before any early return: whatever follows, nothing
                 // is loaded any more.

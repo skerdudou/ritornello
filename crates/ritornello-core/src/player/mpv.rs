@@ -87,9 +87,12 @@ impl MpvIpc {
                 } else if v["event"] == json!("property-change")
                     || v["event"] == json!("file-loaded")
                     || v["event"] == json!("start-file")
+                    || v["event"] == json!("playback-restart")
                 {
                     let ev = if v["event"] == json!("start-file") {
                         Some(Event::FileStarting)
+                    } else if v["event"] == json!("playback-restart") {
+                        Some(Event::PlaybackRestarted)
                     } else if v["event"] == json!("file-loaded") {
                         // Documented by mpv (read from its own manual, not
                         // measured against a real running mpv — no session
@@ -1666,6 +1669,17 @@ pub(crate) mod tests {
         assert!(matches!(rx.recv().await, Some(Event::FileStarting)));
     }
 
+    #[tokio::test]
+    async fn playback_restart_becomes_playback_restarted() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let (tx, mut rx) = mpsc::channel(16);
+        let _ipc = MpvIpc::from_stream(client, tx);
+        let (_r, mut w) = server.into_split();
+        w.write_all(b"{\"event\":\"playback-restart\"}\n").await.unwrap();
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await;
+        assert!(matches!(ev, Ok(Some(Event::PlaybackRestarted))), "{ev:?}");
+    }
+
     /// The real thing: `af-command` with its fifth element reaches a running
     /// mpv holding the equalizer chain (measured on mpv 0.37: without the
     /// target it fails), and `set_audio_filters` replaces the chain.
@@ -1693,7 +1707,6 @@ pub(crate) mod tests {
             ..Default::default()
         });
         let (tx, mut rx) = mpsc::channel(1024);
-        tokio::spawn(async move { while rx.recv().await.is_some() {} });
         let (player, _child) =
             start(mpv.to_str().unwrap(), &d.join("mpv.sock"), "/dev/null", AUDIO_BUFFER_DEFAULT, READAHEAD_DEFAULT, &chain, tx)
                 .await
@@ -1720,13 +1733,22 @@ pub(crate) mod tests {
 
         // The chain only exists while something plays (an idle mpv answers
         // "error running command" to any `af-command`): a generated tone.
+        // From `playback-restart` on — what the core waits for before
+        // commanding the chain — the first `af-command` must succeed.
         player.play("av://lavfi:sine=frequency=440:duration=30").await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while let Some(ev) = rx.recv().await {
+                if ev == Event::PlaybackRestarted {
+                    return;
+                }
+            }
+            panic!("event channel closed before playback-restart");
+        })
+        .await
+        .expect("no playback-restart within 10 s");
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
         let cmd = crate::equalizer::band_command(5, 6);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while let Err(e) = player.audio_filter_command(&cmd).await {
-            assert!(std::time::Instant::now() < deadline, "af-command with its target never succeeded: {e}");
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
+        player.audio_filter_command(&cmd).await.expect("af-command right after playback-restart");
         // The same command without its target is the failure the fifth
         // element guards against, on a chain that does exist.
         assert!(
