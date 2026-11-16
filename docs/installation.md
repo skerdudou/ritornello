@@ -1514,8 +1514,10 @@ ffmpeg 6.1.1:
   path is unverified;
 - whether changing the audio output keeps the live gains is unknown: mpv may
   rebuild the chain from `af` when it reloads the output, so the core rewrites
-  the chain after every output change while the equalizer is on — a rewrite
-  that the output change's own cut hides, but whose need nobody has observed;
+  the chain after every output change while the equalizer is on, or while a
+  lock chime is mixed in (equalizer off included, to drop the chime) — a
+  rewrite that the output change's own cut hides, but whose need nobody has
+  observed;
 - the full chain cost about +3 % of one core on WSL. **That is not measured
   on the Pi 2 B (mpv 0.40)**, where it may be 10 to 20 times more, and the
   Audio dropouts section applies;
@@ -2276,7 +2278,13 @@ latency, so neither the live mix nor the idle chime was heard through a real
 sound card (under `ao=pcm` the idle chime runs untimed). Unverified on the Pi:
 the mix rebuild, the idle load's event order behind the gate, and the
 `loadfile` named options there; and whether a seek within the ~1.2 s the chime
-stays in the chain replays it. A second chime during an idle one replaces it
+stays in the chain replays it. After a band moved live (`af-command`, which
+mpv's `af` never records), the core mixes the chime into the chain `af`
+holds, not the setting's, so the equalizer's entries are written with the
+arguments they already had; that mpv then keeps those entries — and the live
+gains in them — rather than rebuilding them is inferred from the spike's
+clean add/remove with the equalizer on, not measured after a live change.
+A second chime during an idle one replaces it
 (the core does not ask mpv, which answers then as for a real file); that was
 run on WSL against mpv 0.37 with the timed `ao=null` output only, and a chime
 asked for in the few milliseconds between an idle chime's load and its
