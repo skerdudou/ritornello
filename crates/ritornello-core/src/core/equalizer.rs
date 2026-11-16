@@ -54,7 +54,6 @@ impl<P: Player> Core<P> {
     /// The first preamp step goes out at once when no ramp was running;
     /// otherwise at the running ramp's next step. The rest from
     /// `on_eq_ramp_deadline`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "called by the HTTP route, not wired yet"))]
     pub async fn set_equalizer(&mut self, new: crate::equalizer::EqualizerSettings) -> Result<()> {
         let old_enabled = self.equalizer.enabled;
         self.equalizer = new;

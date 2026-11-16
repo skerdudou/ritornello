@@ -19,6 +19,8 @@ use tokio::sync::RwLock;
 mod plugin_status;
 mod logs;
 mod locales;
+mod equalizer;
+use equalizer::{equalizer_json, equalizer_put};
 use locales::{i18n_json, locale_json, locale_put};
 // Re-exported for `admin.rs`: the authority on an acceptable language code
 // lives here, next to `/api/locale` which it already gates — `admin_i18n`
@@ -66,6 +68,11 @@ pub struct AppState {
     pub logs: Arc<LogBuffer>,
     pub audio_current: Arc<RwLock<Option<String>>>,
     pub audio_tx: mpsc::Sender<Option<String>>,
+    /// The equalizer as the page shows it, and the channel carrying a change
+    /// to the core loop (`Core::set_equalizer`): the `audio_current` /
+    /// `audio_tx` pattern. The route never waits for mpv.
+    pub eq_current: Arc<RwLock<crate::equalizer::EqualizerSettings>>,
+    pub eq_tx: mpsc::Sender<crate::equalizer::EqualizerSettings>,
     /// The core's own resolved catalog for the current locale, built by
     /// `crate::i18n::core_catalog` — itself a `Registry`-stacked `Chain`
     /// (task 4) wrapped back into `Chain` for compatibility with every
@@ -239,6 +246,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/status", get(status_json))
         .route("/api/audio-output", get(audio_output_json).put(audio_output_put))
+        .route("/api/equalizer", get(equalizer_json).put(equalizer_put))
         .route("/api/locale", get(locale_json).put(locale_put))
         .route("/api/i18n", get(i18n_json))
         .route("/api/logs", get(logs_json))
@@ -649,6 +657,8 @@ pub(crate) mod tests_support {
             logs: Arc::new(LogBuffer::new(50)),
             audio_current: Arc::new(tokio::sync::RwLock::new(None)),
             audio_tx,
+            eq_current: Arc::new(tokio::sync::RwLock::new(crate::equalizer::EqualizerSettings::default())),
+            eq_tx: tokio::sync::mpsc::channel(4).0,
             catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests(
                 "core",
                 "en",
@@ -704,6 +714,8 @@ pub(crate) mod tests_support {
             logs: Arc::new(LogBuffer::new(50)),
             audio_current: Arc::new(tokio::sync::RwLock::new(Some("default".to_string()))),
             audio_tx,
+            eq_current: Arc::new(tokio::sync::RwLock::new(crate::equalizer::EqualizerSettings::default())),
+            eq_tx: tokio::sync::mpsc::channel(4).0,
             catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests(
                 "core",
                 "en",
@@ -761,6 +773,8 @@ pub(crate) mod tests_support {
             logs: Arc::new(LogBuffer::new(50)),
             audio_current: Arc::new(tokio::sync::RwLock::new(None)),
             audio_tx,
+            eq_current: Arc::new(tokio::sync::RwLock::new(crate::equalizer::EqualizerSettings::default())),
+            eq_tx: tokio::sync::mpsc::channel(4).0,
             catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests(
                 "core",
                 "en",
@@ -852,6 +866,8 @@ pub(crate) mod tests_support {
             logs: Arc::new(LogBuffer::new(50)),
             audio_current: Arc::new(tokio::sync::RwLock::new(None)),
             audio_tx,
+            eq_current: Arc::new(tokio::sync::RwLock::new(crate::equalizer::EqualizerSettings::default())),
+            eq_tx: tokio::sync::mpsc::channel(4).0,
             catalog: Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests(
                 "core",
                 "fr",

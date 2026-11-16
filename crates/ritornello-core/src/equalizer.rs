@@ -2,11 +2,6 @@
 //! preamp and the mpv audio-filter strings. No I/O here — persistence, the
 //! mpv primitives and the HTTP route build on this module.
 
-// The HTTP route is the last consumer (`validate`, the presets, the error
-// texts); until it calls `Core::set_equalizer`, everything reached only
-// through it looks unused outside the tests.
-#![allow(dead_code)]
-
 use ritornello_i18n::Chain;
 use serde::{Deserialize, Serialize};
 
@@ -75,6 +70,9 @@ pub enum EqualizerError {
     DuplicateName,
     TooManyPresets,
     UnknownPreset,
+    /// The request body is not a complete equalizer block (a field missing
+    /// or of the wrong type). Raised by the HTTP route only.
+    Malformed,
 }
 
 impl EqualizerError {
@@ -86,6 +84,7 @@ impl EqualizerError {
             EqualizerError::DuplicateName => "eq_error_duplicate_name",
             EqualizerError::TooManyPresets => "eq_error_too_many_presets",
             EqualizerError::UnknownPreset => "eq_error_unknown_preset",
+            EqualizerError::Malformed => "eq_error_malformed",
         };
         catalog.get(key).to_string()
     }
@@ -100,6 +99,7 @@ impl std::fmt::Display for EqualizerError {
             EqualizerError::DuplicateName => "equalizer preset name already used",
             EqualizerError::TooManyPresets => "too many equalizer presets (20 max)",
             EqualizerError::UnknownPreset => "unknown equalizer preset",
+            EqualizerError::Malformed => "incomplete or malformed equalizer settings",
         })
     }
 }
