@@ -100,6 +100,30 @@ pub enum Command {
     /// Adds `minutes` to the running timer's deadline.
     ExtendSleepTimer(u16),
     CancelSleepTimer,
+    /// Flips the remote lock. For a physical key, which does not know the
+    /// current state; the absolute form below serves the page. The lock only
+    /// concerns the input plugins that announce `input_lock`; the core itself
+    /// applies every command it receives, whatever the lock says.
+    ToggleInputLock,
+    /// Absolute value of the remote lock. Serves the SPA: two clients that
+    /// cross a toggle must not undo each other's intent. Same scope as
+    /// `ToggleInputLock`: only plugins announcing `input_lock` honour it.
+    SetInputLock(bool),
+}
+
+/// A line the core writes to an input plugin, the opposite direction to
+/// `InputMessage`.
+///
+/// The only line the core ever writes on an input socket, and only to a
+/// plugin whose announcement carries `input_lock`: a plugin that did not opt
+/// in never receives anything there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "frame", rename_all = "snake_case")]
+pub enum InputFrame {
+    /// The remote lock changed (or is being stated to a plugin that has just
+    /// connected): while `locked`, the plugin swallows its keys except the
+    /// one that unlocks.
+    Lock { locked: bool },
 }
 
 /// What a sleep timer does when its deadline comes.
@@ -140,6 +164,30 @@ impl From<Command> for InputMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn input_lock_commands_round_trip() {
+        for (cmd, expected) in [
+            (Command::ToggleInputLock, r#"{"cmd":"ToggleInputLock"}"#),
+            (Command::SetInputLock(true), r#"{"cmd":"SetInputLock","arg":true}"#),
+            (Command::SetInputLock(false), r#"{"cmd":"SetInputLock","arg":false}"#),
+        ] {
+            assert_eq!(serde_json::to_string(&cmd).unwrap(), expected);
+            assert_eq!(serde_json::from_str::<Command>(expected).unwrap(), cmd);
+        }
+    }
+
+    #[test]
+    fn the_lock_frame_travels_tagged() {
+        let f = InputFrame::Lock { locked: true };
+        assert_eq!(serde_json::to_string(&f).unwrap(), r#"{"frame":"lock","locked":true}"#);
+        assert_eq!(
+            serde_json::from_str::<InputFrame>(r#"{"frame":"lock","locked":false}"#).unwrap(),
+            InputFrame::Lock { locked: false }
+        );
+        // An unknown frame kind is an error the reader turns into a `warn`, never a value.
+        assert!(serde_json::from_str::<InputFrame>(r#"{"frame":"later"}"#).is_err());
+    }
 
     #[test]
     fn sleep_timer_commands_parse_from_their_wire_form() {

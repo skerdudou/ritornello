@@ -322,6 +322,10 @@ impl Runtime {
             // Derived like `covers`: from the registered metadata half's own
             // `MetadataPlugin::enriches_armed`.
             enriches_armed: self.halves.iter().any(|h| h.enriches_armed),
+            // Will be derived like `covers`, from the registered input half's
+            // own `InputPlugin::input_lock`; the SDK task replaces this
+            // placeholder.
+            input_lock: false,
             protocol: ritornello_proto::PROTOCOL_VERSION,
             // Derived like `kinds`: one contract per registered half, plus
             // `admin` when an admin page is served. An author cannot claim a

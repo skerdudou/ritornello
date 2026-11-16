@@ -134,6 +134,14 @@ pub struct Announcement {
     /// sent an armed identity. A bootstrap addition, like `icon`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub enriches_armed: bool,
+    /// An `input` plugin that implements the remote lock: it swallows its
+    /// keys while locked and wants to be told when the lock changes
+    /// (`InputFrame::Lock`). Opt-in, and derived like `covers`: the SDK reads
+    /// `InputPlugin::input_lock`. `false` stays off the wire, so a plugin
+    /// without a lock announces the line it announced before, and the core
+    /// never writes on its input socket. A bootstrap addition, like `icon`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub input_lock: bool,
     /// Bootstrap number this binary was compiled against, compared by the core
     /// against its own `PROTOCOL_VERSION`.
     ///
@@ -284,12 +292,13 @@ mod tests {
             catalog: None,
             icon: None,
             enriches_armed: false,
+            input_lock: false,
         };
         let line = serde_json::to_string(&a).unwrap();
         assert_eq!(
             line,
             format!(
-                r#"{{"name":"mpd","kinds":["input","display"],"admin":true,"covers":true,"protocol":{PROTOCOL_VERSION},"contracts":{{"display":{{"major":1,"minor":3}},"input":{{"major":1,"minor":1}},"admin":{{"major":1,"minor":0}}}},"version":"0.2.0","repository":"https://github.com/skerdudou/ritornello"}}"#
+                r#"{{"name":"mpd","kinds":["input","display"],"admin":true,"covers":true,"protocol":{PROTOCOL_VERSION},"contracts":{{"display":{{"major":1,"minor":4}},"input":{{"major":1,"minor":2}},"admin":{{"major":1,"minor":0}}}},"version":"0.2.0","repository":"https://github.com/skerdudou/ritornello"}}"#
             )
         );
         assert_eq!(serde_json::from_str::<Announcement>(&line).unwrap(), a);
@@ -314,6 +323,18 @@ mod tests {
         let a: Announcement =
             serde_json::from_str(r#"{"name":"console","kinds":["display"],"admin":false}"#).unwrap();
         assert!(!a.covers, "an absent field must never count as an opt-in");
+    }
+
+    #[test]
+    fn absent_input_lock_means_false_and_false_stays_off_the_wire() {
+        let a: Announcement =
+            serde_json::from_str(r#"{"name":"remote","kinds":["input"]}"#).unwrap();
+        assert!(!a.input_lock, "an absent field must never count as an opt-in");
+        assert!(!serde_json::to_string(&a).unwrap().contains("input_lock"));
+        let on: Announcement =
+            serde_json::from_str(r#"{"name":"remote","kinds":["input"],"input_lock":true}"#).unwrap();
+        assert!(on.input_lock);
+        assert_eq!(serde_json::from_str::<Announcement>(&serde_json::to_string(&on).unwrap()).unwrap(), on);
     }
 
     #[test]
@@ -381,6 +402,7 @@ mod tests {
             catalog: None,
             icon: None,
             enriches_armed: false,
+            input_lock: false,
         };
         let line = serde_json::to_string(&a).unwrap();
         assert!(line.contains(r#""protocol":2"#), "the protocol must always travel: {line}");
@@ -414,6 +436,7 @@ mod tests {
             catalog: None,
             icon: None,
             enriches_armed: false,
+            input_lock: false,
         };
         let back: Announcement =
             serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
@@ -446,6 +469,7 @@ mod tests {
             catalog: None,
             icon: None,
             enriches_armed: false,
+            input_lock: false,
         };
         let line = serde_json::to_string(&a).unwrap();
         assert_eq!(serde_json::from_str::<Announcement>(&line).unwrap(), a);
@@ -480,6 +504,7 @@ mod tests {
             catalog: None,
             icon: None,
             enriches_armed: false,
+            input_lock: false,
         }
     }
 

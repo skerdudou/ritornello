@@ -91,6 +91,8 @@ fn command_label(c: &Command) -> &'static str {
         Command::SetSleepTimer { .. } => "SetSleepTimer",
         Command::ExtendSleepTimer(_) => "ExtendSleepTimer",
         Command::CancelSleepTimer => "CancelSleepTimer",
+        Command::ToggleInputLock => "ToggleInputLock",
+        Command::SetInputLock(_) => "SetInputLock",
     }
 }
 
@@ -332,6 +334,7 @@ fn state_full() -> PlayerState {
             phase: SleepPhase::WaitingEndOfTrack,
         }),
         next_alarm: Some(NextAlarm { weekday: Weekday::Friday, hour: 7, minute: 30 }),
+        input_locked: true,
         track: track_full(),
     }
 }
@@ -432,6 +435,7 @@ fn announcement_section() -> Vec<String> {
             ui_version: None,
             icon: None,
             enriches_armed: false,
+            input_lock: false,
             protocol: PROTOCOL_VERSION,
             contracts: BTreeMap::new(),
             version: None,
@@ -450,6 +454,7 @@ fn announcement_section() -> Vec<String> {
             ui_version: Some("abc123".into()),
             icon: Some("radio".into()),
             enriches_armed: true,
+            input_lock: true,
             protocol: PROTOCOL_VERSION,
             contracts: Contract::ALL.into_iter().map(|c| (c, ContractVersion::new(1, 0))).collect(),
             version: Some("1.2.3".into()),
@@ -623,12 +628,15 @@ fn input_section() -> Vec<String> {
         Command::SetSleepTimer { minutes: 30, mode: SleepMode::Fade },
         Command::ExtendSleepTimer(15),
         Command::CancelSleepTimer,
+        Command::ToggleInputLock,
+        Command::SetInputLock(true),
     ];
     for c in &commands {
         l.add(&format!("Command::{}", command_label(c)), c);
     }
     l.add("InputMessage", &InputMessage::from(Command::Next));
     l.add("InputMessage::held", &InputMessage { cmd: Command::VolumeUp, held: true });
+    l.add("InputFrame::Lock", &InputFrame::Lock { locked: true });
     add_repeat(&mut l);
     for m in [SleepMode::Immediate, SleepMode::Fade, SleepMode::EndOfTrack] {
         l.add(&format!("SleepMode::{}", sleep_mode_label(&m)), &m);

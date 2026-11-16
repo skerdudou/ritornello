@@ -665,6 +665,8 @@ impl<P: Player> Core<P> {
             }
             Command::ExtendSleepTimer(minutes) => self.extend_sleep_timer(minutes).await,
             Command::CancelSleepTimer => self.cancel_sleep_timer().await,
+            // Wired in the next commit of this branch (core lock state).
+            Command::ToggleInputLock | Command::SetInputLock(_) => {}
         }
         Ok(())
     }

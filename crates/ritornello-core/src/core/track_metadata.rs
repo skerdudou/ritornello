@@ -1042,6 +1042,7 @@ mod tests {
                     covers: false,
                     lyrics: false,
                     enriches_armed: false,
+                    input_lock: false,
                     ui_version: None,
                     protocol: ritornello_proto::PROTOCOL_VERSION,
                     contracts: std::collections::BTreeMap::from([(
