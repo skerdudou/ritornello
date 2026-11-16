@@ -27,8 +27,6 @@ use std::time::Duration;
 pub const SCAN_LIMIT: u64 = 64 * 1024 * 1024;
 
 /// How long one file may take to read before its version stays unknown.
-// Used by `Worker::installed` (the next change); until then nothing is.
-#[allow(dead_code)]
 pub const READ_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Reads the block of the file at `path`, synchronously. `None` for anything
@@ -47,8 +45,6 @@ pub fn read_block(path: &Path) -> Option<Embedded> {
 
 /// [`read_block`] off the async threads and under `deadline`. A timeout, a
 /// panic or a missing block all leave the version unknown.
-// Called by `Worker::installed` (the next change); until then only the tests do.
-#[allow(dead_code)]
 pub async fn read_block_within(path: PathBuf, deadline: Duration) -> Option<Embedded> {
     let shown = path.display().to_string();
     let job = tokio::task::spawn_blocking(move || read_block(&path));
