@@ -207,12 +207,19 @@ fn fmt_db(v: f64) -> String {
     s
 }
 
+/// The whole mpv filter chain of a setting (empty when disabled).
+///
+/// **The preamp is a high shelf at 10 Hz, not a `volume` filter.** Measured
+/// on mpv 0.37: `volume` clicks on any change faster than about 2.5 dB/s,
+/// while a shelf this low is a broadband gain that jumps 0 to -12 dB and back
+/// without a click. It is flat within 0.21 dB from 31 Hz up; below about
+/// 20 Hz it attenuates less (infrasound is not compensated).
 pub fn af_chain(s: &EqualizerSettings) -> String {
     if !s.enabled {
         return String::new();
     }
     let mut parts = vec![format!(
-        "@eqpre:lavfi=[volume={}dB]",
+        "@eqpre:lavfi=[highshelf=f=10:t=q:w=0.707:g={}]",
         fmt_db(effective_preamp_db(s))
     )];
     for (i, (hz, g)) in BANDS_HZ.iter().zip(s.gains).enumerate() {
@@ -239,37 +246,14 @@ pub fn band_command(band: usize, gain: i8) -> AfCommand {
     }
 }
 
+/// The preamp's gain, in dB as a plain number (no unit, unlike `volume`).
 pub fn preamp_command(db: f64) -> AfCommand {
     AfCommand {
         label: "eqpre".into(),
-        command: "volume".into(),
-        arg: format!("{}dB", fmt_db(db)),
-        target: "volume".into(),
+        command: "g".into(),
+        arg: fmt_db(db),
+        target: "highshelf".into(),
     }
-}
-
-/// The largest preamp step the ramp sends at once: a larger jump of the
-/// `volume` filter clicks. Its companion, the interval between two steps, is
-/// `RAMP_STEP` in `core/equalizer.rs`.
-pub const PREAMP_MAX_STEP_DB: f64 = 1.0;
-
-/// Intermediate preamp values up to `to_db` inclusive, each step at most
-/// `PREAMP_MAX_STEP_DB`. Empty when equal.
-pub fn preamp_ramp(from_db: f64, to_db: f64) -> Vec<f64> {
-    let diff = to_db - from_db;
-    if diff == 0.0 {
-        return Vec::new();
-    }
-    let steps = ((diff.abs() / PREAMP_MAX_STEP_DB - 1e-9).ceil() as usize).max(1);
-    (1..=steps)
-        .map(|i| {
-            if i == steps {
-                to_db
-            } else {
-                from_db + diff * i as f64 / steps as f64
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -375,7 +359,7 @@ mod tests {
     }
 
     fn flat_chain(pre: &str) -> String {
-        let mut parts = vec![format!("@eqpre:lavfi=[volume={pre}]")];
+        let mut parts = vec![format!("@eqpre:lavfi=[highshelf=f=10:t=q:w=0.707:g={pre}]")];
         for (i, hz) in BANDS_HZ.iter().enumerate() {
             parts.push(format!("@eq{i}:lavfi=[equalizer=f={hz}:t=o:w=1:g=0]"));
         }
@@ -390,18 +374,18 @@ mod tests {
     #[test]
     fn chain_matches_the_measured_form() {
         let mut s = EqualizerSettings { enabled: true, ..Default::default() };
-        assert_eq!(af_chain(&s), flat_chain("0dB"));
+        assert_eq!(af_chain(&s), flat_chain("0"));
         assert!(af_chain(&s).starts_with(
-            "@eqpre:lavfi=[volume=0dB],@eq0:lavfi=[equalizer=f=31:t=o:w=1:g=0],"
+            "@eqpre:lavfi=[highshelf=f=10:t=q:w=0.707:g=0],@eq0:lavfi=[equalizer=f=31:t=o:w=1:g=0],"
         ));
 
         s.gains[5] = 6;
         let c = af_chain(&s);
         assert!(c.contains("@eq5:lavfi=[equalizer=f=1000:t=o:w=1:g=6]"), "{c}");
-        assert!(c.contains("[volume=-"), "{c}");
+        assert!(c.starts_with("@eqpre:lavfi=[highshelf=f=10:t=q:w=0.707:g=-"), "{c}");
 
         s.auto_preamp = false;
-        assert!(af_chain(&s).starts_with("@eqpre:lavfi=[volume=0dB],"));
+        assert!(af_chain(&s).starts_with("@eqpre:lavfi=[highshelf=f=10:t=q:w=0.707:g=0],"));
     }
 
     #[test]
@@ -414,24 +398,10 @@ mod tests {
         let p = preamp_command(-6.0);
         assert_eq!(
             (p.label.as_str(), p.command.as_str(), p.arg.as_str(), p.target.as_str()),
-            ("eqpre", "volume", "-6dB", "volume")
+            ("eqpre", "g", "-6", "highshelf")
         );
-        assert_eq!(preamp_command(-0.0).arg, "0dB");
-        assert_eq!(preamp_command(-3.456).arg, "-3.46dB");
-    }
-
-    #[test]
-    fn ramp_steps_by_at_most_the_max_step() {
-        let r = preamp_ramp(0.0, -12.0);
-        assert_eq!(r.len(), (12.0 / PREAMP_MAX_STEP_DB).ceil() as usize);
-        assert_eq!(*r.last().unwrap(), -12.0);
-        let mut prev = 0.0;
-        for v in &r {
-            assert!((v - prev).abs() <= PREAMP_MAX_STEP_DB + 1e-9);
-            prev = *v;
-        }
-        assert!(preamp_ramp(-3.0, -3.0).is_empty());
-        assert_eq!(*preamp_ramp(-2.5, 0.0).last().unwrap(), 0.0);
+        assert_eq!(preamp_command(-0.0).arg, "0");
+        assert_eq!(preamp_command(-3.456).arg, "-3.46");
     }
 
     #[test]

@@ -543,15 +543,14 @@ pub struct Core<P: Player> {
     /// The equalizer setting, persisted. See `equalizer.rs` for how a change
     /// reaches mpv.
     equalizer: crate::equalizer::EqualizerSettings,
-    /// The preamp mpv's chain holds now: the last ramp step sent, or the
+    /// The preamp mpv's chain holds now: the last preamp command sent, or the
     /// value the chain carried when it was last written whole (`--af` at
-    /// launch, a toggle, a file start). A new ramp starts from it.
+    /// launch, a toggle, a file start). A change commands the preamp only
+    /// when it differs.
     eq_preamp_sent: f64,
     /// The band gains mpv's chain holds now, tracked like `eq_preamp_sent`:
     /// the bands still to send are those that differ from the setting.
     eq_bands_sent: [i8; 10],
-    /// The preamp ramp still to send, if any (see `equalizer.rs`).
-    eq_ramp: Option<equalizer::PreampRamp>,
     /// The chain mpv's `af` property holds, as last written whole (`--af`
     /// at launch, a toggle, a file start, an audio output change); `None`
     /// when the last write failed and `af` is unknown. A file start rewrites
@@ -723,7 +722,6 @@ impl<P: Player> Core<P> {
             eq_preamp_sent: crate::equalizer::effective_preamp_db(&persisted.equalizer),
             equalizer: persisted.equalizer.clone(),
             eq_bands_sent: persisted.equalizer.gains,
-            eq_ramp: None,
             eq_chain_written: Some(crate::equalizer::af_chain(&persisted.equalizer)),
             eq_file_loaded: false,
         };

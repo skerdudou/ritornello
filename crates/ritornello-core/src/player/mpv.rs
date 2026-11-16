@@ -1650,7 +1650,7 @@ pub(crate) mod tests {
         let socket = std::path::Path::new("/run/rp/mpv.sock");
         let empty = mpv_args(socket, "/dev/sr0", 0.5, 10.0, "");
         assert!(!empty.iter().any(|a| a.starts_with("--af")), "{empty:?}");
-        let chain = "@eqpre:lavfi=[volume=0dB],@eq0:lavfi=[equalizer=f=31:t=o:w=1:g=0]";
+        let chain = "@eqpre:lavfi=[highshelf=f=10:t=q:w=0.707:g=0],@eq0:lavfi=[equalizer=f=31:t=o:w=1:g=0]";
         let set = mpv_args(socket, "/dev/sr0", 0.5, 10.0, chain);
         let afs: Vec<_> = set.iter().filter(|a| a.starts_with("--af")).collect();
         assert_eq!(afs, vec![&format!("--af={chain}")], "{set:?}");
@@ -1703,6 +1703,7 @@ pub(crate) mod tests {
         };
         let af = player.ipc.command(&[json!("get_property"), json!("af")]).await.unwrap();
         assert_eq!(graph(&af, "eq5").as_deref(), Some("equalizer=f=1000:t=o:w=1:g=0"), "{af}");
+        assert_eq!(graph(&af, "eqpre").as_deref(), Some("highshelf=f=10:t=q:w=0.707:g=0"), "{af}");
 
         // Idle, the two facts `core/equalizer.rs` relies on: `af-command`
         // is refused (no live chain), setting `af` is accepted.

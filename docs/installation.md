@@ -1491,8 +1491,13 @@ ffmpeg 6.1.1:
   core rewrites the chain on `start-file` when the setting changed since it
   was last written; an idle mpv refuses every `af-command`, so a change made
   while nothing plays waits for that rewrite;
-- the preamp ramp — steps of at most 1 dB, one every 20 ms — was judged
-  click-free on WSL only, never heard on the Pi's output;
+- the preamp is a high shelf at 10 Hz, not a `volume` filter: `volume`
+  clicked on any change faster than about 2.5 dB/s, while the shelf jumped
+  0 to -12 dB and back without a measurable click. That was measured on WSL
+  only, never heard on the Pi's output. The shelf is flat within 0.21 dB from
+  31 Hz up, but below about 20 Hz it attenuates less: infrasound is not
+  compensated. Whether a biquad this low stays stable in the Pi's float path
+  is unverified;
 - whether changing the audio output keeps the live gains is unknown: mpv may
   rebuild the chain from `af` when it reloads the output, so the core rewrites
   the chain after every output change while the equalizer is on — a rewrite
