@@ -71,7 +71,6 @@ scan_progress = "Scansione di {dir} — {found} brani trovati"
 playlist_title = "Playlist corrente"
 col_num = "N."
 col_track = "Brano"
-col_duration = "Durata"
 empty_playlist = "Playlist vuota"
 missing_badge = "non trovato"
 reorder_hint = "Trascina per riordinare"
@@ -152,7 +151,6 @@ duplicate_source = "Questa cartella è già dichiarata come sorgente."
 
 not_a_playlist = "«{path}» non è un file di playlist (.m3u o .m3u8)"
 btn_load_m3u = "Carica questa playlist"
-duration_progress = "Lettura delle durate dei brani ({done} su {total})"
 
 # --- Unresponsive mount points ---
 #

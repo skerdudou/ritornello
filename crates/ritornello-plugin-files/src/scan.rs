@@ -60,8 +60,9 @@ const DEADLINE_STEP: usize = 64;
 /// no available encoder could produce a sample of, so they were never played.
 ///
 /// Several of these (`webm`, `mka`, `tta`, `ac3`, `eac3`, `dts`, `caf`, `au`,
-/// `w64`) are formats `lofty` cannot read: their duration stays unknown in the
-/// playlist (a dash, see `duration::probe`) until mpv reports it on play.
+/// `w64`) are formats `lofty` cannot read: mpv alone decodes them, and
+/// `album_from_tags` reads no album tag from them, so they name no album and
+/// neither agree nor disagree in the cover-archive homogeneity check.
 const EXTENSIONS: &[&str] = &[
     "mp3", "flac", "ogg", "oga", "opus", "m4a", "aac", "wav", "wma", "aiff", "ape", "wv", "mpc",
     "webm", "mka", "aif", "aifc", "wave", "w64", "m4b", "mp2", "spx", "tta", "ac3", "eac3", "dts",

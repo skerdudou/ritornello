@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 pub struct Entry {
     pub path: PathBuf,
     pub title: Option<String>,
-    pub duration_s: Option<u32>,
 }
 
 impl Entry {
@@ -82,30 +81,27 @@ fn resolve(raw: &str, m3u_dir: &Path, root: &Path) -> Option<PathBuf> {
 /// under which to catch foreign paths.
 pub fn parse(text: &str, m3u_dir: &Path, root: &Path) -> Parsed {
     let mut out = Parsed::default();
-    let mut pending: Option<(Option<u32>, Option<String>)> = None;
+    let mut pending: Option<Option<String>> = None;
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
         if let Some(rest) = line.strip_prefix("#EXTINF:") {
+            // The length before the comma is deliberately ignored: only the
+            // title is kept.
             pending = Some(match rest.split_once(',') {
-                Some((d, t)) => (
-                    // `-1` is the "unknown duration" convention: it must not
-                    // become a duration.
-                    d.trim().parse::<i64>().ok().filter(|n| *n > 0).map(|n| n as u32),
-                    (!t.trim().is_empty()).then(|| t.trim().to_string()),
-                ),
-                None => (None, None),
+                Some((_, t)) => (!t.trim().is_empty()).then(|| t.trim().to_string()),
+                None => None,
             });
             continue;
         }
         if line.starts_with('#') {
             continue;
         }
-        let (duration, title) = pending.take().unwrap_or((None, None));
+        let title = pending.take().flatten();
         match resolve(line, m3u_dir, root) {
-            Some(path) => out.entries.push(Entry { path, title, duration_s: duration }),
+            Some(path) => out.entries.push(Entry { path, title }),
             None => out.unresolved.push(line.to_string()),
         }
     }
@@ -121,8 +117,9 @@ pub fn parse(text: &str, m3u_dir: &Path, root: &Path) -> Parsed {
 pub fn render(entries: &[Entry], base: Option<&Path>) -> String {
     let mut s = String::from("#EXTM3U\n");
     for e in entries {
-        let duration = e.duration_s.map(|d| d.to_string()).unwrap_or_else(|| "-1".into());
-        s.push_str(&format!("#EXTINF:{duration},{}\n", e.display_name()));
+        // `-1` is the m3u convention for "length unknown", which is always
+        // the case here: the plugin does not measure track lengths.
+        s.push_str(&format!("#EXTINF:-1,{}\n", e.display_name()));
         let path = base
             .and_then(|b| e.path.strip_prefix(b).ok())
             .map(|p| p.to_string_lossy().replace('\\', "/"))
@@ -153,7 +150,6 @@ mod tests {
         assert_eq!(p.entries.len(), 1);
         assert_eq!(p.entries[0].path, target);
         assert_eq!(p.entries[0].title.as_deref(), Some("Miles Davis - So What"));
-        assert_eq!(p.entries[0].duration_s, Some(245));
         assert!(p.unresolved.is_empty());
     }
 
@@ -197,13 +193,10 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_duration_does_not_become_a_duration() {
-        // `-1` is the m3u convention for "I do not know": taking it for a
-        // duration would show "-1 s" somewhere.
+    fn a_minus_one_length_still_gives_the_title() {
         let dir = tempfile::tempdir().unwrap();
         file(dir.path(), "a.mp3");
         let p = parse("#EXTM3U\n#EXTINF:-1,No duration\na.mp3\n", dir.path(), dir.path());
-        assert_eq!(p.entries[0].duration_s, None);
         assert_eq!(p.entries[0].title.as_deref(), Some("No duration"));
     }
 
@@ -213,9 +206,31 @@ mod tests {
         let entries = vec![Entry {
             path: base.join("Album/01.mp3"),
             title: Some("So What".into()),
-            duration_s: Some(245),
         }];
-        assert_eq!(render(&entries, Some(base)), "#EXTM3U\n#EXTINF:245,So What\nAlbum/01.mp3\n");
+        assert_eq!(render(&entries, Some(base)), "#EXTM3U\n#EXTINF:-1,So What\nAlbum/01.mp3\n");
+    }
+
+    #[test]
+    fn a_title_holding_a_comma_is_kept_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        file(dir.path(), "a.mp3");
+        let p = parse(
+            "#EXTM3U\n#EXTINF:245,Miles Davis, Bill Evans - Blue in Green\na.mp3\n",
+            dir.path(),
+            dir.path(),
+        );
+        assert_eq!(p.entries[0].title.as_deref(), Some("Miles Davis, Bill Evans - Blue in Green"));
+    }
+
+    #[test]
+    fn a_reloaded_list_is_exported_with_unknown_lengths() {
+        let dir = tempfile::tempdir().unwrap();
+        file(dir.path(), "Album/01.mp3");
+        let parsed = parse("#EXTM3U\n#EXTINF:245,So What\nAlbum/01.mp3\n", dir.path(), dir.path());
+        assert_eq!(
+            render(&parsed.entries, Some(dir.path())),
+            "#EXTM3U\n#EXTINF:-1,So What\nAlbum/01.mp3\n"
+        );
     }
 
     #[test]
@@ -223,7 +238,6 @@ mod tests {
         let entries = vec![Entry {
             path: "/mnt/ritornello/nas/Album/01.mp3".into(),
             title: None,
-            duration_s: None,
         }];
         assert_eq!(
             render(&entries, None),
@@ -232,14 +246,14 @@ mod tests {
     }
 
     #[test]
-    fn writing_then_rereading_keeps_titles_and_durations() {
+    fn writing_then_rereading_keeps_titles() {
         // The real round trip: what we save must come back identical.
         let dir = tempfile::tempdir().unwrap();
         let a = file(dir.path(), "Album/01.mp3");
         let b = file(dir.path(), "Album/02.mp3");
         let entries = vec![
-            Entry { path: a, title: Some("So What".into()), duration_s: Some(545) },
-            Entry { path: b, title: Some("Blue in Green".into()), duration_s: None },
+            Entry { path: a, title: Some("So What".into()) },
+            Entry { path: b, title: Some("Blue in Green".into()) },
         ];
         let text = render(&entries, Some(dir.path()));
         let reread = parse(&text, dir.path(), dir.path());

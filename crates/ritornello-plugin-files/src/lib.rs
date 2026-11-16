@@ -7,7 +7,6 @@
 //! The modules specific to the plugin (`admin`, `state`) stay declared in
 //! `main.rs`.
 
-pub mod duration;
 pub mod explore;
 pub mod m3u;
 pub mod mount;

@@ -1377,7 +1377,7 @@ the mount point is cleared.
 
 What you see while a share is quiet: the mount points are listed in a banner,
 affected tracks are badged *unknown* rather than *missing* — they are not gone,
-nobody could look — and their lengths simply do not arrive. Local sources and
+nobody could look. Local sources and
 playback are unaffected.
 
 ### Declaring a source
@@ -1413,39 +1413,20 @@ removed by hand. The rollback is scoped to `add_source` only: a source
 already accepted stays declared until removed by hand, so one sick share
 does not take an unrelated, healthy one down with it.
 
-### Track lengths
+### `lofty` in the log
 
-Only tracks **in the playlist** are measured, and only those whose length is
-still unknown. A scanned folder carries none — an `#EXTINF` line in an m3u is
-the only thing that does — so the column used to show a dash forever.
-
-Lengths are read from the file **header**, in-process, and the choice was
-measured on sixty files: 0.33 ms each that way, against 42 ms with one
-`ffprobe` per file. Over two thousand tracks that is under a second instead of
-a minute and a half, and it spares a Raspberry Pi two thousand process spawns
-while music is playing. No system package is involved.
-
-**`lofty` is kept out of the log below `error`**, and that is not tidiness. It
-emits a `WARN` per MP3 without a Xing header — "MPEG: Using bitrate to estimate
-duration" — which is not an incident but the normal estimation method for that
-format, calls for no action, and repeats once per track. The owner reported it
-as flooding the log, and the cost is real: the core keeps only `warn` and
-above for its "recent errors" card, so that noise pushes actual errors out of
-the buffer. Its `error` lines still go through — a frame the library judges
-broken is information. A `filter_fn` and not an `EnvFilter`: the latter sits
-behind `tracing-subscriber`'s optional `env-filter` feature, which pulls in
-`regex` — one more dependency to compile and ship on a Pi, for a single rule
-known in advance.
-
-The work runs **in the background** and is polled by the page, like the
-recursive scan: a `GetData` has a 5 s budget and a playlist coming off
-a share needs longer. Results are applied by **path**, never by position — the
-page may reorder or remove tracks while measuring, and applying by index would
-write one file's length onto another. Each batch is persisted, so an
-interrupted pass keeps what it found and a restart re-measures nothing.
-
-A length that is already known is never overwritten: an `#EXTINF` is the
-authority, since the file may be an excerpt of what the list claims.
+**`lofty` is kept out of the log below `error`**, and that is not tidiness. The
+cover-archive homogeneity check reads album tags with it (`archive.rs`, up to
+`HOMOGENEITY_SAMPLE` neighbouring files per folder), and it emits a `WARN` per
+MP3 without a Xing header — "MPEG: Using bitrate to estimate duration" — which
+is not an incident but the normal estimation method for that format, calls for
+no action, and repeats once per file read. The owner reported it as flooding the
+log, and the cost is real: the core keeps only `warn` and above for its "recent
+errors" card, so that noise pushes actual errors out of the buffer. Its `error`
+lines still go through — a frame the library judges broken is information. A
+`filter_fn` and not an `EnvFilter`: the latter sits behind `tracing-subscriber`'s
+optional `env-filter` feature, which pulls in `regex` — one more dependency to
+compile and ship on a Pi, for a single rule known in advance.
 
 ### The privilege boundary
 

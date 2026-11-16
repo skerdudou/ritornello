@@ -1435,8 +1435,10 @@ impl SourcePlugin for FilesSource {
 /// True for a frame that this plugin agrees to write to the log.
 ///
 /// **It discards only one thing: `lofty`'s chatter below the error level.**
-/// The durations survey opens the header of every file of the playlist, and
-/// `lofty` emits a `WARN` there for every MP3 without a Xing header —
+/// The one remaining `lofty` reader is `archive::album_from_tags` (the
+/// cover-archive homogeneity check): it opens up to `HOMOGENEITY_SAMPLE`
+/// neighbouring files with `Probe::read`, properties included, and `lofty`
+/// emits a `WARN` there for every MP3 without a Xing header —
 /// "MPEG: Using bitrate to estimate duration". This is not an incident: it is
 /// the normal estimation method for that format, it calls for no action, and
 /// it repeats per track. Reported by the owner as polluting his log, and the
@@ -1589,8 +1591,6 @@ async fn main() -> Result<()> {
         smb_ok,
         playlist_changed,
         plays,
-        durations: Arc::new(Mutex::new(admin::DurationsProgress::default())),
-        durations_task: None,
         roots_path,
         creds_dir,
         internal_playlists: playlists_dir,
@@ -1830,7 +1830,6 @@ mod tests {
                 .map(|i| Entry {
                     path: PathBuf::from(format!("/musique/{i:02}.mp3")),
                     title: None,
-                    duration_s: None,
                 })
                 .collect(),
             index: 0,
@@ -2063,8 +2062,8 @@ mod tests {
         let b0 = PathBuf::from("/autre/01.mp3");
         *s.playlist.write().await = Playlist {
             entries: vec![
-                Entry { path: b0.clone(), title: None, duration_s: None },
-                Entry { path: PathBuf::from("/autre/02.mp3"), title: None, duration_s: None },
+                Entry { path: b0.clone(), title: None },
+                Entry { path: PathBuf::from("/autre/02.mp3"), title: None },
             ],
             index: 0,
         };
@@ -2109,7 +2108,7 @@ mod tests {
         std::fs::write(&track, b"x").unwrap();
         std::fs::write(dir.path().join("cover.jpg"), b"x").unwrap();
         let mut s = test_source(Playlist {
-            entries: vec![Entry { path: track, title: None, duration_s: None }],
+            entries: vec![Entry { path: track, title: None }],
             index: 0,
         });
         let out = s.activate().await;
@@ -2140,7 +2139,7 @@ mod tests {
             .map(|i| {
                 let p = dir.path().join(format!("{i:02} - piste.flac"));
                 std::fs::write(&p, b"x").unwrap();
-                Entry { path: p, title: None, duration_s: None }
+                Entry { path: p, title: None }
             })
             .collect();
         let mut s = test_source(Playlist { entries, index: 0 });
@@ -2185,8 +2184,8 @@ mod tests {
         std::fs::write(first.join("cover.jpg"), b"x").unwrap();
         std::fs::write(second.join("folder.png"), b"x").unwrap();
         let entries = vec![
-            Entry { path: first.join("01.flac"), title: None, duration_s: None },
-            Entry { path: second.join("01.flac"), title: None, duration_s: None },
+            Entry { path: first.join("01.flac"), title: None },
+            Entry { path: second.join("01.flac"), title: None },
         ];
         let mut s = test_source(Playlist { entries, index: 0 });
         s.activate().await;
@@ -2217,7 +2216,7 @@ mod tests {
         std::fs::write(&track, b"x").unwrap(); // no image alongside
         let (tx, rx) = tokio::sync::watch::channel(0u8);
         let mut s = test_source(Playlist {
-            entries: vec![Entry { path: track, title: None, duration_s: None }],
+            entries: vec![Entry { path: track, title: None }],
             index: 0,
         });
         s.preset_count_rx = Some(rx);
@@ -2314,7 +2313,7 @@ mod tests {
         std::fs::write(dir.path().join("cover.jpg"), b"x").unwrap();
         std::fs::write(dir.path().join("01 - Get Lucky.LRC"), b"[00:01.00]Like the legend\r\n").unwrap();
         let mut s = test_source(Playlist {
-            entries: vec![Entry { path: track, title: None, duration_s: None }],
+            entries: vec![Entry { path: track, title: None }],
             index: 0,
         });
         s.activate().await;
@@ -2384,7 +2383,7 @@ mod tests {
         let track = dir.path().join("01.flac");
         std::fs::write(&track, b"x").unwrap();
         let mut s = test_source(Playlist {
-            entries: vec![Entry { path: track, title: None, duration_s: None }],
+            entries: vec![Entry { path: track, title: None }],
             index: 0,
         });
         s.roots = Arc::new(AsyncRwLock::new(lyrics_root(dir.path())));
@@ -2439,7 +2438,7 @@ mod tests {
         let track = dir.path().join("01.flac");
         std::fs::write(&track, b"x").unwrap();
         let mut s = test_source(Playlist {
-            entries: vec![Entry { path: track.clone(), title: None, duration_s: None }],
+            entries: vec![Entry { path: track.clone(), title: None }],
             index: 0,
         });
         s.roots = Arc::new(AsyncRwLock::new(lyrics_root(dir.path())));
@@ -2919,7 +2918,6 @@ mod tests {
         s.playlist.write().await.entries.push(Entry {
             path: PathBuf::from("/musique/04.mp3"),
             title: None,
-            duration_s: None,
         });
         s.playlist_changed.store(true, std::sync::atomic::Ordering::Relaxed);
         let out = s.next().await;
@@ -2980,7 +2978,6 @@ mod tests {
         s.playlist.write().await.entries.push(Entry {
             path: PathBuf::from("/musique/04.mp3"),
             title: None,
-            duration_s: None,
         });
         s.playlist_changed.store(true, std::sync::atomic::Ordering::Relaxed);
         let out = s.end_of_content().await;
@@ -3008,7 +3005,6 @@ mod tests {
         s.playlist.write().await.entries.push(Entry {
             path: PathBuf::from("/musique/04.mp3"),
             title: None,
-            duration_s: None,
         });
         s.playlist_changed.store(true, std::sync::atomic::Ordering::Relaxed);
         let out = s.end_of_content().await;
@@ -3054,7 +3050,6 @@ mod tests {
         s.playlist.write().await.entries.push(Entry {
             path: PathBuf::from("/musique/04.mp3"),
             title: None,
-            duration_s: None,
         });
         s.playlist_changed.store(true, std::sync::atomic::Ordering::Relaxed);
         let out = s.activate().await;
@@ -3083,7 +3078,6 @@ mod tests {
         s.playlist.write().await.entries.push(Entry {
             path: PathBuf::from("/musique/04.mp3"),
             title: None,
-            duration_s: None,
         });
         s.playlist_changed.store(true, std::sync::atomic::Ordering::Relaxed);
         let out = s.next().await;
@@ -3101,7 +3095,6 @@ mod tests {
         s.playlist.write().await.entries.push(Entry {
             path: PathBuf::from("/musique/04.mp3"),
             title: None,
-            duration_s: None,
         });
         s.playlist_changed.store(true, std::sync::atomic::Ordering::Relaxed);
         // Redrawn [0, 1, 2, 3], the armed entry 1 swapped to the head:

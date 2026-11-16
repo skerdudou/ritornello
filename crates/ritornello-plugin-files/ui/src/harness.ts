@@ -96,11 +96,9 @@ export const CATALOG: Record<string, string> = {
   playlist_title: 'Current queue',
   col_num: 'No.',
   col_track: 'Track',
-  col_duration: 'Length',
   empty_playlist: 'Empty queue',
   missing_badge: 'not found',
   reorder_hint: 'Drag to reorder',
-  duration_progress: 'Reading lengths ({done} of {total})',
   btn_move_up: 'Move track up',
   btn_move_down: 'Move track down',
   btn_remove_track: 'Remove track',
@@ -146,7 +144,6 @@ export interface ServerState {
   volumes?: { path: string; fstype: string }[]
   can_browse_smb?: boolean
   playing?: boolean
-  durations?: { running: boolean; done: number; total: number }
   explore?: Explore
   mount_error?: string | null
   unresponsive?: string[]
@@ -203,7 +200,6 @@ export function state(partial: ServerState = {}): Required<ServerState> {
     // the state a test must declare explicitly to offer the network wizard.
     can_browse_smb: false,
     playing: false,
-    durations: { running: false, done: 0, total: 0 },
     explore: EXPLORE_CLOSED,
     mount_error: null,
     unresponsive: [],

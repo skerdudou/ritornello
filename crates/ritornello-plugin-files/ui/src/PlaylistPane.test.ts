@@ -3,9 +3,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { mountAdmin } from './harness'
 
 const THREE = [
-  { path: 'Albums/Jazz/01.mp3', name: 'Track 1', duration_s: 245, missing: false },
-  { path: 'Albums/Jazz/02.mp3', name: 'Track 2', duration_s: 0, missing: true },
-  { path: 'Albums/Jazz/03.mp3', name: 'Track 3', duration_s: 3725, missing: false },
+  { path: 'Albums/Jazz/01.mp3', name: 'Track 1', missing: false },
+  { path: 'Albums/Jazz/02.mp3', name: 'Track 2', missing: true },
+  { path: 'Albums/Jazz/03.mp3', name: 'Track 3', missing: false },
 ]
 
 /**
@@ -54,7 +54,7 @@ describe('current queue pane', () => {
     // would blame the file for a failure that is the mount's — and would
     // send the user searching for a file that is right there.
     const { w } = await mountAdmin({
-      playlist: [{ path: '/mnt/ritornello/nas/a.mp3', name: 'On the NAS', duration_s: 0, missing: null }],
+      playlist: [{ path: '/mnt/ritornello/nas/a.mp3', name: 'On the NAS', missing: null }],
       unresponsive: ['/mnt/ritornello/nas'],
     })
     expect(w.findAll('[data-track-missing]')).toHaveLength(0)
@@ -66,12 +66,16 @@ describe('current queue pane', () => {
     expect(w.findAll('[data-track-row]')).toHaveLength(1)
   })
 
-  it('renders durations, including a dash for an unknown one', async () => {
+  it('every row spans as many cells as the header', async () => {
     const { w } = await mountAdmin({ playlist: THREE })
-    const text = w.find('[data-playlist-pane]').text()
-    expect(text).toContain('4:05')
-    expect(text).toContain('1:02:05')
-    expect(text).toContain('—')
+    expect(w.findAll('thead th')).toHaveLength(3)
+    for (const row of w.findAll('[data-track-row]')) {
+      expect(row.findAll('td')).toHaveLength(3)
+    }
+    await w.findAll('[data-track-name]')[1]!.trigger('click')
+    await flushPromises()
+    expect(w.find('[data-track-path]').attributes('colspan')).toBe('3')
+    expect(w.find('[data-playlist-pane]').text()).not.toContain('—')
   })
 
   it('reorders, removes and clears using absolute indices', async () => {
@@ -198,7 +202,6 @@ describe('current queue pane', () => {
     const long = Array.from({ length: 250 }, (_, i) => ({
       path: `/m/${i}.mp3`,
       name: `${i}`,
-      duration_s: 0,
       missing: false,
     }))
     const { w, s } = await mountAdmin({ playlist: long })
@@ -244,7 +247,6 @@ describe('current queue pane', () => {
     const long = Array.from({ length: 250 }, (_, i) => ({
       path: `p/${i}.mp3`,
       name: `Track ${i}`,
-      duration_s: 100,
       missing: false,
     }))
     const { w } = await mountAdmin({ playlist: long })
@@ -267,7 +269,6 @@ describe('current queue pane', () => {
     const long = Array.from({ length: 1000 }, (_, i) => ({
       path: `p/${i}.mp3`,
       name: `Track ${i}`,
-      duration_s: 100,
       missing: false,
     }))
     const { w } = await mountAdmin({ playlist: long, index: 349 })

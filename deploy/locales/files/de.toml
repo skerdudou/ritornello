@@ -71,7 +71,6 @@ scan_progress = "Durchsuche {dir} — {found} Titel gefunden"
 playlist_title = "Aktuelle Wiedergabeliste"
 col_num = "Nr."
 col_track = "Titel"
-col_duration = "Dauer"
 empty_playlist = "Leere Wiedergabeliste"
 missing_badge = "nicht gefunden"
 reorder_hint = "Zum Umsortieren ziehen"
@@ -152,7 +151,6 @@ duplicate_source = "Dieser Ordner ist bereits als Quelle eingetragen."
 
 not_a_playlist = "„{path}“ ist keine Wiedergabelistendatei (.m3u oder .m3u8)"
 btn_load_m3u = "Diese Wiedergabeliste laden"
-duration_progress = "Titellängen werden gelesen ({done} von {total})"
 
 # --- Unresponsive mount points ---
 #

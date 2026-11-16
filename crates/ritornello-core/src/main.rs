@@ -1635,8 +1635,8 @@ async fn reorder_plugins<P: player::Player>(
 /// noisy: it drowns the log, **and** it pushes real errors out of the
 /// "recent errors" buffer, which only retains `WARN` and above.
 ///
-/// The same filter exists in the `files` plugin, which probes durations with
-/// the same library. Two copies of a three-line rule, rather than a shared
+/// The same filter exists in the `files` plugin, which reads album tags with
+/// the same library (`archive.rs`). Two copies of a three-line rule, rather than a shared
 /// crate for the occasion — but if a third one appears, that is the sign the
 /// crate is needed.
 ///

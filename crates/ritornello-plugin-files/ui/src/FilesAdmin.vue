@@ -99,10 +99,7 @@ function stopProbe(): void {
 function workInProgress(): boolean {
   return (
     data.value?.scan.running === true ||
-    data.value?.explore.busy === true ||
-    // The duration survey: they arrive in batches, and without this probe the
-    // column would stay at "—" until the user's next gesture.
-    data.value?.durations.running === true
+    data.value?.explore.busy === true
   )
 }
 
@@ -336,22 +333,6 @@ const scan = computed(
          probe — not a notification from the plugin — that makes it advance. -->
     <p v-if="scan.running" data-scan class="text-sm text-muted-foreground">
       {{ t('scan_progress', { found: scan.found, dir: scan.dir }) }}
-    </p>
-
-    <!-- Progress of the duration survey. Saying it rather than letting the
-         column fill itself in: on a slow share, a list that changes before
-         one's eyes without explanation is worrying. -->
-    <p
-      v-if="data?.durations.running"
-      data-durations
-      class="text-sm text-muted-foreground"
-    >
-      {{
-        t('duration_progress', {
-          done: data.durations.done,
-          total: data.durations.total,
-        })
-      }}
     </p>
 
     <!-- Incident of the **last** scan, resolved against this page's catalog

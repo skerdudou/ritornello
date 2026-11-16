@@ -8,34 +8,24 @@ describe('FilesAdmin, the page', () => {
   beforeEach(() => vi.unstubAllGlobals())
   afterEach(() => vi.useRealTimers())
 
-  it('probes during the duration survey, and announces it', async () => {
-    // Durations arrive in batches, in the background: without this probe the
-    // column would stay at "—" until the user's next gesture. And saying it
-    // matters — on a slow share, a list that changes before one's eyes without
-    // explanation is worrying.
+  it('does not poll for track lengths any more', async () => {
+    // The plugin no longer surveys lengths: a payload that still carried a
+    // running survey (an older plugin) must neither announce it nor keep the
+    // page probing.
     vi.useFakeTimers({ shouldAdvanceTime: true })
     const s = server({
       playlist: [{ path: '/m/1.mp3', name: '01' }],
       durations: { running: true, done: 10, total: 40 },
-    })
+    } as never)
     const w = mount(FilesAdmin, { props: { catalog: CATALOG, base: BASE } })
     await flushPromises()
-    expect(w.find('[data-durations]').text()).toBe('Reading lengths (10 of 40)')
+    expect(w.find('[data-durations]').exists()).toBe(false)
     const gets = () => s.spy.mock.calls.filter((c) => (c[1] as RequestInit)?.method !== 'PUT').length
     expect(gets()).toBe(1)
 
     vi.advanceTimersByTime(1000)
     await flushPromises()
-    expect(gets()).toBe(2)
-
-    // Survey finished: the probe stops and the announcement disappears.
-    s.data.durations = { running: false, done: 40, total: 40 }
-    vi.advanceTimersByTime(1000)
-    await flushPromises()
-    expect(w.find('[data-durations]').exists()).toBe(false)
-    vi.advanceTimersByTime(5000)
-    await flushPromises()
-    expect(gets()).toBe(3)
+    expect(gets()).toBe(1)
   })
 
   it('re-reads the state when the player changes, so that the highlighted track follows', async () => {
