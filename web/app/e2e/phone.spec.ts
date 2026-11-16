@@ -179,8 +179,8 @@ test('on a phone: the Plugins tab leads to the list, which leads to the plugin p
  * `touch-action` and no scrolling, so the unit tests can pin the swipe's
  * arithmetic but never that it leaves the vertical gesture to the page. The
  * gesture goes through CDP touch events (a real touch pointer, which
- * `page.mouse` is not). The harness declares one station, so there is no
- * second page to swipe to.
+ * `page.mouse` is not). The harness declares one station (an earlier spec in
+ * the same run may add another), so there is no second page to swipe to.
  */
 test('on a phone: the presets card toggles list and pages, and a vertical drag over it scrolls the page', async ({ page }) => {
   await page.setViewportSize({ width: 412, height: 500 })
@@ -189,9 +189,16 @@ test('on a phone: the presets card toggles list and pages, and a vertical drag o
   await expect(grid).toHaveAttribute('data-preset-layout', 'pages')
   const toggle = page.locator('[data-preset-layout-toggle]')
   await expect(toggle).toHaveCount(1)
+  // The station count is shared server state: an earlier spec in the same run
+  // may have added one. Compare the two layouts with each other rather than
+  // with the fixture. With no page window (ten presets or fewer) the list
+  // shows exactly the tiles the page showed.
+  await expect(grid.locator('[data-preset-button]').first()).toBeVisible()
+  await expect(page.locator('[data-preset-window]')).toHaveCount(0)
+  const tiles = await grid.locator('[data-preset-button]').count()
   await toggle.click()
   await expect(grid).toHaveAttribute('data-preset-layout', 'list')
-  await expect(page.locator('[data-preset-list] [data-preset-button]')).toHaveCount(1)
+  await expect(page.locator('[data-preset-list] [data-preset-button]')).toHaveCount(tiles)
   await toggle.click()
   await expect(grid).toHaveAttribute('data-preset-layout', 'pages')
   await expect(page.locator('[data-preset-list]')).toHaveCount(0)
