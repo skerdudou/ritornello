@@ -12,6 +12,7 @@ import { RouterLink } from 'vue-router'
 import AddLanguageDialog from '../components/AddLanguageDialog.vue'
 import AlarmList from '../components/AlarmList.vue'
 import CoverCacheDetails from '../components/CoverCacheDetails.vue'
+import EqualizerCard from '../components/EqualizerCard.vue'
 import InstallablesDialog from '../components/InstallablesDialog.vue'
 import SourcesDialog from '../components/SourcesDialog.vue'
 import LanguageCard from '../components/LanguageCard.vue'
@@ -1325,6 +1326,7 @@ const SECTIONS = [
   { id: 'update', key: 'update_title' },
   { id: 'plugins', key: 'plugins_title' },
   { id: 'audio', key: 'audio_output' },
+  { id: 'equalizer', key: 'eq_title' },
   { id: 'display', key: 'display_card_title' },
   { id: 'startup', key: 'startup_title' },
   { id: 'alarms', key: 'alarms_title' },
@@ -1911,6 +1913,11 @@ function goTo(id: string) {
             <Button data-audio-change :disabled="audioUnavailable" @click="changeOutput">{{ t('save') }}</Button>
           </CardContent>
         </Card>
+      </section>
+
+      <!-- The equalizer loads and writes its own route: nothing here waits on it. -->
+      <section id="equalizer" class="scroll-mt-6">
+        <EqualizerCard />
       </section>
 
       <!-- Language and display: the owner's own three pairings ("language

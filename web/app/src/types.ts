@@ -241,6 +241,30 @@ export interface UpdatePayload {
 
 export interface AudioDevice { name: string; description: string }
 export interface AudioPayload { devices: AudioDevice[]; current: string | null }
+
+/** A preset the user saved: only the ten gains, never `enabled` nor `auto_preamp`. */
+export interface EqualizerUserPreset { name: string; gains: number[] }
+/**
+ * The stored equalizer, mirroring `crates/ritornello-core/src/equalizer.rs`'s
+ * `EqualizerSettings`. It is also the `PUT /api/equalizer` body, which is a
+ * full replacement: every field is required, unknown fields are refused.
+ * `preset` is `builtin:<id>`, `user:<name>` or `null`.
+ */
+export interface EqualizerSettings {
+  enabled: boolean
+  auto_preamp: boolean
+  gains: number[]
+  preset: string | null
+  user_presets: EqualizerUserPreset[]
+}
+/** A builtin preset, its name already translated by the core. */
+export interface EqualizerBuiltin { id: string; name: string; gains: number[] }
+/** `GET /api/equalizer`. */
+export interface EqualizerPayload {
+  settings: EqualizerSettings
+  bands_hz: number[]
+  builtins: EqualizerBuiltin[]
+}
 /**
  * One candidate language's measured completeness, mirroring
  * `crates/ritornello-core/src/status/locales.rs`'s `LanguageCompleteness`:

@@ -10,10 +10,14 @@ defineOptions({
   inheritAttrs: false,
 })
 
-// A single thumb, always: the project's two usages (progress, volume) are
-// scalar values. `py-[19px]`: 19 + 6 + 19 = 44 px of touch area around a 6 px
-// track — the minimum finger target, carried by the padding and not by the
-// track, which keeps its thinness.
+// A single thumb, always: the project's usages (progress, volume, equalizer
+// bands) are scalar values. `py-[19px]`: 19 + 6 + 19 = 44 px of touch area
+// around a 6 px track — the minimum finger target, carried by the padding and
+// not by the track, which keeps its thinness. `orientation="vertical"` (the
+// equalizer) turns the same 44 px sideways: the `data-[orientation=vertical]`
+// variants below, set by reka-ui on the root, the track and the range, so a
+// horizontal slider renders exactly as before. A vertical one takes its
+// height from the caller's class (`h-32`, ...).
 const props = defineProps<SliderRootProps & { class?: HTMLAttributes["class"] }>()
 const emits = defineEmits<SliderRootEmits>()
 const delegatedProps = reactiveOmit(props, "class")
@@ -42,11 +46,12 @@ const rootAttrs = computed(() => Object.fromEntries(
     v-bind="{ ...rootAttrs, ...forwarded }"
     :class="cn(
       'relative flex w-full touch-none select-none items-center py-[19px] data-[disabled]:opacity-50',
+      'data-[orientation=vertical]:w-auto data-[orientation=vertical]:flex-col data-[orientation=vertical]:px-[19px] data-[orientation=vertical]:py-0',
       props.class,
     )"
   >
-    <SliderTrack data-slot="slider-track" class="relative h-1.5 w-full grow overflow-hidden rounded-full bg-muted">
-      <SliderRange data-slot="slider-range" class="absolute h-full bg-primary" />
+    <SliderTrack data-slot="slider-track" class="relative h-1.5 w-full grow overflow-hidden rounded-full bg-muted data-[orientation=vertical]:h-full data-[orientation=vertical]:w-1.5">
+      <SliderRange data-slot="slider-range" class="absolute h-full bg-primary data-[orientation=vertical]:h-auto data-[orientation=vertical]:w-full" />
     </SliderTrack>
     <SliderThumb
       data-slot="slider-thumb"
