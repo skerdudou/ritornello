@@ -1,8 +1,10 @@
 import { mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { nextTick } from 'vue'
 import { resetCatalog, useCatalog } from '../composables/useCatalog'
 import type { PlayerPayload } from '../types'
 import PresetGrid from './PresetGrid.vue'
+import { LAYOUT_KEY, revealScrollTop } from './presetLayout'
 
 const state = (e: Partial<PlayerPayload>): PlayerPayload => ({
   source: 'radio', volume: 60, muted: false, standby: false, preset: null, preset_count: null,
@@ -13,7 +15,10 @@ const state = (e: Partial<PlayerPayload>): PlayerPayload => ({
 const NAMES: Record<number, string> = { 1: 'FIP', 2: 'France Inter' }
 // The shell's catalog is module-level state: load the two keys the card
 // renders with params, as App.vue does, so the test reads the real text.
-const CATALOG = { presets_label: 'Presets', presets_window: '{first}–{last} of {total}' }
+const CATALOG = {
+  presets_label: 'Presets', presets_window: '{first}–{last} of {total}',
+  presets_show_list: 'Show every preset in one list', presets_show_pages: 'Show the presets in pages of ten',
+}
 beforeEach(async () => {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(CATALOG), { status: 200 })))
   await useCatalog().reload()
@@ -133,5 +138,286 @@ describe('PresetGrid', () => {
     expect(w.findAll('[data-preset-button]')).toHaveLength(10)
     expect(w.find('[data-preset-prev]').exists()).toBe(false)
     expect(w.find('[data-preset-count]').exists()).toBe(false)
+  })
+})
+
+describe('layout', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    localStorage.clear()
+  })
+
+  const toggle = (w: ReturnType<typeof mounted>) => w.get('[data-preset-layout-toggle]')
+  const layoutOf = (w: ReturnType<typeof mounted>) => w.get('[data-preset-grid]').attributes('data-preset-layout')
+
+  it('shows the layout toggle even when everything fits on one page', () => {
+    const w = mounted({ preset_count: 10 })
+    expect(w.find('[data-preset-layout-toggle]').exists()).toBe(true)
+    expect(w.find('[data-preset-prev]').exists()).toBe(false)
+    expect(w.find('[data-preset-window]').exists()).toBe(false)
+  })
+
+  it('switches to a list of every preset, without arrows or window, and back', async () => {
+    const w = mounted({ preset_count: 23 })
+    await toggle(w).trigger('click')
+    expect(w.find('[data-preset-list]').exists()).toBe(true)
+    expect(w.findAll('[data-preset-button]')).toHaveLength(23)
+    expect(w.find('[data-preset-prev]').exists()).toBe(false)
+    expect(w.find('[data-preset-next]').exists()).toBe(false)
+    expect(w.find('[data-preset-window]').exists()).toBe(false)
+    expect(layoutOf(w)).toBe('list')
+
+    await toggle(w).trigger('click')
+    expect(w.find('[data-preset-list]').exists()).toBe(false)
+    expect(w.findAll('[data-preset-button]')).toHaveLength(10)
+    expect(w.find('[data-preset-prev]').exists()).toBe(true)
+    expect(w.find('[data-preset-next]').exists()).toBe(true)
+    expect(layoutOf(w)).toBe('pages')
+  })
+
+  it('remembers the layout for the next mount', async () => {
+    const w = mounted({ preset_count: 23 })
+    await toggle(w).trigger('click')
+    w.unmount()
+    const again = mounted({ preset_count: 23 })
+    expect(layoutOf(again)).toBe('list')
+    expect(localStorage.getItem(LAYOUT_KEY)).toBe('list')
+  })
+
+  it('starts in pages when storage is unavailable, and the toggle still works', async () => {
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('denied') })
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('denied') })
+    const w = mounted({ preset_count: 23 })
+    expect(layoutOf(w)).toBe('pages')
+    await toggle(w).trigger('click')
+    expect(layoutOf(w)).toBe('list')
+    expect(w.find('[data-preset-list]').exists()).toBe(true)
+  })
+
+  it('a stored list with ten presets or fewer shows them as a list', () => {
+    localStorage.setItem(LAYOUT_KEY, 'list')
+    const w = mounted({ preset_count: 8 })
+    expect(layoutOf(w)).toBe('list')
+    expect(w.get('[data-preset-list]').findAll('[data-preset-button]')).toHaveLength(8)
+  })
+
+  it('in list, the toggle offers the pages and the tile emits its number', async () => {
+    localStorage.setItem(LAYOUT_KEY, 'list')
+    const w = mounted({ preset_count: 23 })
+    expect(toggle(w).attributes('aria-label')).toBe('Show the presets in pages of ten')
+    await w.get('[data-preset-button="17"]').trigger('click')
+    expect(w.emitted('choose')).toEqual([[17]])
+  })
+
+  it('in pages, the toggle offers the list', () => {
+    const w = mounted({ preset_count: 23 })
+    expect(toggle(w).attributes('aria-label')).toBe('Show every preset in one list')
+  })
+
+  it('back to pages, shows the page of the active preset', async () => {
+    const w = mounted({ preset_count: 23, preset: 17 })
+    await toggle(w).trigger('click')
+    await w.setProps({ state: state({ preset_count: 23, preset: 4 }) })
+    await toggle(w).trigger('click')
+    expect(w.get('[data-preset-window]').text()).toBe('1–10 of 23')
+  })
+
+  // jsdom has no layout: give the frame and row 17 the geometry the
+  // computation reads, and back scrollTop with a map so the write is visible.
+  async function withFrameGeometry(run: (scrollIntoView: ReturnType<typeof vi.fn>) => Promise<void>) {
+    const proto = HTMLElement.prototype as unknown as Record<string, unknown>
+    // jsdom defines offsetTop/offsetHeight on this very prototype: keep the
+    // originals to put them back, rather than deleting them.
+    const own = (k: string) => Object.getOwnPropertyDescriptor(proto, k)
+    const originals = new Map(['clientHeight', 'scrollHeight', 'offsetTop', 'offsetHeight', 'scrollTop', 'scrollIntoView'].map((k) => [k, own(k)]))
+    const scrollIntoView = vi.fn()
+    proto.scrollIntoView = scrollIntoView
+    const tops = new WeakMap<object, number>()
+    const isFrame = (el: HTMLElement) => el.hasAttribute('data-preset-list')
+    const isRow = (el: HTMLElement) => el.getAttribute('data-preset-button') === '17'
+    Object.defineProperty(proto, 'clientHeight', { configurable: true, get(this: HTMLElement) { return isFrame(this) ? 200 : 0 } })
+    Object.defineProperty(proto, 'scrollHeight', { configurable: true, get(this: HTMLElement) { return isFrame(this) ? 1300 : 0 } })
+    Object.defineProperty(proto, 'offsetTop', { configurable: true, get(this: HTMLElement) { return isRow(this) ? 900 : 0 } })
+    Object.defineProperty(proto, 'offsetHeight', { configurable: true, get(this: HTMLElement) { return isRow(this) ? 48 : 0 } })
+    Object.defineProperty(proto, 'scrollTop', {
+      configurable: true,
+      get(this: HTMLElement) { return tops.get(this) ?? 0 },
+      set(this: HTMLElement, v: number) { tops.set(this, v) },
+    })
+    try {
+      await run(scrollIntoView)
+    } finally {
+      for (const [k, d] of originals) {
+        if (d) Object.defineProperty(proto, k, d)
+        else delete proto[k]
+      }
+    }
+  }
+
+  it('in list, scrolls the frame, not the page, to the active preset', async () => {
+    await withFrameGeometry(async (scrollIntoView) => {
+      const w = mounted({ preset_count: 23, preset: 17 })
+      await toggle(w).trigger('click')
+      await w.vm.$nextTick()
+      const frame = w.get('[data-preset-list]').element as HTMLElement
+      expect(frame.scrollTop).toBe(revealScrollTop(0, 200, 900, 48, 1300))
+      expect(frame.scrollTop).toBe(900 + 24 - 100)
+      expect(scrollIntoView).not.toHaveBeenCalled()
+    })
+  })
+
+  it('mounted in list with a preset already playing, reveals it at once', async () => {
+    // The reveal watcher's immediate run happens during setup, before the
+    // frame exists: the reveal at mount has to come from onMounted.
+    await withFrameGeometry(async () => {
+      localStorage.setItem(LAYOUT_KEY, 'list')
+      const w = mounted({ preset_count: 23, preset: 17 })
+      await w.vm.$nextTick()
+      const frame = w.get('[data-preset-list]').element as HTMLElement
+      expect(frame.scrollTop).toBe(900 + 24 - 100)
+    })
+  })
+})
+
+describe('swipe', () => {
+  afterEach(() => {
+    localStorage.clear()
+  })
+
+  // jsdom does not synthesize the click that ends a touch gesture: dispatch it.
+  async function swipe(el: Element, from: [number, number], to: [number, number], pointerType = 'touch') {
+    el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, isPrimary: true, pointerId: 1, pointerType, clientX: from[0], clientY: from[1] }))
+    el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, isPrimary: true, pointerId: 1, pointerType, clientX: to[0], clientY: to[1] }))
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await nextTick()
+  }
+  const windowOf = (w: ReturnType<typeof mounted>) => w.get('[data-preset-window]').text()
+
+  it('a left swipe shows the next page, a right swipe the previous one', async () => {
+    const w = mounted({ preset_count: 23 })
+    const grid = w.get('[data-preset-grid]').element
+    await swipe(grid, [200, 100], [100, 110])
+    expect(windowOf(w)).toBe('11–20 of 23')
+    await swipe(grid, [200, 100], [100, 110])
+    expect(windowOf(w)).toBe('21–23 of 23')
+    await swipe(grid, [200, 100], [100, 110])
+    expect(windowOf(w)).toBe('21–23 of 23')
+    await swipe(grid, [100, 100], [200, 100])
+    expect(windowOf(w)).toBe('11–20 of 23')
+  })
+
+  it('a swipe starting on a tile turns the page without choosing the tile', async () => {
+    const w = mounted({ preset_count: 23 })
+    await swipe(w.get('[data-preset-button="3"]').element, [200, 100], [100, 110])
+    expect(windowOf(w)).toBe('11–20 of 23')
+    expect(w.emitted('choose')).toBeUndefined()
+  })
+
+  it('a plain tap on a tile still chooses it', async () => {
+    const w = mounted({ preset_count: 23 })
+    await swipe(w.get('[data-preset-button="3"]').element, [50, 50], [52, 51])
+    expect(w.emitted('choose')).toEqual([[3]])
+    expect(windowOf(w)).toBe('1–10 of 23')
+  })
+
+  // Mobile browsers usually send no click after a drag past the tap slop: the
+  // swallow armed by the swipe must not eat whatever comes next.
+  const touch = (type: string, id: number, x: number, y: number, pointerType = 'touch') =>
+    new PointerEvent(type, { bubbles: true, isPrimary: true, pointerId: id, pointerType, clientX: x, clientY: y })
+  const swipeWithoutClick = async (grid: Element) => {
+    grid.dispatchEvent(touch('pointerdown', 1, 200, 100))
+    const up = touch('pointerup', 1, 100, 110)
+    grid.dispatchEvent(up)
+    await nextTick()
+    return up
+  }
+
+  it('a touch tap right after a swipe that sent no click still chooses the tile', async () => {
+    const w = mounted({ preset_count: 23 })
+    await swipeWithoutClick(w.get('[data-preset-grid]').element)
+    expect(windowOf(w)).toBe('11–20 of 23')
+    await swipe(w.get('[data-preset-button="13"]').element, [50, 50], [52, 51])
+    expect(w.emitted('choose')).toEqual([[13]])
+  })
+
+  it('a mouse click after a swipe that sent no click still chooses the tile', async () => {
+    const w = mounted({ preset_count: 23 })
+    await swipeWithoutClick(w.get('[data-preset-grid]').element)
+    const tile = w.get('[data-preset-button="13"]').element
+    tile.dispatchEvent(touch('pointerdown', 2, 50, 50, 'mouse'))
+    tile.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await nextTick()
+    expect(w.emitted('choose')).toEqual([[13]])
+  })
+
+  it('a keyboard activation long after a swipe that sent no click still chooses the tile', async () => {
+    const w = mounted({ preset_count: 23 })
+    const up = await swipeWithoutClick(w.get('[data-preset-grid]').element)
+    // No pointerdown at all (Enter or Space on a focused tile): only the time
+    // since the swipe tells it from the click that ends one.
+    const click = new MouseEvent('click', { bubbles: true })
+    Object.defineProperty(click, 'timeStamp', { value: up.timeStamp + 5000 })
+    w.get('[data-preset-button="13"]').element.dispatchEvent(click)
+    await nextTick()
+    expect(w.emitted('choose')).toEqual([[13]])
+  })
+
+  it('a mostly vertical drag does not turn the page', async () => {
+    const w = mounted({ preset_count: 23 })
+    await swipe(w.get('[data-preset-grid]').element, [200, 100], [150, 300])
+    expect(windowOf(w)).toBe('1–10 of 23')
+  })
+
+  it('a cancelled gesture does not turn the page', async () => {
+    const w = mounted({ preset_count: 23 })
+    const grid = w.get('[data-preset-grid]').element
+    grid.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, isPrimary: true, pointerId: 1, pointerType: 'touch', clientX: 200, clientY: 100 }))
+    grid.dispatchEvent(new PointerEvent('pointercancel', { bubbles: true, isPrimary: true, pointerId: 1, pointerType: 'touch' }))
+    grid.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, isPrimary: true, pointerId: 1, pointerType: 'touch', clientX: 100, clientY: 100 }))
+    await nextTick()
+    expect(windowOf(w)).toBe('1–10 of 23')
+  })
+
+  it('a second finger (non-primary pointer) does not start a swipe', async () => {
+    const w = mounted({ preset_count: 23 })
+    const grid = w.get('[data-preset-grid]').element
+    grid.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, isPrimary: false, pointerId: 2, pointerType: 'touch', clientX: 200, clientY: 100 }))
+    grid.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, isPrimary: false, pointerId: 2, pointerType: 'touch', clientX: 100, clientY: 100 }))
+    await nextTick()
+    expect(windowOf(w)).toBe('1–10 of 23')
+  })
+
+  it('a new primary pointerdown replaces a start whose up never arrived', async () => {
+    // A pen lifted off the card sends no pointerup to it: the next gesture,
+    // another pointer id, must not be judged against the stale origin.
+    const w = mounted({ preset_count: 23 })
+    const grid = w.get('[data-preset-grid]').element
+    grid.dispatchEvent(touch('pointerdown', 1, 10, 10, 'pen'))
+    await swipe(grid, [200, 100], [100, 110], 'touch')
+    expect(windowOf(w)).toBe('11–20 of 23')
+  })
+
+  it('a mouse drag does not turn the page', async () => {
+    const w = mounted({ preset_count: 23 })
+    await swipe(w.get('[data-preset-grid]').element, [200, 100], [100, 110], 'mouse')
+    expect(windowOf(w)).toBe('1–10 of 23')
+  })
+
+  it('in list mode a swipe does nothing', async () => {
+    const w = mounted({ preset_count: 23 })
+    await w.get('[data-preset-layout-toggle]').trigger('click')
+    await swipe(w.get('[data-preset-grid]').element, [200, 100], [100, 110])
+    expect(w.get('[data-preset-grid]').attributes('data-preset-layout')).toBe('list')
+    expect(w.emitted('choose')).toBeUndefined()
+    // Back to pages: still the first page, the swipe turned nothing behind the list.
+    await w.get('[data-preset-layout-toggle]').trigger('click')
+    expect(windowOf(w)).toBe('1–10 of 23')
+  })
+
+  it('the card lets the page scroll vertically in pages mode', async () => {
+    const w = mounted({ preset_count: 23 })
+    expect(w.get('[data-preset-grid]').attributes('style')).toContain('touch-action: pan-y pinch-zoom')
+    await w.get('[data-preset-layout-toggle]').trigger('click')
+    expect(w.get('[data-preset-grid]').attributes('style') ?? '').not.toContain('touch-action')
   })
 })

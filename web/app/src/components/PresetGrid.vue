@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { Button, Card, CardAction, CardContent, CardHeader, CardTitle } from '@ritornello/ui'
-import { ChevronLeftIcon, ChevronRightIcon } from '@radix-icons/vue'
-import { computed, ref, watch } from 'vue'
+import { ChevronLeftIcon, ChevronRightIcon, ListBulletIcon, ViewGridIcon } from '@radix-icons/vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useCatalog } from '../composables/useCatalog'
+import { classifySwipe, loadPresetLayout, revealScrollTop, savePresetLayout, type PresetLayout } from './presetLayout'
 import type { PlayerPayload } from '../types'
 import { unavailable } from '../views/remoteCommands'
 
@@ -81,34 +82,143 @@ watch([count, activePreset], (_, [previousCount]) => {
   if (count.value !== previousCount) page.value = 0
 }, { immediate: true })
 
+// Pages of ten (default) or one scrolling list of every preset, remembered per
+// browser (see presetLayout.ts). The toggle is always offered, whatever the
+// count: the list also suits a short list.
+const layout = ref<PresetLayout>(loadPresetLayout())
+const listMode = computed(() => layout.value === 'list')
+function toggleLayout() {
+  layout.value = layout.value === 'list' ? 'pages' : 'list'
+  savePresetLayout(layout.value)
+}
+
+// Every preset, for the list: 1..10 without a declared count (same fallback as
+// the grid), 1..count otherwise.
+const allPresets = computed(() => {
+  const c = count.value ?? 10
+  return Array.from({ length: c }, (_, i) => i + 1)
+})
+
+// In the list, keep the active preset visible by scrolling the frame itself,
+// never `scrollIntoView`: that would also scroll the page, which jumps under
+// the thumb on a phone. (No `window.*` here: `window` is the computed above.)
+const listFrame = ref<HTMLElement | null>(null)
+function revealActive() {
+  const frame = listFrame.value
+  const n = activePreset.value
+  if (!listMode.value || n === null || !frame) return
+  const row = frame.querySelector<HTMLElement>(`[data-preset-button="${n}"]`)
+  if (!row) return
+  frame.scrollTop = revealScrollTop(frame.scrollTop, frame.clientHeight, row.offsetTop, row.offsetHeight, frame.scrollHeight)
+}
+watch([listMode, activePreset], revealActive, { flush: 'post' })
+// Not `immediate`: that runs during setup, before the frame exists.
+onMounted(revealActive)
+
+// A horizontal swipe on the card turns the page, pages mode only (see
+// classifySwipe). Touch and pen only: a mouse drag is a text selection, not a
+// gesture. `touch-action: pan-y pinch-zoom` on the card keeps the browser's
+// vertical page scroll and the two-finger zoom the page allows; when either
+// takes over (a second finger too) it fires `pointercancel`, which aborts the
+// swipe. Hand-written Pointer Events: no second library for ten lines.
+let start: { id: number; x: number; y: number } | null = null
+// The click that ends a swipe arrives right after its pointerup; many mobile
+// browsers send none at all after a drag, so the swallow expires rather than
+// waiting for "the next click", which would then be an unrelated one.
+const SWALLOW_WINDOW_MS = 500
+let swallowUntil = 0
+
+function onPointerDown(e: PointerEvent) {
+  // Any new gesture, whatever the pointer, ends the swallow.
+  swallowUntil = 0
+  if (e.pointerType !== 'touch' && e.pointerType !== 'pen') return
+  // A second finger is ignored; a new primary pointer always starts afresh,
+  // so a start whose up never reached the card (a pen lifted off it) cannot
+  // go stale.
+  if (listMode.value || !e.isPrimary) return
+  start = { id: e.pointerId, x: e.clientX, y: e.clientY }
+}
+function onPointerUp(e: PointerEvent) {
+  if (!start || start.id !== e.pointerId) return
+  const direction = classifySwipe(e.clientX - start.x, e.clientY - start.y)
+  start = null
+  if (!direction) return
+  if (direction === 'next') nextPage()
+  else previousPage()
+  swallowUntil = e.timeStamp + SWALLOW_WINDOW_MS
+}
+function onPointerCancel() {
+  start = null
+}
+// The browser still sends a click when a swipe ends on the element it started
+// on: without this, swiping from a tile would also choose that preset and
+// change what is playing.
+function onClickCapture(e: Event) {
+  const swallow = swallowUntil !== 0 && e.timeStamp <= swallowUntil
+  swallowUntil = 0
+  if (!swallow) return
+  e.preventDefault()
+  e.stopPropagation()
+}
+
 // The page arrows stay usable in standby on purpose: paging is local to the
 // page and sends nothing.
 const dimmed = computed(() => unavailable('Select', props.state))
 </script>
 
 <template>
-  <Card data-preset-grid>
+  <Card
+    data-preset-grid
+    :data-preset-layout="listMode ? 'list' : 'pages'"
+    :style="listMode ? undefined : { touchAction: 'pan-y pinch-zoom' }"
+    @pointerdown="onPointerDown"
+    @pointerup="onPointerUp"
+    @pointercancel="onPointerCancel"
+    @click.capture="onClickCapture"
+  >
     <CardHeader class="items-center">
       <CardTitle>{{ t('presets_label') }}</CardTitle>
-      <!-- The position only when there are pages: a lone count read as a
+      <!-- The layout toggle is always there; the position and the arrows only
+           when there are pages (and not in the list): a lone count read as a
            stray number under the title. Same row as the title, as the
            Player card holds its keys. -->
-      <CardAction v-if="paginationVisible" class="flex items-center gap-2 self-center">
-        <Button data-preset-prev variant="outline" size="icon-sm" :disabled="page === 0" :aria-label="t('presets_prev_page')" @click="previousPage">
-          <ChevronLeftIcon class="size-4" />
-        </Button>
-        <span class="text-xs tabular-nums text-muted-foreground" data-preset-window>{{ window }}</span>
-        <Button data-preset-next variant="outline" size="icon-sm" :disabled="page === lastPage" :aria-label="t('presets_next_page')" @click="nextPage">
-          <ChevronRightIcon class="size-4" />
+      <CardAction class="flex items-center gap-2 self-center">
+        <template v-if="paginationVisible && !listMode">
+          <Button data-preset-prev variant="outline" size="icon-sm" :disabled="page === 0" :aria-label="t('presets_prev_page')" @click="previousPage">
+            <ChevronLeftIcon class="size-4" />
+          </Button>
+          <span class="text-xs tabular-nums text-muted-foreground" data-preset-window>{{ window }}</span>
+          <Button data-preset-next variant="outline" size="icon-sm" :disabled="page === lastPage" :aria-label="t('presets_next_page')" @click="nextPage">
+            <ChevronRightIcon class="size-4" />
+          </Button>
+        </template>
+        <!-- The icon names the layout the button switches to. -->
+        <Button
+          data-preset-layout-toggle
+          variant="outline"
+          size="icon-sm"
+          :aria-label="listMode ? t('presets_show_pages') : t('presets_show_list')"
+          :title="listMode ? t('presets_show_pages') : t('presets_show_list')"
+          @click="toggleLayout"
+        >
+          <ViewGridIcon v-if="listMode" class="size-4" />
+          <ListBulletIcon v-else class="size-4" />
         </Button>
       </CardAction>
     </CardHeader>
     <CardContent>
-      <!-- One tile = number + name. Two columns: enough for a station name,
-           and the same grid on the phone and in the half-width of the PC. -->
-      <div class="grid grid-cols-2 gap-2">
+      <!-- One tile = number + name. Pages: two columns, enough for a station
+           name, and the same grid on the phone and in the half-width of the PC.
+           List: one column in a scrolling frame, every preset. -->
+      <div
+        ref="listFrame"
+        :data-preset-list="listMode ? '' : undefined"
+        :class="listMode
+          ? 'relative grid max-h-[min(60vh,32rem)] grid-cols-1 gap-2 overflow-y-auto p-1 overscroll-contain'
+          : 'grid grid-cols-2 gap-2'"
+      >
         <Button
-          v-for="n in presets"
+          v-for="n in listMode ? allPresets : presets"
           :key="n"
           :data-preset-button="n"
           :data-preset-active="state?.preset === n ? 'true' : undefined"

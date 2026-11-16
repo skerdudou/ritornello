@@ -328,6 +328,8 @@ system_unit_minute = "min"
 presets_label = "Preselezioni"
 presets_prev_page = "Preselezioni precedenti"
 presets_next_page = "Preselezioni successive"
+presets_show_list = "Mostra tutte le preselezioni in un elenco"
+presets_show_pages = "Mostra le preselezioni in pagine da dieci"
 presets_window = "{first}–{last} di {total}"
 
 # HTTP refusals (422/502/500)

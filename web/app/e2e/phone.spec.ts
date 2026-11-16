@@ -170,3 +170,66 @@ test('on a phone: the Plugins tab leads to the list, which leads to the plugin p
   await page.locator('[data-plugins-list] a').first().click()
   await expect(page).toHaveURL(/\/plugins\/radio\/$/)
 })
+
+/**
+ * The presets card on a phone: the layout toggle is always there, and a
+ * vertical finger drag over the card still scrolls the page.
+ *
+ * The second half is the point only a real browser can make: jsdom has no
+ * `touch-action` and no scrolling, so the unit tests can pin the swipe's
+ * arithmetic but never that it leaves the vertical gesture to the page. The
+ * gesture goes through CDP touch events (a real touch pointer, which
+ * `page.mouse` is not). The harness declares one station (an earlier spec in
+ * the same run may add another), so there is no second page to swipe to.
+ */
+test('on a phone: the presets card toggles list and pages, and a vertical drag over it scrolls the page', async ({ page }) => {
+  await page.setViewportSize({ width: 412, height: 500 })
+  await page.goto('/')
+  const grid = page.locator('[data-preset-grid]')
+  await expect(grid).toHaveAttribute('data-preset-layout', 'pages')
+  const toggle = page.locator('[data-preset-layout-toggle]')
+  await expect(toggle).toHaveCount(1)
+  // The station count is shared server state: an earlier spec in the same run
+  // may have added one. Compare the two layouts with each other rather than
+  // with the fixture. With no page window (ten presets or fewer) the list
+  // shows exactly the tiles the page showed.
+  await expect(grid.locator('[data-preset-button]').first()).toBeVisible()
+  await expect(page.locator('[data-preset-window]')).toHaveCount(0)
+  const tiles = await grid.locator('[data-preset-button]').count()
+  await toggle.click()
+  await expect(grid).toHaveAttribute('data-preset-layout', 'list')
+  await expect(page.locator('[data-preset-list] [data-preset-button]')).toHaveCount(tiles)
+  await toggle.click()
+  await expect(grid).toHaveAttribute('data-preset-layout', 'pages')
+  await expect(page.locator('[data-preset-list]')).toHaveCount(0)
+
+  // Bring the card in the middle of the viewport, so the finger lands on it
+  // (the player card above it is taller than the viewport), while the page
+  // still has room to scroll below.
+  // The page height settles as the player card fills in: wait for it, or the
+  // scroll position is clamped under the finger.
+  await expect.poll(async () => {
+    const h = await page.evaluate(() => document.documentElement.scrollHeight)
+    await page.waitForTimeout(300)
+    return h === (await page.evaluate(() => document.documentElement.scrollHeight))
+  }).toBe(true)
+  await page.evaluate(() => {
+    const top = document.querySelector('[data-preset-grid]')!.getBoundingClientRect().top + window.scrollY
+    window.scrollTo(0, Math.max(0, top - 250))
+  })
+  const box = await grid.boundingBox()
+  if (!box) throw new Error('presets card not visible')
+  const x = box.x + box.width / 2
+  const y = box.y + Math.min(box.height / 2, 60)
+  // The drag must start on the card, and the page must have room left to scroll.
+  expect(await page.evaluate(([px, py]) => document.elementFromPoint(px!, py!)?.closest('[data-preset-grid]') != null, [x, y])).toBe(true)
+  expect(await page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight - window.scrollY)).toBeGreaterThan(0)
+  const before = await page.evaluate(() => window.scrollY)
+  const cdp = await page.context().newCDPSession(page)
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] })
+  for (const step of [1, 2, 3]) {
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x, y: y - (200 * step) / 3 }] })
+  }
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(before)
+})

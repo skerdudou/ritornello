@@ -628,6 +628,28 @@ page" guarantee. A plain stop does not move the page: the count survives
 a stop, and so does the page. Paging by hand survives every frame that
 changes neither the preset nor the count.
 
+**Two ways to lay the card out.** A button at the end of the card's header
+switches between the pages and a **list**; it is always there, whatever the
+number of presets. The list shows every preset in one column inside a frame
+that scrolls by itself (it never exceeds 60% of the viewport height or 32 rem);
+it brings the playing preset into view by moving **that frame only**, never the
+page, and leaves it where it is when the row is already fully visible. In the
+list the arrows and the "11-20 of 23" window are hidden: they belong to the
+pages, which stay 1-10, 11-20, ... tied to the remote's keypad and its `+10`
+key. The choice is remembered per browser in `localStorage` under
+`ritornello.presets.layout` (`pages` or `list`; anything else, or a storage
+that throws, reads as `pages`), never on the server.
+
+**Swiping turns the page.** On a touch screen or with a pen, in the paged
+layout only, a horizontal swipe over the card does what the arrows do: left is
+the next page, right the previous one, with no wrap at either end. It counts
+from 50 px of travel when the move is at least twice as long horizontally as
+vertically. The card declares `touch-action: pan-y pinch-zoom`, so the browser
+keeps vertical scrolling and pinch-zoom for itself (and cancels the gesture,
+which aborts the swipe) while horizontal moves reach the card. A swipe never
+selects the tile it started on: a click arriving within 500 ms of its end is
+swallowed. A mouse does not swipe; it has the arrows.
+
 ### Navigation
 
 **From `md` up**, the top bar carries the brand, a link to the config
