@@ -4150,8 +4150,14 @@ function and the container `tag` (`tbody` for a table), and its default slot
 receives `item`, `index` and `itemAttrs`, which the slot must spread on the
 row's root element. The page puts a `ReorderHandle` in each row: **the handle
 is the only grab**, so a finger anywhere else still scrolls the page. The list
-reports a drop through an `onMove(from, to)` prop (positions among the
-reorderable items, in the parent's `items`) that returns a promise. **The
+reports a drop through an `onMove(from, to, item)` prop that returns a
+promise: `from` and `to` are positions among the reorderable items of the list
+as it was when the drag began, and `item` is the row the finger held, taken
+from that same list. Name the moved row by `item`, not by `items[from]`: a
+poll that changed `items` during the drag shifts the latter. A `reorderable`
+predicate limits the grab to some rows (only those are marked and get a
+place to drop, and the positions count those rows only), and `disabled`
+locks every handle, for instance while the page is busy with a row. **The
 list never mutates `items`:** it shows the dropped order until that promise
 settles, then the parent's own list, so a refused move shows the old order
 again with nothing to restore; while a drop awaits its answer no second drag
