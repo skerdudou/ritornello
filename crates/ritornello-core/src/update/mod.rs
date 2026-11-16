@@ -15,6 +15,7 @@ pub mod release;
 pub mod archive;
 pub mod catalogue;
 pub mod download;
+pub mod embedded;
 pub mod state;
 pub mod schedule;
 pub mod placed;
