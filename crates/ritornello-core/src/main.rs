@@ -9,6 +9,7 @@ mod i18n;
 mod metadata;
 mod docs_map;
 mod equalizer;
+mod lock_sound;
 mod langpack;
 mod lyrics;
 mod packaging_manifest;
