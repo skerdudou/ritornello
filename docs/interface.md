@@ -1475,8 +1475,11 @@ Backed by `GET`/`PUT /api/equalizer`. `GET` answers the settings
 (`enabled`, `auto_preamp`, `gains`, `preset`, `user_presets`), the band
 frequencies and the built-ins. `PUT` is a **full replacement**: the body is
 strict (every field required, an unknown one refused, so a body without
-`user_presets` cannot wipe them) and a refusal is a `422` whose `error` is
-already translated. The route never touches mpv: it writes the shared copy
+`user_presets` cannot wipe them). A body that parses but does not validate
+(a missing or mistyped field, a gain out of range, a preset too many) is
+refused with a `422` whose `error` is already translated; a body that is not
+JSON at all, or not sent as `application/json`, gets the framework's own
+`400`/`415`, untranslated. The route never touches mpv: it writes the shared copy
 and hands the change to the core's loop. The settings live in `state.json`
 (`equalizer`), read leniently as a whole: a block that does not pass
 validation is replaced by the defaults, and nothing else in the file is

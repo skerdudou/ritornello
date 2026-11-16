@@ -1488,7 +1488,15 @@ ffmpeg 6.1.1:
 - a per-band `af-command` does not click, while a `set_property af` during
   playback does;
 - the gains set by `af-command` are lost at every new file, which is why the
-  core rewrites the chain on `start-file`;
+  core rewrites the chain on `start-file` when the setting changed since it
+  was last written; an idle mpv refuses every `af-command`, so a change made
+  while nothing plays waits for that rewrite;
+- the preamp ramp — steps of at most 1 dB, one every 20 ms — was judged
+  click-free on WSL only, never heard on the Pi's output;
+- whether changing the audio output keeps the live gains is unknown: mpv may
+  rebuild the chain from `af` when it reloads the output, so the core rewrites
+  the chain after every output change while the equalizer is on — a rewrite
+  that the output change's own cut hides, but whose need nobody has observed;
 - the full chain cost about +3 % of one core on WSL. **That is not measured
   on the Pi 2 B (mpv 0.40)**, where it may be 10 to 20 times more, and the
   Audio dropouts section applies;
