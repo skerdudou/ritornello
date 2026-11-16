@@ -10,7 +10,11 @@
  * while a `PUT` is in flight is sent after it, never alongside, so the core
  * can never apply an older state last. A refusal shows the core's message and
  * reloads what the core holds, rather than leaving a state on screen that
- * nothing stored.
+ * nothing stored. The reload is the last word: the write lock is held until
+ * it lands, and only then are the timer and the pending write dropped — a
+ * change made meanwhile is lost with the refused state rather than writing
+ * that state again on top of the reload (a timer may well fire before a slow
+ * `GET` answers).
  *
  * "Custom" is not stored: it is shown when no preset is selected **or** when
  * the gains no longer match the selected preset's. `preset` itself is left as
@@ -89,15 +93,17 @@ async function flush() {
   }
   inFlight = true
   const err = await api.put('/api/equalizer', structuredClone(toRaw(state.value)))
-  inFlight = false
   if (err) {
-    // What follows the refused write is moot: the reload replaces it.
-    pending = false
-    cancelTimer()
     toast.error(err)
+    // Still "in flight" while reloading: a flush meanwhile only marks
+    // `pending`, dropped below once the core's state is back on screen.
     await load()
+    cancelTimer()
+    pending = false
+    inFlight = false
     return
   }
+  inFlight = false
   if (pending) {
     pending = false
     await flush()
@@ -235,13 +241,25 @@ function save(n: string) {
 
 const deletable = computed(() => currentPreset.value?.startsWith('user:') ?? false)
 const deleting = ref(false)
+/**
+ * The user preset the confirmation was opened on, frozen: the list's label
+ * turns to "Custom" as soon as the deletion lands, and the closing dialog
+ * must not read "Delete the preset “Custom”?".
+ */
+const deleteName = ref('')
+
+function openDelete() {
+  const key = currentPreset.value
+  if (!key?.startsWith('user:')) return
+  deleteName.value = key.slice('user:'.length)
+  deleting.value = true
+}
 
 function confirmDelete() {
   const s = state.value
-  const key = currentPreset.value
+  const n = deleteName.value
   deleting.value = false
-  if (!s || !key?.startsWith('user:')) return
-  const n = key.slice('user:'.length)
+  if (!s || !s.user_presets.some((p) => p.name === n)) return
   s.user_presets = s.user_presets.filter((p) => p.name !== n)
   s.preset = null
   void flush()
@@ -286,7 +304,7 @@ function confirmDelete() {
           </SelectContent>
         </Select>
         <Button variant="outline" data-eq-save @click="openSave">{{ t('eq_save_preset') }}</Button>
-        <Button variant="outline" data-eq-delete :disabled="!deletable" @click="deleting = true">
+        <Button variant="outline" data-eq-delete :disabled="!deletable" @click="openDelete">
           {{ t('eq_delete_preset') }}
         </Button>
         <Button variant="outline" data-eq-flat @click="resetFlat">{{ t('eq_reset_flat') }}</Button>
@@ -299,7 +317,6 @@ function confirmDelete() {
             v-for="(hz, i) in bandsHz" :key="hz"
             class="flex w-11 flex-col items-center gap-1"
           >
-            <span data-eq-band-value class="text-xs tabular-nums">{{ signed(state.gains[i] ?? 0) }}</span>
             <Slider
               class="h-36"
               orientation="vertical"
@@ -310,6 +327,7 @@ function confirmDelete() {
               @update:model-value="(v: number[] | undefined) => setGain(i, v)"
             />
             <span data-eq-band-label class="text-xs text-muted-foreground">{{ bandLabel(hz) }}</span>
+            <span data-eq-band-value class="text-xs tabular-nums">{{ signed(state.gains[i] ?? 0) }}</span>
           </div>
         </div>
       </div>
@@ -323,8 +341,7 @@ function confirmDelete() {
   <Dialog :open="naming" @update:open="(v: boolean) => { naming = v }">
     <DialogContent data-eq-name-dialog>
       <DialogHeader>
-        <DialogTitle>{{ t('eq_save_preset') }}</DialogTitle>
-        <DialogDescription>{{ t('eq_preset_name') }}</DialogDescription>
+        <DialogTitle>{{ t('eq_preset_name') }}</DialogTitle>
       </DialogHeader>
       <form class="flex flex-col gap-3" @submit.prevent="submitName">
         <Input
@@ -339,7 +356,7 @@ function confirmDelete() {
             v-if="overwriting !== null" type="button" variant="destructive" data-eq-overwrite-confirm
             @click="save(trimmedName)"
           >
-            {{ t('save') }}
+            {{ t('eq_overwrite') }}
           </Button>
           <Button v-else type="submit" data-eq-name-submit :disabled="trimmedName === ''">{{ t('save') }}</Button>
         </div>
@@ -352,7 +369,7 @@ function confirmDelete() {
       <DialogHeader>
         <DialogTitle>{{ t('eq_delete_preset') }}</DialogTitle>
         <DialogDescription>
-          {{ t('eq_delete_confirm', { name: presetLabel }) }}
+          {{ t('eq_delete_confirm', { name: deleteName }) }}
         </DialogDescription>
       </DialogHeader>
       <div class="flex justify-end">

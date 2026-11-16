@@ -1,7 +1,7 @@
 import { Select, SelectItem, Slider, Switch, toast } from '@ritornello/ui'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { resetCatalog } from '../composables/useCatalog'
+import { resetCatalog, useCatalog } from '../composables/useCatalog'
 import type { EqualizerPayload, EqualizerSettings } from '../types'
 import EqualizerCard from './EqualizerCard.vue'
 
@@ -56,6 +56,11 @@ function payload(s: EqualizerSettings = settings()): EqualizerPayload {
 let wrapper: VueWrapper | null = null
 let puts: unknown[] = []
 let gets = 0
+/** How long the fake core takes to answer a `GET` (through `setTimeout`, so fake timers drive it). */
+let getDelayMs = 0
+
+/** Loaded only by the tests that read an interpolated sentence. */
+const CATALOG = { eq_delete_confirm: 'Delete the preset “{name}”?' }
 
 afterEach(() => {
   wrapper?.unmount()
@@ -69,6 +74,7 @@ afterEach(() => {
 beforeEach(() => {
   puts = []
   gets = 0
+  getDelayMs = 0
   vi.mocked(toast.error).mockClear()
 })
 
@@ -81,13 +87,16 @@ function serve(
   put: () => Promise<Response> | Response = () => new Response(null, { status: 204 }),
 ) {
   vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+    if (url === '/api/i18n') return new Response(JSON.stringify(CATALOG), { status: 200 })
     expect(url).toBe('/api/equalizer')
     if (init?.method === 'PUT') {
       puts.push(JSON.parse(String(init.body)))
       return put()
     }
     gets += 1
-    return new Response(JSON.stringify(served()), { status: 200 })
+    const body = JSON.stringify(served())
+    if (getDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, getDelayMs))
+    return new Response(body, { status: 200 })
   }))
 }
 
@@ -141,11 +150,24 @@ describe('EqualizerCard', () => {
     // Builtins first, in the order received, then the user's.
     expect(presetSelect(w).findAllComponents(SelectItem).map((i) => i.props('value')))
       .toEqual(['builtin:flat', 'builtin:pop', 'builtin:rock', 'user:Evening'])
-    // Signed values under the sliders.
+    // Signed values, under each slider.
     await moveSlider(w, 0, 3)
     await moveSlider(w, 1, -4)
     expect(w.findAll('[data-eq-band-value]').slice(0, 3).map((e) => e.text()))
       .toEqual(['+3', '-4', '0'])
+  })
+
+  it('each band reads top to bottom: slider, frequency, value', async () => {
+    const w = await mountCard()
+    const column = w.findAll('[data-eq-band-label]')[0]!.element.parentElement!
+    const order = [...column.children].map((c) => {
+      const e = c as HTMLElement
+      if (e.dataset.slot === 'slider') return 'slider'
+      if ('eqBandLabel' in e.dataset) return 'frequency'
+      if ('eqBandValue' in e.dataset) return 'value'
+      return 'other'
+    })
+    expect(order).toEqual(['slider', 'frequency', 'value'])
   })
 
   it('picking a builtin copies its gains and puts once after 300 ms', async () => {
@@ -228,6 +250,24 @@ describe('EqualizerCard', () => {
     expect(w.get('[data-eq-delete]').attributes('disabled')).toBeDefined()
   })
 
+  it('the delete confirmation names the preset it was opened on', async () => {
+    serve(() => payload(settings({ gains: [...EVENING], preset: 'user:Evening' })))
+    await useCatalog().reload()
+    const w = await mountCard()
+    await w.get('[data-eq-delete]').trigger('click')
+    await flushPromises()
+    const description = () => inBody('[data-eq-delete-dialog]')!.textContent
+    expect(description()).toContain('Delete the preset “Evening”?')
+    // Whatever turns the list to "Custom" meanwhile (here a band moved, as
+    // the confirmation itself does once it lands), the sentence keeps the
+    // name the user confirmed, and that is the preset deleted.
+    await moveSlider(w, 0, 9)
+    expect(presetLabel(w)).toBe('eq_custom')
+    expect(description()).toContain('Delete the preset “Evening”?')
+    await click('[data-eq-delete-confirm]')
+    expect(puts.at(-1)).toMatchObject({ preset: null, user_presets: [] })
+  })
+
   it('delete is offered only on a selected user preset', async () => {
     const w = await mountCard(payload(settings({ gains: [...ROCK], preset: 'builtin:rock' })))
     expect(w.get('[data-eq-delete]').attributes('disabled')).toBeDefined()
@@ -253,6 +293,26 @@ describe('EqualizerCard', () => {
       user_presets: [{ name: 'evening', gains: ROCK }],
     }])
     expect(presetLabel(w)).toBe('evening')
+  })
+
+  it('editing the name withdraws the overwrite prompt', async () => {
+    const w = await mountCard()
+    await w.get('[data-eq-save]').trigger('click')
+    await flushPromises()
+    const input = inBody<HTMLInputElement>('[data-eq-name]')!
+    input.value = 'Evening'
+    input.dispatchEvent(new Event('input'))
+    await flushPromises()
+    await click('[data-eq-name-submit]')
+    expect(inBody('[data-eq-overwrite]')).not.toBeNull()
+    expect(inBody('[data-eq-overwrite-confirm]')!.textContent!.trim()).toBe('eq_overwrite')
+    input.value = 'Evening 2'
+    input.dispatchEvent(new Event('input'))
+    await flushPromises()
+    expect(inBody('[data-eq-overwrite]')).toBeNull()
+    expect(inBody('[data-eq-overwrite-confirm]')).toBeNull()
+    expect(inBody('[data-eq-name-submit]')).not.toBeNull()
+    expect(puts).toEqual([])
   })
 
   it('saving under a new name appends the preset without asking', async () => {
@@ -325,6 +385,46 @@ describe('EqualizerCard', () => {
     // What the core holds is shown again, not the refused change.
     expect((sliders(w)[0]!.props('modelValue') as number[])[0]).toBe(ROCK[0])
     expect(presetLabel(w)).toBe('Rock')
+  })
+
+  it('a slow reload after a refusal is the last word: the refused state is never sent again', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    serve(
+      () => payload(settings({ gains: [...ROCK], preset: 'builtin:rock' })),
+      () => new Response(JSON.stringify({ error: 'refused' }), { status: 422 }),
+    )
+    const w = await mountCard()
+    getDelayMs = 1000
+    await moveSlider(w, 0, 9)
+    vi.advanceTimersByTime(300)
+    await flushPromises()
+    expect(puts).toHaveLength(1)
+    expect(gets).toBe(2)
+    // A change while the reload is still out: its timer fires before the
+    // GET answers, and must not write the refused state on top of it.
+    await moveSlider(w, 1, 5)
+    vi.advanceTimersByTime(300)
+    await flushPromises()
+    expect(puts).toHaveLength(1)
+    vi.advanceTimersByTime(700)
+    await flushPromises()
+    // The reload landed: what the core holds is shown, and nothing follows.
+    expect(sliders(w).map((s) => (s.props('modelValue') as number[])[0])).toEqual(ROCK)
+    vi.advanceTimersByTime(2000)
+    await flushPromises()
+    expect(puts).toHaveLength(1)
+  })
+
+  it('leaving the page within the coalescing window still writes the change', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const w = await mountCard()
+    await moveSlider(w, 3, -6)
+    vi.advanceTimersByTime(100)
+    w.unmount()
+    wrapper = null
+    await flushPromises()
+    expect(puts).toHaveLength(1)
+    expect((puts[0] as EqualizerSettings).gains[3]).toBe(-6)
   })
 
   it('the sliders scroll inside the card, never the page', async () => {
