@@ -548,6 +548,109 @@ test('an order arrow writes a real reorder, checked against the server, and is p
 })
 
 /**
+ * A mouse drag the way Sortable's fallback needs it: pressed on the handle,
+ * moved in intermediate steps (the first few pixels are `fallbackTolerance`,
+ * and a single jump would leave no move past it to start the drag on), then
+ * released over the target.
+ */
+async function mouseDrag(
+  page: import('@playwright/test').Page,
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+) {
+  await page.mouse.move(from.x, from.y)
+  await page.mouse.down()
+  await page.mouse.move(to.x, to.y, { steps: 12 })
+  await page.mouse.up()
+}
+
+/**
+ * The drag handle beside each declared plugin, with a mouse: the same round
+ * trip as the arrow journey above — a real reorder read back from
+ * `/api/status`, put back, and a `finally` that restores the order through
+ * the API if anything throws — so no other journey ever sees anything but the
+ * declared order the harness started with. The release points follow one
+ * convention: 75 % down the neighbour to land after it, 25 % to land before.
+ */
+test('dragging a plugin by its handle writes a real reorder, checked against the server, and is put back', async ({
+  page,
+  request,
+}) => {
+  const order = async () => {
+    const status = (await (await request.get('/api/status')).json()) as {
+      plugins: { name: string }[]
+    }
+    return [...new Set(status.plugins.map((p) => p.name))]
+  }
+
+  await page.goto('/config')
+  const before = await order()
+  const at = before.indexOf('radio')
+  const next = before[at + 1]
+  expect(at).toBeGreaterThanOrEqual(0)
+  expect(next).toBeDefined()
+
+  const pluginsTable = page.locator('[data-plugins-table]')
+  const rowOf = (name: string) =>
+    pluginsTable.locator('[data-plugin-row]', { has: page.getByText(name, { exact: true }) })
+  const handleCentre = async () => {
+    const box = await rowOf('radio').locator('[data-plugin-drag-handle]').boundingBox()
+    if (!box) throw new Error('radio drag handle not visible')
+    return { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+  }
+  const pointIn = async (name: string, fraction: number, x: number) => {
+    const box = await rowOf(name).boundingBox()
+    if (!box) throw new Error(`${name} row not visible`)
+    return { x, y: box.y + box.height * fraction }
+  }
+
+  // Every point of the gesture away from the viewport's edges: within 120 px
+  // of one, a held row scrolls the page (the list's tuning for long lists on
+  // a phone), the rows slide under a still pointer, and the drop lands
+  // further than aimed — measured, two places down instead of one.
+  const clearOfEdges = (...ys: number[]) => {
+    const height = page.viewportSize()!.height
+    for (const y of ys) {
+      expect(y).toBeGreaterThan(120)
+      expect(y).toBeLessThan(height - 120)
+    }
+  }
+
+  try {
+    await expect(rowOf(next!).locator('[data-plugin-drag-handle]')).toBeVisible()
+    await rowOf('radio').evaluate((el) => el.scrollIntoView({ block: 'center' }))
+    const from = await handleCentre()
+    const target = await pointIn(next!, 0.75, from.x)
+    clearOfEdges(from.y, target.y)
+    await mouseDrag(page, from, target)
+    // Polled against the real core, not the page: the list shows the dropped
+    // order on its own while the answer is pending.
+    await expect.poll(order).not.toEqual(before)
+    const afterMove = await order()
+    expect(afterMove.indexOf('radio')).toBe(at + 1)
+    expect(afterMove.indexOf(next!)).toBe(at)
+    expect([...afterMove].sort()).toEqual([...before].sort())
+
+    // Back above its neighbour, by the handle again. The table re-renders from
+    // the server's order first: a drop is locked until its answer settles.
+    const shown = pluginsTable.locator('[data-plugin-row] [data-plugin-name]')
+    await expect.poll(async () => (await shown.allTextContents()).filter((n) => before.includes(n))).toEqual(afterMove)
+    await expect(rowOf('radio').locator('[data-plugin-drag-handle]')).not.toHaveClass(/cursor-not-allowed/)
+    const back = await handleCentre()
+    const above = await pointIn(next!, 0.25, back.x)
+    clearOfEdges(back.y, above.y)
+    await mouseDrag(page, back, above)
+    await expect.poll(order).toEqual(before)
+  } finally {
+    const current = await order()
+    if (JSON.stringify(current) !== JSON.stringify(before)) {
+      await request.post('/api/plugins/radio/move', { data: { to: at } })
+      await expect.poll(order).toEqual(before)
+    }
+  }
+})
+
+/**
  * The language card (task 14, language-packs chantier; fix round 1
  * addressed findings 1-8 of the review): the union of languages, an
  * annotation on the two the harness ships incomplete, the fallback

@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
 import { sidewaysCulprits } from './overflow'
+import { touchDrag } from './touch'
 
 test('on a phone: bottom bar, top nav absent, named tile', async ({ page }) => {
   await page.goto('/')
@@ -281,4 +282,194 @@ test('at desktop width the generic-input buttons show their words', async ({ pag
   await page.goto('/plugins/generic-input/')
   expect((await page.locator('[data-learn] [data-label]').first().boundingBox())!.width).toBeGreaterThan(20)
   await expect(page.locator('[data-learn] [data-phone-icon]').first()).toBeHidden()
+})
+
+// --- Reordering the plugins with a finger ------------------------------------
+//
+// The table reflows below `md` (Pixel 7 is 412 px wide) and the ⠿ handle is
+// the only place a drag can start: the rest of a row must still scroll the
+// page under a finger. Every gesture goes through CDP touch events (see
+// `touch.ts`). A reorder rewrites the harness's `plugins.toml`, which other
+// journeys depend on: each test that may move a plugin restores the declared
+// order through the API in a `finally`, as the desktop arrow journey does.
+
+type Request = import('@playwright/test').APIRequestContext
+type Page = import('@playwright/test').Page
+
+const pluginOrder = (request: Request) => async () => {
+  const status = (await (await request.get('/api/status')).json()) as { plugins: { name: string }[] }
+  // One entry per name: a multi-kind plugin is listed once per kind.
+  return [...new Set(status.plugins.map((p) => p.name))]
+}
+
+const pluginRow = (page: Page, name: string) =>
+  page.locator('[data-plugins-table] [data-plugin-row]', { has: page.getByText(name, { exact: true }) })
+
+const centre = (box: { x: number; y: number; width: number; height: number }) => ({
+  x: box.x + box.width / 2,
+  y: box.y + box.height / 2,
+})
+
+const scrollY = (page: Page) => page.evaluate(() => window.scrollY)
+
+/** Waits for the page height to stop moving (cards fill in after load), or a
+ * scroll set now is clamped later under the finger. */
+async function settledHeight(page: Page) {
+  await expect.poll(async () => {
+    const h = await page.evaluate(() => document.documentElement.scrollHeight)
+    await page.waitForTimeout(300)
+    return h === (await page.evaluate(() => document.documentElement.scrollHeight))
+  }).toBe(true)
+}
+
+/** Scrolls so the top of `name`'s row sits `offset` px below the viewport top. */
+async function placeRow(page: Page, name: string, offset: number) {
+  const box = await pluginRow(page, name).boundingBox()
+  if (!box) throw new Error(`${name} row not visible`)
+  await page.evaluate((y) => window.scrollTo(0, Math.max(0, y)), box.y + (await scrollY(page)) - offset)
+  // Let the scroll land before measuring anything against it.
+  await page.waitForTimeout(100)
+}
+
+/** True when the point is on the handle itself: a gesture that starts beside
+ * it would prove nothing about the handle. */
+const onHandle = (page: Page, p: { x: number; y: number }, selector: string) =>
+  page.evaluate(
+    ([x, y, s]) => document.elementFromPoint(x as number, y as number)?.closest(s as string) != null,
+    [p.x, p.y, selector] as const,
+  )
+
+/** Puts the declared order back through the API, whatever the page did. */
+async function restoreOrder(request: Request, before: string[]) {
+  const order = pluginOrder(request)
+  // Retried as a whole: the gesture's own move may still be in flight when
+  // this starts, and land after a first pass read the order.
+  await expect(async () => {
+    for (const [to, name] of before.entries()) {
+      const current = await order()
+      if (current[to] !== name) await request.post(`/api/plugins/${name}/move`, { data: { to } })
+    }
+    expect(await order()).toEqual(before)
+  }).toPass({ timeout: 10_000 })
+}
+
+test('on a phone: a plugin is reordered by its handle with a finger', async ({ page, request }) => {
+  const order = pluginOrder(request)
+  await page.goto('/config')
+  const before = await order()
+  const at = before.indexOf('radio')
+  const next = before[at + 1]
+  expect(at).toBeGreaterThanOrEqual(0)
+  expect(next).toBeDefined()
+  const handle = pluginRow(page, 'radio').locator('[data-plugin-drag-handle]')
+  await expect(handle).toBeVisible()
+  await settledHeight(page)
+  const viewport = page.viewportSize()!
+  await placeRow(page, 'radio', viewport.height / 2 - 60)
+
+  try {
+    const from = centre((await handle.boundingBox())!)
+    expect(await onHandle(page, from, '[data-plugin-drag-handle]')).toBe(true)
+    const target = (await pluginRow(page, next!).boundingBox())!
+    await touchDrag(page, from, { x: from.x, y: target.y + target.height * 0.75 })
+    await expect.poll(order).not.toEqual(before)
+    const afterMove = await order()
+    expect(afterMove.indexOf('radio')).toBe(at + 1)
+    expect(afterMove.indexOf(next!)).toBe(at)
+
+    // The table shows the server's order, unlocked, before the second drag.
+    const shown = page.locator('[data-plugins-table] [data-plugin-row] [data-plugin-name]')
+    await expect.poll(async () => (await shown.allTextContents()).filter((n) => before.includes(n))).toEqual(afterMove)
+    await expect(handle).not.toHaveClass(/cursor-not-allowed/)
+    const back = centre((await handle.boundingBox())!)
+    expect(await onHandle(page, back, '[data-plugin-drag-handle]')).toBe(true)
+    const above = (await pluginRow(page, next!).boundingBox())!
+    await touchDrag(page, back, { x: back.x, y: above.y + above.height * 0.25 })
+    await expect.poll(order).toEqual(before)
+  } finally {
+    await restoreOrder(request, before)
+  }
+})
+
+test('on a phone: a swipe on a row scrolls; the handle does not', async ({ page, request }) => {
+  const order = pluginOrder(request)
+  await page.goto('/config')
+  const before = await order()
+  const name = before[0]!
+  const row = pluginRow(page, name)
+  await expect(row.locator('[data-plugin-drag-handle]')).toBeVisible()
+  await settledHeight(page)
+  const viewport = page.viewportSize()!
+  await placeRow(page, name, viewport.height / 2)
+
+  try {
+    // A swipe on the row's name, upward: the page scrolls down under it.
+    const label = centre((await row.locator('[data-plugin-name]').boundingBox())!)
+    expect(await onHandle(page, label, '[data-plugin-name]')).toBe(true)
+    expect(await page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight - window.scrollY))
+      .toBeGreaterThan(200)
+    const start = await scrollY(page)
+    await touchDrag(page, label, { x: label.x, y: label.y - 200 })
+    await expect.poll(() => scrollY(page)).toBeGreaterThan(start + 100)
+    expect(await order()).toEqual(before)
+
+    // The same finger on the handle, 40 px down and still inside its own
+    // row: a drag that goes nowhere, and the page stays where it is. Downward
+    // would scroll the page up, so there must be room above for that to show.
+    await page.waitForTimeout(300) // the swipe's momentum, if any, ends
+    const handle = centre((await row.locator('[data-plugin-drag-handle]').boundingBox())!)
+    expect(await onHandle(page, handle, '[data-plugin-drag-handle]')).toBe(true)
+    const own = (await row.boundingBox())!
+    const end = { x: handle.x, y: handle.y + 40 }
+    expect(end.y).toBeLessThan(own.y + own.height)
+    const still = await scrollY(page)
+    expect(still).toBeGreaterThan(40)
+    await touchDrag(page, handle, end)
+    await page.waitForTimeout(300)
+    expect(Math.abs((await scrollY(page)) - still)).toBeLessThanOrEqual(2)
+    expect(await order()).toEqual(before)
+  } finally {
+    await restoreOrder(request, before)
+  }
+})
+
+test('on a phone: holding a dragged row near the edge scrolls the page', async ({ page, request }) => {
+  const order = pluginOrder(request)
+  await page.goto('/config')
+  const before = await order()
+  const handle = pluginRow(page, 'radio').locator('[data-plugin-drag-handle]')
+  await expect(handle).toBeVisible()
+  await settledHeight(page)
+  const viewport = page.viewportSize()!
+
+  // Room to scroll in one direction, measured, and the edge to hold at: below
+  // with the row high in the viewport if the page goes on far enough under
+  // it, above with the row low in the viewport otherwise.
+  await placeRow(page, 'radio', 150)
+  const roomBelow = await page.evaluate(
+    () => document.documentElement.scrollHeight - window.innerHeight - window.scrollY,
+  )
+  const down = roomBelow >= 400
+  if (!down) await placeRow(page, 'radio', viewport.height - 250)
+  const room = down ? roomBelow : await scrollY(page)
+  // A page too short to scroll 400 px fails here, loudly, rather than letting
+  // the assertion below pass on a scroll it never had room to make.
+  expect(room).toBeGreaterThanOrEqual(400)
+
+  try {
+    const from = centre((await handle.boundingBox())!)
+    expect(await onHandle(page, from, '[data-plugin-drag-handle]')).toBe(true)
+    // 90 px from the edge: inside the 120 px the list scrolls from, outside
+    // Sortable's default 30 px — so this fails if that tuning is lost.
+    const to = { x: from.x, y: down ? viewport.height - 90 : 90 }
+    const start = await scrollY(page)
+    await touchDrag(page, from, to, { holdMs: 600 })
+    const moved = (await scrollY(page)) - start
+    // The drop reorders too (the row went past others): let its answer settle
+    // so the restore below does not race it.
+    await expect(handle).not.toHaveClass(/cursor-not-allowed/)
+    expect(down ? moved : -moved).toBeGreaterThanOrEqual(300)
+  } finally {
+    await restoreOrder(request, before)
+  }
 })

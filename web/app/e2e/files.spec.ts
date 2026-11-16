@@ -171,6 +171,49 @@ test('files plugin journey: local root, scan, saved list, presets', async ({
   const tracks = page.locator('[data-track-row]')
   await expect(tracks).toHaveCount(3, { timeout: 30_000 })
   await expect(page.locator('[data-track-name]')).toHaveText(['01', '02', '03'])
+
+  // --- Reorder by the handle, with a mouse ------------------------------------
+  // Row 3 dragged above row 1, then back below row 2. Sortable's fallback
+  // needs intermediate moves past its few pixels of tolerance, hence the
+  // steps. The release points: 25 % down a row lands before it, 75 % after.
+  // The second drag is the point as much as the first: it proves the list
+  // still drags once the pane has re-rendered from the plugin's answer.
+  const trackHandle = (i: number) => tracks.nth(i).locator('[data-drag-handle]')
+  const dragTrack = async (from: number, onto: number, fraction: number) => {
+    // A drop locks the list until its answer settles: wait for the handles
+    // to be live again before grabbing one.
+    await expect(trackHandle(from)).not.toHaveClass(/cursor-not-allowed/)
+    // Away from the viewport's edges: within 120 px of one, a held row
+    // scrolls the page and the rows slide under a still pointer.
+    await tracks.nth(1).evaluate((el) => el.scrollIntoView({ block: 'center' }))
+    const handle = await trackHandle(from).boundingBox()
+    const target = await tracks.nth(onto).boundingBox()
+    if (!handle || !target) throw new Error('track row or handle not visible')
+    const x = handle.x + handle.width / 2
+    const fromY = handle.y + handle.height / 2
+    const toY = target.y + target.height * fraction
+    const height = page.viewportSize()!.height
+    for (const y of [fromY, toY]) {
+      expect(y).toBeGreaterThan(120)
+      expect(y).toBeLessThan(height - 120)
+    }
+    await page.mouse.move(x, fromY)
+    await page.mouse.down()
+    await page.mouse.move(x, toY, { steps: 12 })
+    await page.mouse.up()
+  }
+  await dragTrack(2, 0, 0.25)
+  // The list shows the dropped order while the answer is pending, so the order
+  // is read again once the list is unlocked: by then it is the pane's own,
+  // re-read from the plugin after its `move` — a refused drop falls back.
+  await expect(page.locator('[data-track-name]')).toHaveText(['03', '01', '02'])
+  await expect(trackHandle(0)).not.toHaveClass(/cursor-not-allowed/)
+  await expect(page.locator('[data-track-name]')).toHaveText(['03', '01', '02'])
+  await dragTrack(0, 2, 0.75)
+  await expect(page.locator('[data-track-name]')).toHaveText(['01', '02', '03'])
+  await expect(trackHandle(0)).not.toHaveClass(/cursor-not-allowed/)
+  await expect(page.locator('[data-track-name]')).toHaveText(['01', '02', '03'])
+
   // No scan incident, and no missing track: the paths the plugin memorized are
   // read back from the process that wrote them.
   await expect(page.locator('[data-scan-error]')).toHaveCount(0)
