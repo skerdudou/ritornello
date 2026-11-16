@@ -16,6 +16,9 @@ pub struct MpvIpc {
     writer: Mutex<OwnedWriteHalf>,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value>>>>>,
     next_id: AtomicU64,
+    /// Keeps the events of a `play_aside` load away from the core. A plain
+    /// mutex: never held across an `await`.
+    gate: Arc<std::sync::Mutex<AsideGate>>,
 }
 
 impl MpvIpc {
@@ -25,8 +28,10 @@ impl MpvIpc {
             writer: Mutex::new(write),
             pending: Arc::new(Mutex::new(HashMap::new())),
             next_id: AtomicU64::new(1),
+            gate: Arc::new(std::sync::Mutex::new(AsideGate::default())),
         });
         let pending = ipc.pending.clone();
+        let gate = ipc.gate.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(read).lines();
             // True until the first `idle-active` notification.
@@ -49,7 +54,7 @@ impl MpvIpc {
             // Journal only, never an event: see `Stall`.
             let mut stall = Stall::default();
             let mut path = String::new();
-            while let Ok(Some(line)) = lines.next_line().await {
+            'pump: while let Ok(Some(line)) = lines.next_line().await {
                 let v = match serde_json::from_str::<Value>(&line) {
                     Ok(v) => v,
                     Err(e) => {
@@ -57,8 +62,20 @@ impl MpvIpc {
                         continue;
                     }
                 };
+                // Whether this line is the observation's initial
+                // `idle-active: true` (see `first_idle`). Decided here, with
+                // the rest of the per-line bookkeeping, so that it advances
+                // even for a line the `AsideGate` swallows.
+                let mut initial_idle = false;
                 if v["event"] == json!("property-change") {
                     match (v["name"].as_str(), &v["data"]) {
+                        (Some("idle-active"), Value::Bool(true)) => {
+                            initial_idle = std::mem::replace(&mut first_idle, false);
+                        }
+                        // Entering playback also consumes the right to
+                        // swallow: if mpv announces activity first, the
+                        // `true` that follows is a genuine stop.
+                        (Some("idle-active"), Value::Bool(false)) => first_idle = false,
                         (Some("path"), Value::String(p)) => path.clone_from(p),
                         (Some("paused-for-cache"), data) => {
                             match stall.change(data, std::time::Instant::now()) {
@@ -84,11 +101,25 @@ impl MpvIpc {
                         };
                         let _ = tx.send(res);
                     }
-                } else if v["event"] == json!("property-change")
-                    || v["event"] == json!("file-loaded")
-                    || v["event"] == json!("start-file")
-                    || v["event"] == json!("playback-restart")
-                {
+                    continue;
+                }
+                // After the bookkeeping above, so that it still advances for
+                // a swallowed line, and before anything reaches the core.
+                let replay = {
+                    let mut gate = gate.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if !gate.admit(&v) {
+                        continue;
+                    }
+                    gate.take_replay()
+                };
+                for v in std::iter::once(v).chain(replay) {
+                    if !(v["event"] == json!("property-change")
+                        || v["event"] == json!("file-loaded")
+                        || v["event"] == json!("start-file")
+                        || v["event"] == json!("playback-restart"))
+                    {
+                        continue;
+                    }
                     let ev = if v["event"] == json!("start-file") {
                         Some(Event::FileStarting)
                     } else if v["event"] == json!("playback-restart") {
@@ -127,13 +158,10 @@ impl MpvIpc {
                         // playback and are true stops, including the end
                         // of a playlist.
                         (Some("idle-active"), Value::Bool(true)) => {
-                            let initial = std::mem::replace(&mut first_idle, false);
-                            if initial { None } else { Some(Event::PlaybackIdle) }
+                            if initial_idle { None } else { Some(Event::PlaybackIdle) }
                         }
                         (Some("idle-active"), Value::Bool(false)) => {
-                            // Entering playback also consumes the right to
-                            // swallow: if mpv announces activity first, the
-                            // `true` that follows is a genuine stop.
+                            // `first_idle` is already cleared above.
                             //
                             // No longer the source of `Event::PlaybackActive`
                             // itself (see `file-loaded` above): read from
@@ -146,7 +174,6 @@ impl MpvIpc {
                             // confirmation `played_since_play` waits for
                             // went silent from the second track onward were
                             // it still read from here.
-                            first_idle = false;
                             None
                         }
                         // Established (see `OBSERVED` below): both
@@ -204,7 +231,7 @@ impl MpvIpc {
                         // receiver means the core loop is done, nobody
                         // left to serve.
                         if events.send(ev).await.is_err() {
-                            break;
+                            break 'pump;
                         }
                     }
                 }
@@ -215,10 +242,18 @@ impl MpvIpc {
     }
 
     pub async fn command(&self, args: &[Value]) -> Result<Value> {
+        self.command_named(json!(args)).await
+    }
+
+    /// Sends one command in any form mpv takes — the positional array
+    /// (`command`) or the named object (`{"name": …, …}`), the only one that
+    /// can pass `loadfile` its options without knowing which mpv version
+    /// counts its positional arguments how — and waits for its response.
+    pub async fn command_named(&self, cmd: Value) -> Result<Value> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
-        let msg = json!({ "command": args, "request_id": id });
+        let msg = json!({ "command": cmd, "request_id": id });
         {
             let mut w = self.writer.lock().await;
             if let Err(e) = w.write_all(format!("{msg}\n").as_bytes()).await {
@@ -291,6 +326,136 @@ impl Stall {
             }
             (_, None) => None,
         }
+    }
+}
+
+/// The two observed properties that become `Event::TrackChanged`: the only
+/// ones whose swallowed value is replayed (see `AsideGate`).
+const TRACK_PROPERTIES: [&str; 2] = ["playlist-pos", "chapter"];
+
+/// Keeps every event of a `play_aside` load (a lock chime played while idle)
+/// away from the core, which must go on believing nothing plays.
+///
+/// It sees every line that is not a response. A `start-file` while armed is
+/// the aside's own: it is swallowed and opens the gate, which then swallows
+/// everything until the next `start-file` (a real load replacing the chime:
+/// admitted) or an `idle-active: true` (the chime done: swallowed too, since
+/// the core never saw it leave idle). Measured on mpv 0.37 by the lock-sound
+/// spike (2026-11-16): a load sent right after the chime's response may come
+/// before or after the chime's `start-file`, but the chime always gets its
+/// own `start-file` first and ends with an `end-file`, with no idle between
+/// it and the real file.
+///
+/// **mpv notifies a property only when its value changes**, so a swallowed
+/// notification leaves mpv and the core disagreeing on that property; the
+/// gate remembers each one (`pending`) until the disagreement is settled:
+///
+/// - **After the gate closes, mpv sets back what the chime moved.** Right
+///   after `idle-active: true` come `playlist-pos: -1`, `path` and
+///   `paused-for-cache` without data (measured on mpv 0.37 for this module's
+///   tests, `IDLE_CHIME_TAIL`; the spike's fixture 1 stopped at
+///   `idle-active: true` and so suggested they never came). They restore
+///   what the core already holds: a notification equal to what the core was
+///   last given for that property, after a swallowed one, is swallowed too —
+///   exactly what mpv would not have sent had the chime never played.
+/// - **A real load during the chime: swallowed track numbers are replayed.**
+///   In 4 of the spike's 20 interrupted runs the single coalesced
+///   `playlist-pos: 0` fell inside the chime although it was the real file's
+///   value too, and mpv never sends it again. So right after the next
+///   admitted `start-file`, the last swallowed `playlist-pos` and `chapter`
+///   are handed back (`take_replay`) when they differ from what the core
+///   holds; a real notification that follows wins, being later. Should mpv
+///   ever leave a chime's track number in place after idle (what the spike's
+///   truncated capture suggested: then a later real load at position 0 would
+///   never be notified), the same replay covers the next real load.
+/// - The other swallowed values are only adopted at that `start-file`, never
+///   replayed: `path` and `media-title` are the chime's own `av://lavfi:…`
+///   strings, which no real file shares, so the real load notifies its own;
+///   the chime's `metadata` is `{}`, from which the core makes nothing; an
+///   `idle-active: false` replaced by a real load stays false with no new
+///   notification, and adopting it is what lets the later real
+///   `idle-active: true` (a stop) through rather than mistake it for a
+///   restoration. `paused-for-cache` only feeds the journal, which the pump
+///   writes before the gate.
+#[derive(Debug, Default)]
+pub(crate) struct AsideGate {
+    /// Asides sent whose `start-file` has not come yet.
+    armed: u32,
+    /// Between an aside's `start-file` and its end.
+    inside: bool,
+    /// Per observed property, the value the core was last given.
+    seen: HashMap<String, Value>,
+    /// Per observed property, the last line swallowed since.
+    pending: HashMap<String, Value>,
+    /// Lines to hand to the core right after the admitted line.
+    replay: Vec<Value>,
+}
+
+/// A property-change's value; absent (property unavailable) reads as `null`.
+fn data_of(line: &Value) -> Value {
+    line.get("data").cloned().unwrap_or(Value::Null)
+}
+
+impl AsideGate {
+    /// An aside is about to be sent: its `start-file` is to be swallowed.
+    pub(crate) fn arm(&mut self) {
+        self.armed += 1;
+    }
+
+    /// The aside was not sent after all (its command failed).
+    pub(crate) fn disarm(&mut self) {
+        self.armed = self.armed.saturating_sub(1);
+    }
+
+    /// Whether `line` (an event, never a response) reaches the core. When it
+    /// does, `take_replay` gives what must follow it.
+    pub(crate) fn admit(&mut self, line: &Value) -> bool {
+        if line["event"] == json!("start-file") {
+            if self.armed > 0 {
+                self.armed -= 1;
+                self.inside = true;
+                return false;
+            }
+            self.inside = false;
+            // Track numbers in a fixed order; the rest only adopted.
+            for name in TRACK_PROPERTIES {
+                if let Some(line) = self.pending.remove(name) {
+                    let data = data_of(&line);
+                    if self.seen.get(name) != Some(&data) {
+                        self.seen.insert(name.to_string(), data);
+                        self.replay.push(line);
+                    }
+                }
+            }
+            for (name, line) in self.pending.drain() {
+                self.seen.insert(name, data_of(&line));
+            }
+            return true;
+        }
+        let property = (line["event"] == json!("property-change")).then(|| line["name"].as_str()).flatten();
+        if self.inside {
+            if property == Some("idle-active") && line["data"] == json!(true) {
+                self.inside = false;
+            }
+            if let Some(name) = property {
+                self.pending.insert(name.to_string(), line.clone());
+            }
+            return false;
+        }
+        if let Some(name) = property {
+            let data = data_of(line);
+            // mpv restoring, after the chime, what the core already holds.
+            if self.pending.remove(name).is_some() && self.seen.get(name) == Some(&data) {
+                return false;
+            }
+            self.seen.insert(name.to_string(), data);
+        }
+        true
+    }
+
+    /// The lines to process right after the line just admitted.
+    pub(crate) fn take_replay(&mut self) -> Vec<Value> {
+        std::mem::take(&mut self.replay)
     }
 }
 
@@ -889,6 +1054,44 @@ impl super::Player for MpvPlayer {
             .await?;
         Ok(())
     }
+
+    /// Three questions in order, stopping at the first that settles it:
+    /// `idle-active`, `pause`, `audio-params`. Audio parameters that are an
+    /// error, a `null` or lack the rate or the channel count mean a file
+    /// still loading: nothing to mix into yet.
+    async fn chime_route(&self) -> Result<super::ChimeRoute> {
+        use super::ChimeRoute;
+        if self.ipc.command(&[json!("get_property"), json!("idle-active")]).await? == json!(true) {
+            return Ok(ChimeRoute::Idle);
+        }
+        if self.ipc.command(&[json!("get_property"), json!("pause")]).await? == json!(true) {
+            return Ok(ChimeRoute::Silent);
+        }
+        let params = self.ipc.command(&[json!("get_property"), json!("audio-params")]).await.unwrap_or(Value::Null);
+        let field = |name: &str| params[name].as_u64().and_then(|n| u32::try_from(n).ok());
+        Ok(match (field("samplerate"), field("channel-count")) {
+            (Some(sample_rate), Some(channels)) => ChimeRoute::Live { sample_rate, channels },
+            _ => ChimeRoute::Silent,
+        })
+    }
+
+    /// The named `loadfile` measured by the lock-sound spike on mpv 0.37
+    /// (and present, by its command list, on 0.40): `replace`, and the
+    /// file-local options `loop-file=no,pause=no`, so a global `pause` or a
+    /// looping track setting neither silences nor repeats the chime; mpv
+    /// reverts both once the chime ends (measured). The gate is armed
+    /// **before** the command is written, since the chime's `start-file` can
+    /// arrive before its response, and disarmed if the command fails.
+    async fn play_aside(&self, uri: &str) -> Result<()> {
+        let gate = || self.ipc.gate.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        gate().arm();
+        let load = json!({"name": "loadfile", "url": uri, "flags": "replace", "options": "loop-file=no,pause=no"});
+        if let Err(e) = self.ipc.command_named(load).await {
+            gate().disarm();
+            return Err(e);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1002,9 +1205,7 @@ pub(crate) mod tests {
         let (tx, mut rx) = mpsc::channel(1024);
         tokio::spawn(async move { while rx.recv().await.is_some() {} });
         let (player, _child) =
-            start(mpv.to_str().unwrap(), &d.join("mpv.sock"), "/dev/null", AUDIO_BUFFER_DEFAULT, READAHEAD_DEFAULT, "", tx)
-                .await
-                .unwrap();
+            start_test_mpv(&mpv, d, "", tx).await;
         let count = |tag: &str| std::fs::read_to_string(&calls).unwrap_or_default().lines().filter(|l| *l == tag).count();
         let wrapper = d.join("wrapper");
         for i in 0..5 {
@@ -1708,9 +1909,7 @@ pub(crate) mod tests {
         });
         let (tx, mut rx) = mpsc::channel(1024);
         let (player, _child) =
-            start(mpv.to_str().unwrap(), &d.join("mpv.sock"), "/dev/null", AUDIO_BUFFER_DEFAULT, READAHEAD_DEFAULT, &chain, tx)
-                .await
-                .unwrap();
+            start_test_mpv(&mpv, d, &chain, tx).await;
         let graph = |v: &Value, label: &str| -> Option<String> {
             v.as_array()?.iter().find(|f| f["label"] == json!(label))?["params"]["graph"].as_str().map(str::to_string)
         };
@@ -1780,5 +1979,578 @@ pub(crate) mod tests {
     #[test]
     fn a_negative_value_becomes_none() {
         assert_eq!(number_or_none(Ok(serde_json::json!(-0.02))), None);
+    }
+
+    /// An idle chime alone, from its `loadfile` response to mpv back at
+    /// `idle-active: true`. Captured on mpv 0.37.0 by the lock-sound spike,
+    /// 2026-11-16 (fixture 1, run 1; all 20 runs had this shape).
+    const IDLE_CHIME: &str = r#"{"data":{"playlist_entry_id":1},"request_id":11,"error":"success"}
+{"event":"start-file","playlist_entry_id":1}
+{"event":"property-change","id":1,"name":"media-title","data":"lavfi:aevalsrc=exprs='if(between(t,0,0.015),0.0001*exp(513.080843*(t-0)),if(between(t,0.015,0.565),0.22*exp(-13.993114*(t-0.015)),0))*(1*sin(2*PI*659.25*(t-0))+0.05*sin(2*PI*1318.5*(t-0)))+if(between(t,0.16,0.175),0.0001*exp(513.080843*(t-0.16)),if(between(t,0.175,0.725),0.22*exp(-13.993114*(t-0.175)),0))*(1*sin(2*PI*523.25*(t-0.16))+0.05*sin(2*PI*1046.5*(t-0.16)))':s=48000:d=0.74"}
+{"event":"property-change","id":3,"name":"idle-active","data":false}
+{"event":"property-change","id":4,"name":"playlist-pos","data":0}
+{"event":"property-change","id":6,"name":"path","data":"av://lavfi:aevalsrc=exprs='if(between(t,0,0.015),0.0001*exp(513.080843*(t-0)),if(between(t,0.015,0.565),0.22*exp(-13.993114*(t-0.015)),0))*(1*sin(2*PI*659.25*(t-0))+0.05*sin(2*PI*1318.5*(t-0)))+if(between(t,0.16,0.175),0.0001*exp(513.080843*(t-0.16)),if(between(t,0.175,0.725),0.22*exp(-13.993114*(t-0.175)),0))*(1*sin(2*PI*523.25*(t-0.16))+0.05*sin(2*PI*1046.5*(t-0.16)))':s=48000:d=0.74"}
+{"event":"audio-reconfig"}
+{"event":"audio-reconfig"}
+{"event":"file-loaded"}
+{"event":"property-change","id":2,"name":"metadata","data":{}}
+{"event":"property-change","id":7,"name":"paused-for-cache","data":false}
+{"event":"audio-reconfig"}
+{"event":"playback-restart"}
+{"event":"audio-reconfig"}
+{"event":"end-file","reason":"eof","playlist_entry_id":1}
+{"event":"audio-reconfig"}
+{"event":"idle"}
+{"event":"property-change","id":1,"name":"media-title"}
+{"event":"property-change","id":2,"name":"metadata"}
+{"event":"property-change","id":3,"name":"idle-active","data":true}"#;
+
+    /// What follows `IDLE_CHIME` at once, which the spike's capture stopped
+    /// short of: mpv setting back what the chime moved. Captured on mpv
+    /// 0.37.0 for this test module, 2026-11-16, same observe ids, with and
+    /// without the spike's `loop-file inf` and `playlist-start 2`.
+    const IDLE_CHIME_TAIL: &str = r#"{"event":"property-change","id":4,"name":"playlist-pos","data":-1}
+{"event":"property-change","id":6,"name":"path"}
+{"event":"property-change","id":7,"name":"paused-for-cache"}"#;
+
+    /// The observations' initial values on a fresh idle mpv, right after the
+    /// seven `observe_property` responses (same capture).
+    const STARTUP: &str = r#"{"event":"property-change","id":1,"name":"media-title"}
+{"event":"property-change","id":2,"name":"metadata"}
+{"event":"property-change","id":3,"name":"idle-active","data":true}
+{"event":"property-change","id":4,"name":"playlist-pos","data":-1}
+{"event":"property-change","id":5,"name":"chapter"}
+{"event":"property-change","id":6,"name":"path"}
+{"event":"property-change","id":7,"name":"paused-for-cache"}"#;
+
+    /// An idle chime interrupted by a real `loadfile` sent right after the
+    /// chime's response, until the real file's `playback-restart`. Captured
+    /// on mpv 0.37.0 by the lock-sound spike, 2026-11-16 (fixture 2, run 1:
+    /// the single coalesced `playlist-pos: 0` falls inside the chime).
+    const INTERRUPTED_RUN_1: &str = r#"{"data":{"playlist_entry_id":21},"request_id":91,"error":"success"}
+{"data":{"playlist_entry_id":22},"request_id":92,"error":"success"}
+{"event":"start-file","playlist_entry_id":21}
+{"event":"property-change","id":1,"name":"media-title","data":"lavfi:aevalsrc=exprs='if(between(t,0,0.015),0.0001*exp(513.080843*(t-0)),if(between(t,0.015,0.565),0.22*exp(-13.993114*(t-0.015)),0))*(1*sin(2*PI*659.25*(t-0))+0.05*sin(2*PI*1318.5*(t-0)))+if(between(t,0.16,0.175),0.0001*exp(513.080843*(t-0.16)),if(between(t,0.175,0.725),0.22*exp(-13.993114*(t-0.175)),0))*(1*sin(2*PI*523.25*(t-0.16))+0.05*sin(2*PI*1046.5*(t-0.16)))':s=48000:d=0.74"}
+{"event":"property-change","id":3,"name":"idle-active","data":false}
+{"event":"property-change","id":4,"name":"playlist-pos","data":0}
+{"event":"property-change","id":6,"name":"path","data":"av://lavfi:aevalsrc=exprs='if(between(t,0,0.015),0.0001*exp(513.080843*(t-0)),if(between(t,0.015,0.565),0.22*exp(-13.993114*(t-0.015)),0))*(1*sin(2*PI*659.25*(t-0))+0.05*sin(2*PI*1318.5*(t-0)))+if(between(t,0.16,0.175),0.0001*exp(513.080843*(t-0.16)),if(between(t,0.175,0.725),0.22*exp(-13.993114*(t-0.175)),0))*(1*sin(2*PI*523.25*(t-0.16))+0.05*sin(2*PI*1046.5*(t-0.16)))':s=48000:d=0.74"}
+{"event":"end-file","reason":"stop","playlist_entry_id":21}
+{"event":"start-file","playlist_entry_id":22}
+{"event":"property-change","id":1,"name":"media-title","data":"lavfi:sine=frequency=440:d=2"}
+{"event":"property-change","id":6,"name":"path","data":"av://lavfi:sine=frequency=440:d=2"}
+{"event":"audio-reconfig"}
+{"event":"audio-reconfig"}
+{"event":"file-loaded"}
+{"event":"property-change","id":2,"name":"metadata","data":{}}
+{"event":"property-change","id":7,"name":"paused-for-cache","data":false}
+{"event":"audio-reconfig"}
+{"event":"playback-restart"}"#;
+
+    /// Fixture 2, run 2: the most frequent shape (16 of 20 runs), where the
+    /// second response falls after the chime's `start-file` and
+    /// `playlist-pos: 0` after the real file's `media-title`.
+    const INTERRUPTED_RUN_2: &str = r#"{"data":{"playlist_entry_id":23},"request_id":95,"error":"success"}
+{"event":"start-file","playlist_entry_id":23}
+{"data":{"playlist_entry_id":24},"request_id":96,"error":"success"}
+{"event":"property-change","id":1,"name":"media-title","data":"lavfi:aevalsrc=exprs='if(between(t,0,0.015),0.0001*exp(513.080843*(t-0)),if(between(t,0.015,0.565),0.22*exp(-13.993114*(t-0.015)),0))*(1*sin(2*PI*659.25*(t-0))+0.05*sin(2*PI*1318.5*(t-0)))+if(between(t,0.16,0.175),0.0001*exp(513.080843*(t-0.16)),if(between(t,0.175,0.725),0.22*exp(-13.993114*(t-0.175)),0))*(1*sin(2*PI*523.25*(t-0.16))+0.05*sin(2*PI*1046.5*(t-0.16)))':s=48000:d=0.74"}
+{"event":"property-change","id":3,"name":"idle-active","data":false}
+{"event":"property-change","id":6,"name":"path","data":"av://lavfi:aevalsrc=exprs='if(between(t,0,0.015),0.0001*exp(513.080843*(t-0)),if(between(t,0.015,0.565),0.22*exp(-13.993114*(t-0.015)),0))*(1*sin(2*PI*659.25*(t-0))+0.05*sin(2*PI*1318.5*(t-0)))+if(between(t,0.16,0.175),0.0001*exp(513.080843*(t-0.16)),if(between(t,0.175,0.725),0.22*exp(-13.993114*(t-0.175)),0))*(1*sin(2*PI*523.25*(t-0.16))+0.05*sin(2*PI*1046.5*(t-0.16)))':s=48000:d=0.74"}
+{"event":"end-file","reason":"stop","playlist_entry_id":23}
+{"event":"start-file","playlist_entry_id":24}
+{"event":"property-change","id":1,"name":"media-title","data":"lavfi:sine=frequency=440:d=2"}
+{"event":"property-change","id":4,"name":"playlist-pos","data":0}
+{"event":"property-change","id":6,"name":"path","data":"av://lavfi:sine=frequency=440:d=2"}
+{"event":"audio-reconfig"}
+{"event":"audio-reconfig"}
+{"event":"file-loaded"}
+{"event":"property-change","id":2,"name":"metadata","data":{}}
+{"event":"property-change","id":7,"name":"paused-for-cache","data":false}
+{"event":"audio-reconfig"}
+{"event":"playback-restart"}"#;
+
+    fn lines_of(fixture: &str) -> Vec<Value> {
+        fixture.lines().map(|l| serde_json::from_str(l).unwrap()).collect()
+    }
+
+    /// What the pump hands on for these lines: responses never reach the
+    /// gate; an admitted line is followed by what the gate replays after it.
+    fn feed(gate: &mut AsideGate, lines: &[Value]) -> Vec<Value> {
+        let mut admitted = Vec::new();
+        for line in lines.iter().filter(|l| l.get("request_id").is_none()) {
+            if gate.admit(line) {
+                admitted.push(line.clone());
+                admitted.extend(gate.take_replay());
+            }
+        }
+        admitted
+    }
+
+    /// The chime, then mpv setting back what it moved: not one line passes,
+    /// and the next load passes with nothing replayed in front of it.
+    #[test]
+    fn aside_gate_swallows_the_captured_idle_chime() {
+        let mut gate = AsideGate::default();
+        let startup = lines_of(STARTUP);
+        assert_eq!(feed(&mut gate, &startup), startup);
+        gate.arm();
+        let mut chime = lines_of(IDLE_CHIME);
+        chime.extend(lines_of(IDLE_CHIME_TAIL));
+        assert_eq!(feed(&mut gate, &chime), Vec::<Value>::new());
+        let real = json!({"event":"start-file","playlist_entry_id":2});
+        assert_eq!(feed(&mut gate, std::slice::from_ref(&real)), vec![real], "the load after the chime must reach the core");
+        // And a stop after it is a stop again.
+        let stop = json!({"event":"property-change","id":3,"name":"idle-active","data":true});
+        assert!(gate.admit(&json!({"event":"property-change","id":3,"name":"idle-active","data":false})));
+        assert!(gate.admit(&stop));
+    }
+
+    /// Wherever the second response and `playlist-pos` fall (run 1, then
+    /// run 2's shape), the real load passes through from its `start-file`
+    /// on — and the `playlist-pos: 0` swallowed inside the chime in run 1,
+    /// which mpv will not notify again, is replayed right behind it.
+    #[test]
+    fn a_real_load_during_an_aside_passes_through() {
+        let run1 = lines_of(INTERRUPTED_RUN_1);
+        let real_start = run1.iter().position(|l| *l == json!({"event":"start-file","playlist_entry_id":22})).unwrap();
+        let mut gate = AsideGate::default();
+        feed(&mut gate, &lines_of(STARTUP));
+        gate.arm();
+        let mut expected = vec![run1[real_start].clone()];
+        expected.push(json!({"event":"property-change","id":4,"name":"playlist-pos","data":0}));
+        expected.extend(run1[real_start + 1..].iter().cloned());
+        assert_eq!(feed(&mut gate, &run1), expected);
+        // The chime's `idle-active: false` was swallowed and mpv will not
+        // repeat it for the real file: the real stop must still pass.
+        let stop = json!({"event":"property-change","id":3,"name":"idle-active","data":true});
+        assert_eq!(feed(&mut gate, std::slice::from_ref(&stop)), vec![stop]);
+
+        let run2 = lines_of(INTERRUPTED_RUN_2);
+        let real_start = run2.iter().position(|l| *l == json!({"event":"start-file","playlist_entry_id":24})).unwrap();
+        let mut gate = AsideGate::default();
+        feed(&mut gate, &lines_of(STARTUP));
+        gate.arm();
+        // Nothing swallowed carried a track number: nothing to replay.
+        assert_eq!(feed(&mut gate, &run2), run2[real_start..].to_vec());
+    }
+
+    /// Should mpv leave the chime's `playlist-pos: 0` in place after idle —
+    /// the spike's capture, cut at `idle-active: true`, read that way — a
+    /// later real load at position 0 would never be notified: the swallowed
+    /// value is replayed behind that load's `start-file`, and a real
+    /// notification after it still wins.
+    #[test]
+    fn a_track_number_swallowed_by_an_idle_chime_is_replayed_at_the_next_real_load() {
+        let mut gate = AsideGate::default();
+        // What the core last saw: the previous content stopped at -1.
+        assert!(gate.admit(&json!({"event":"property-change","id":4,"name":"playlist-pos","data":-1})));
+        gate.arm();
+        assert_eq!(feed(&mut gate, &lines_of(IDLE_CHIME)), Vec::<Value>::new());
+        let real = json!({"event":"start-file","playlist_entry_id":2});
+        let real_pos = json!({"event":"property-change","id":4,"name":"playlist-pos","data":2});
+        assert_eq!(
+            feed(&mut gate, &[real.clone(), real_pos.clone()]),
+            vec![real.clone(), json!({"event":"property-change","id":4,"name":"playlist-pos","data":0}), real_pos],
+        );
+        // Replayed once only.
+        assert_eq!(feed(&mut gate, std::slice::from_ref(&real)), vec![real.clone()]);
+
+        // A swallowed value equal to what the core already holds is what
+        // mpv would not have re-sent without the chime: nothing replayed.
+        let mut gate = AsideGate::default();
+        assert!(gate.admit(&json!({"event":"property-change","id":4,"name":"playlist-pos","data":0})));
+        gate.arm();
+        assert_eq!(feed(&mut gate, &lines_of(IDLE_CHIME)), Vec::<Value>::new());
+        assert_eq!(feed(&mut gate, std::slice::from_ref(&real)), vec![real]);
+    }
+
+    #[test]
+    fn two_asides_in_a_row_swallow_both_and_nothing_after() {
+        let mut gate = AsideGate::default();
+        gate.arm();
+        gate.arm();
+        let chimes = [
+            json!({"event":"start-file","playlist_entry_id":1}),
+            json!({"event":"property-change","id":1,"name":"media-title","data":"chime 1"}),
+            json!({"event":"property-change","id":3,"name":"idle-active","data":false}),
+            json!({"event":"property-change","id":6,"name":"path","data":"av://chime1"}),
+            json!({"event":"end-file","reason":"stop","playlist_entry_id":1}),
+            json!({"event":"start-file","playlist_entry_id":2}),
+            json!({"event":"property-change","id":1,"name":"media-title","data":"chime 2"}),
+            json!({"event":"property-change","id":6,"name":"path","data":"av://chime2"}),
+            json!({"event":"file-loaded"}),
+            json!({"event":"playback-restart"}),
+            json!({"event":"end-file","reason":"eof","playlist_entry_id":2}),
+            json!({"event":"idle"}),
+            json!({"event":"property-change","id":1,"name":"media-title"}),
+            json!({"event":"property-change","id":3,"name":"idle-active","data":true}),
+        ];
+        assert_eq!(feed(&mut gate, &chimes), Vec::<Value>::new());
+        // The chime is over at its `idle-active: true`: whatever mpv says
+        // next is the core's again, a load or not.
+        let other = json!({"event":"audio-reconfig"});
+        assert!(gate.admit(&other), "the gate stayed shut after the chime's idle");
+        let real = json!({"event":"start-file","playlist_entry_id":3});
+        let after = json!({"event":"file-loaded"});
+        assert_eq!(feed(&mut gate, &[real.clone(), after.clone()]), vec![real, after]);
+    }
+
+    #[test]
+    fn a_failed_aside_does_not_swallow_the_next_load() {
+        let mut gate = AsideGate::default();
+        gate.arm();
+        gate.disarm();
+        assert!(gate.admit(&json!({"event":"start-file","playlist_entry_id":1})));
+    }
+
+    /// The gate leaves the startup idle alone; the pump's own `first_idle`
+    /// rule still swallows it (see `the_first_observed_idle_is_not_a_stop`).
+    #[tokio::test]
+    async fn the_initial_idle_is_unaffected() {
+        let idle = json!({"event":"property-change","id":3,"name":"idle-active","data":true});
+        assert!(AsideGate::default().admit(&idle));
+
+        let (client, server) = UnixStream::pair().unwrap();
+        let (tx, mut rx) = mpsc::channel(16);
+        let _ipc = MpvIpc::from_stream(client, tx);
+        let (_r, mut w) = server.into_split();
+        w.write_all(format!("{idle}\n").as_bytes()).await.unwrap();
+        w.write_all(b"{\"event\":\"file-loaded\"}\n").await.unwrap();
+        assert_eq!(rx.recv().await.unwrap(), Event::PlaybackActive);
+    }
+
+    /// Through the pump, the captured sequence end to end: the startup, an
+    /// idle chime and its tail produce nothing after the startup's own
+    /// event, and a real load after it comes through whole.
+    #[tokio::test]
+    async fn an_idle_chime_then_a_real_load_through_the_pump() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let (tx, mut rx) = mpsc::channel(64);
+        let ipc = MpvIpc::from_stream(client, tx);
+        let (_r, mut w) = server.into_split();
+        w.write_all(format!("{STARTUP}\n").as_bytes()).await.unwrap();
+        assert_eq!(rx.recv().await.unwrap(), Event::TrackChanged(-1));
+        ipc.gate.lock().unwrap().arm();
+        // The fixture's response line answers no pending request: ignored.
+        w.write_all(format!("{IDLE_CHIME}\n{IDLE_CHIME_TAIL}\n").as_bytes()).await.unwrap();
+        w.write_all(b"{\"event\":\"start-file\",\"playlist_entry_id\":2}\n").await.unwrap();
+        w.write_all(b"{\"event\":\"property-change\",\"id\":4,\"name\":\"playlist-pos\",\"data\":0}\n").await.unwrap();
+        w.write_all(b"{\"event\":\"property-change\",\"id\":6,\"name\":\"path\",\"data\":\"/m/a.flac\"}\n").await.unwrap();
+        w.write_all(b"{\"event\":\"file-loaded\"}\n").await.unwrap();
+        let mut got = Vec::new();
+        for _ in 0..4 {
+            let ev = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await;
+            got.push(ev.expect("an event within 2 s").unwrap());
+        }
+        assert_eq!(
+            got,
+            vec![Event::FileStarting, Event::TrackChanged(0), Event::Path("/m/a.flac".into()), Event::PlaybackActive]
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// Through the pump, the truncated shape: the swallowed track number is
+    /// replayed as a `TrackChanged` right behind the real `FileStarting`.
+    #[tokio::test]
+    async fn a_swallowed_track_number_reaches_the_core_as_an_event() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let (tx, mut rx) = mpsc::channel(64);
+        let ipc = MpvIpc::from_stream(client, tx);
+        let (_r, mut w) = server.into_split();
+        w.write_all(format!("{STARTUP}\n").as_bytes()).await.unwrap();
+        assert_eq!(rx.recv().await.unwrap(), Event::TrackChanged(-1));
+        ipc.gate.lock().unwrap().arm();
+        w.write_all(format!("{IDLE_CHIME}\n").as_bytes()).await.unwrap();
+        w.write_all(b"{\"event\":\"start-file\",\"playlist_entry_id\":2}\n").await.unwrap();
+        w.write_all(b"{\"event\":\"file-loaded\"}\n").await.unwrap();
+        let mut got = Vec::new();
+        for _ in 0..3 {
+            let ev = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await;
+            got.push(ev.expect("an event within 2 s").unwrap());
+        }
+        assert_eq!(got, vec![Event::FileStarting, Event::TrackChanged(0), Event::PlaybackActive]);
+    }
+
+    /// A fake mpv answering `get_property` from `answers` (an absent name is
+    /// mpv's "property unavailable"), recording every command it receives.
+    fn answering(server: UnixStream, answers: Vec<(&'static str, Value)>) -> tokio::task::JoinHandle<Vec<Value>> {
+        tokio::spawn(async move {
+            let (r, mut w) = server.into_split();
+            let mut lines = BufReader::new(r).lines();
+            let mut seen = Vec::new();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let req: Value = serde_json::from_str(&line).unwrap();
+                let id = req["request_id"].as_u64().unwrap();
+                let answer = req["command"][1].as_str().and_then(|n| answers.iter().find(|(k, _)| *k == n));
+                let resp = match answer {
+                    Some((_, data)) => json!({"data": data, "request_id": id, "error": "success"}),
+                    None => json!({"request_id": id, "error": "property unavailable"}),
+                };
+                w.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+                seen.push(req["command"].clone());
+            }
+            seen
+        })
+    }
+
+    async fn route_with(answers: Vec<(&'static str, Value)>) -> (Result<crate::player::ChimeRoute>, Vec<Value>) {
+        use crate::player::Player;
+        let (client, server) = UnixStream::pair().unwrap();
+        let (tx, _rx) = mpsc::channel(16);
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        let server = answering(server, answers);
+        let route = player.chime_route().await;
+        drop(player);
+        (route, server.await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn route_is_silent_when_paused_or_loading() {
+        use crate::player::ChimeRoute;
+        let (route, _) = route_with(vec![("idle-active", json!(false)), ("pause", json!(true))]).await;
+        assert_eq!(route.unwrap(), ChimeRoute::Silent);
+        // Loading: no audio parameters yet, as an error or as a `null`.
+        let (route, _) = route_with(vec![("idle-active", json!(false)), ("pause", json!(false))]).await;
+        assert_eq!(route.unwrap(), ChimeRoute::Silent);
+        let (route, _) =
+            route_with(vec![("idle-active", json!(false)), ("pause", json!(false)), ("audio-params", Value::Null)]).await;
+        assert_eq!(route.unwrap(), ChimeRoute::Silent);
+        let (route, _) = route_with(vec![
+            ("idle-active", json!(false)),
+            ("pause", json!(false)),
+            ("audio-params", json!({"format": "floatp", "samplerate": 44100})),
+        ])
+        .await;
+        assert_eq!(route.unwrap(), ChimeRoute::Silent);
+        let (route, sent) = route_with(vec![
+            ("idle-active", json!(false)),
+            ("pause", json!(false)),
+            ("audio-params", json!({"format": "floatp", "samplerate": 44100, "channel-count": 2})),
+        ])
+        .await;
+        assert_eq!(route.unwrap(), ChimeRoute::Live { sample_rate: 44100, channels: 2 });
+        assert_eq!(
+            sent,
+            vec![
+                json!(["get_property", "idle-active"]),
+                json!(["get_property", "pause"]),
+                json!(["get_property", "audio-params"]),
+            ]
+        );
+        let (route, sent) = route_with(vec![("idle-active", json!(true))]).await;
+        assert_eq!(route.unwrap(), ChimeRoute::Idle);
+        assert_eq!(sent, vec![json!(["get_property", "idle-active"])], "Idle after a single request");
+        // mpv unreachable on the first question: a failure, not a route.
+        let (route, _) = route_with(vec![]).await;
+        assert!(route.is_err());
+    }
+
+    /// The form measured by the lock-sound spike on mpv 0.37: the file-local
+    /// options keep a global `pause` and `loop-file` from touching the chime.
+    #[tokio::test]
+    async fn play_aside_sends_the_named_loadfile() {
+        use crate::player::Player;
+        let (client, server) = UnixStream::pair().unwrap();
+        let (tx, _rx) = mpsc::channel(16);
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        let server = tokio::spawn(async move {
+            let (r, mut w) = server.into_split();
+            let mut lines = BufReader::new(r).lines();
+            let mut seen = Vec::new();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let req: Value = serde_json::from_str(&line).unwrap();
+                let id = req["request_id"].as_u64().unwrap();
+                let resp = json!({"data": {"playlist_entry_id": 1}, "request_id": id, "error": "success"});
+                w.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+                seen.push(req);
+            }
+            seen
+        });
+        let uri = "av://lavfi:aevalsrc=exprs='sin(2*PI*440*t)':s=48000:d=0.5";
+        player.play_aside(uri).await.unwrap();
+        drop(player);
+        let seen = server.await.unwrap();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(
+            seen[0]["command"],
+            json!({"name": "loadfile", "url": uri, "flags": "replace", "options": "loop-file=no,pause=no"})
+        );
+        assert!(seen[0]["request_id"].is_u64(), "{}", seen[0]);
+    }
+
+    /// mpv refusing the load: the error comes back, and the next real load's
+    /// `start-file` is not taken for the chime's.
+    #[tokio::test]
+    async fn a_refused_play_aside_leaves_the_gate_open() {
+        use crate::player::Player;
+        let (client, server) = UnixStream::pair().unwrap();
+        let (tx, mut rx) = mpsc::channel(16);
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        let (r, mut w) = server.into_split();
+        let mut lines = BufReader::new(r).lines();
+        let answer = async {
+            let req: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            let resp = json!({"request_id": req["request_id"], "error": "error running command"});
+            w.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+        };
+        let (res, ()) = tokio::join!(player.play_aside("av://lavfi:anullsrc"), answer);
+        assert!(res.is_err());
+        w.write_all(b"{\"event\":\"start-file\",\"playlist_entry_id\":1}\n").await.unwrap();
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await;
+        assert!(matches!(ev, Ok(Some(Event::FileStarting))), "{ev:?}");
+    }
+
+    /// `start` on a wrapper script a test has just written. Retried on
+    /// `ETXTBSY` only: another test thread forking while the script's file
+    /// was open for writing holds a copy of that descriptor until its own
+    /// `exec`, and running the script in that window fails ("Text file
+    /// busy") — a race of parallel tests, never of the device.
+    async fn start_test_mpv(mpv: &Path, d: &Path, af: &str, tx: mpsc::Sender<Event>) -> (MpvPlayer, tokio::process::Child) {
+        for _ in 0..50 {
+            match start(mpv.to_str().unwrap(), &d.join("mpv.sock"), "/dev/null", AUDIO_BUFFER_DEFAULT, READAHEAD_DEFAULT, af, tx.clone()).await {
+                Ok(started) => return started,
+                Err(e) if e.chain().any(|c| c.downcast_ref::<std::io::Error>().and_then(std::io::Error::raw_os_error) == Some(26)) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                Err(e) => panic!("starting mpv: {e:#}"),
+            }
+        }
+        panic!("starting mpv: text file still busy after 50 attempts");
+    }
+
+    fn mpv_missing() -> bool {
+        std::process::Command::new("mpv").arg("--version").output().map(|o| !o.status.success()).unwrap_or(true)
+    }
+
+    fn wrapper(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// Amplitude of the `freq` component of `x` (Goertzel), as a fraction of
+    /// full scale.
+    fn tone_amplitude(x: &[f64], freq: f64, rate: f64) -> f64 {
+        let w = 2.0 * std::f64::consts::PI * freq / rate;
+        let (mut s1, mut s2) = (0.0, 0.0);
+        for v in x {
+            let s = v + 2.0 * w.cos() * s1 - s2;
+            s2 = s1;
+            s1 = s;
+        }
+        let power = s1 * s1 + s2 * s2 - 2.0 * w.cos() * s1 * s2;
+        2.0 * power.max(0.0).sqrt() / x.len() as f64
+    }
+
+    /// The real thing: under a hostile global `pause`, an idle chime is
+    /// written to the output (its first note, 659.25 Hz, is there), mpv goes
+    /// back to idle, and not one event of that load reaches the channel —
+    /// then a real load passes through again.
+    ///
+    /// `ao=pcm` is untimed (the chime ends in tens of milliseconds here); on
+    /// real hardware it lasts its duration. Raw s16 mono at 48 kHz without a
+    /// header, as the spike did: appending to a WAV rewrites its header.
+    #[tokio::test]
+    async fn an_aside_on_a_real_mpv_is_heard_and_reaches_no_one() {
+        use crate::player::{ChimeRoute, Player};
+        if mpv_missing() {
+            eprintln!("mpv missing: skipping test");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let out = d.join("out.pcm");
+        let mpv = d.join("mpv");
+        wrapper(
+            &mpv,
+            &format!(
+                "#!/bin/sh\nexec mpv --no-config --ao=pcm --ao-pcm-file='{}' --ao-pcm-append=yes --ao-pcm-waveheader=no \
+                 --audio-format=s16 --audio-channels=mono --audio-samplerate=48000 \"$@\"\n",
+                out.display()
+            ),
+        );
+        let (tx, mut rx) = mpsc::channel(1024);
+        let (player, _child) =
+            start_test_mpv(&mpv, d, "", tx).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        while rx.try_recv().is_ok() {}
+        player.ipc.command(&[json!("set_property"), json!("pause"), json!(true)]).await.unwrap();
+
+        let uri = crate::lock_sound::idle_uri(crate::lock_sound::LockSound::A, crate::lock_sound::Motif::Lock).unwrap();
+        player.play_aside(&uri).await.unwrap();
+        // 0.74 s of s16 mono at 48 kHz, and mpv back to idle.
+        let expected_bytes = 2 * 35_520;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let written = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+            let idle = player.ipc.command(&[json!("get_property"), json!("idle-active")]).await.unwrap();
+            if written >= expected_bytes && idle == json!(true) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "chime not played back to idle: {written} bytes, idle {idle}");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let leaked: Vec<Event> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert_eq!(leaked, vec![], "an event of the aside reached the core");
+
+        let raw = std::fs::read(&out).unwrap();
+        let x: Vec<f64> = raw.as_chunks::<2>().0.iter().map(|b| i16::from_le_bytes(*b) as f64 / 32768.0).collect();
+        let onset = x.iter().position(|v| v.abs() > 0.01).expect("the output is silent");
+        let first_note = tone_amplitude(&x[onset..(onset + 4800).min(x.len())], 659.25, 48000.0);
+        assert!(first_note > 0.05, "no energy at 659.25 Hz: {first_note}");
+        assert_eq!(player.chime_route().await.unwrap(), ChimeRoute::Idle);
+
+        // The gate is open again: a real load reaches the core.
+        player.play("av://lavfi:sine=frequency=440:duration=1").await.unwrap();
+        let mut got = Vec::new();
+        let waited = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while let Some(ev) = rx.recv().await {
+                got.push(ev);
+                if got.contains(&Event::FileStarting) && got.contains(&Event::PlaybackActive) {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(waited.is_ok(), "the real load after the aside did not reach the core: {got:?}");
+    }
+
+    #[tokio::test]
+    async fn the_route_of_a_real_playing_mpv_is_live() {
+        use crate::player::{ChimeRoute, Player};
+        if mpv_missing() {
+            eprintln!("mpv missing: skipping test");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let mpv = d.join("mpv");
+        wrapper(&mpv, "#!/bin/sh\nexec mpv --no-config --ao=null \"$@\"\n");
+        let (tx, mut rx) = mpsc::channel(1024);
+        let (player, _child) =
+            start_test_mpv(&mpv, d, "", tx).await;
+        assert_eq!(player.chime_route().await.unwrap(), ChimeRoute::Idle);
+        player.play("av://lavfi:sine=frequency=440:sample_rate=44100:duration=30").await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while let Some(ev) = rx.recv().await {
+                if ev == Event::PlaybackRestarted {
+                    return;
+                }
+            }
+            panic!("event channel closed before playback-restart");
+        })
+        .await
+        .expect("no playback-restart within 10 s");
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        assert_eq!(player.chime_route().await.unwrap(), ChimeRoute::Live { sample_rate: 44100, channels: 1 });
+        player.toggle_pause().await.unwrap();
+        assert_eq!(player.chime_route().await.unwrap(), ChimeRoute::Silent);
+        player.stop().await.unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while player.chime_route().await.unwrap() != ChimeRoute::Idle {
+            assert!(std::time::Instant::now() < deadline, "mpv never went back to idle");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
 }

@@ -3519,6 +3519,12 @@ mod toggle_tests {
         async fn audio_filter_command(&self, _cmd: &crate::equalizer::AfCommand) -> Result<()> {
             Ok(())
         }
+        async fn chime_route(&self) -> Result<crate::player::ChimeRoute> {
+            Ok(crate::player::ChimeRoute::Silent)
+        }
+        async fn play_aside(&self, _uri: &str) -> Result<()> {
+            Ok(())
+        }
     }
 
     /// A source client that answers nothing useful. No test here sends it a

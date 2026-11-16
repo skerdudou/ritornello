@@ -14,6 +14,20 @@ pub struct Progress {
     pub duration_s: Option<f64>,
 }
 
+/// Where a chime can play at this instant (see `crate::lock_sound`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChimeRoute {
+    /// Nothing loaded: the chime is loaded on its own (`Player::play_aside`).
+    #[default]
+    Idle,
+    /// A file plays: the chime is mixed into its chain, at its rate and
+    /// channel count (`lock_sound::mix_filter`).
+    Live { sample_rate: u32, channels: u32 },
+    /// Something is loaded but nothing is heard (paused, or still loading):
+    /// no chime can play.
+    Silent,
+}
+
 #[async_trait::async_trait]
 pub trait Player: Send + Sync + 'static {
     async fn play(&self, uri: &str) -> Result<()>;
@@ -75,4 +89,13 @@ pub trait Player: Send + Sync + 'static {
     /// (`af-command`), without a click. The change is lost at the next file
     /// load, which rebuilds the chain from the recorded `af`.
     async fn audio_filter_command(&self, cmd: &crate::equalizer::AfCommand) -> Result<()>;
+    /// Where a chime can play now: `Idle` when mpv has nothing loaded;
+    /// `Live` while a file plays (rate and channels from `audio-params`);
+    /// `Silent` when paused, or when the file has no audio parameters yet
+    /// (loading).
+    async fn chime_route(&self) -> Result<ChimeRoute>;
+    /// Loads a generated sound while mpv is idle; none of that load's events
+    /// reach the core (mpv's `AsideGate`), so the core keeps believing
+    /// nothing plays — which is the truth it acts on.
+    async fn play_aside(&self, uri: &str) -> Result<()>;
 }
