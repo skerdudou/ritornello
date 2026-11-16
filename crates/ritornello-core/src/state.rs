@@ -831,6 +831,15 @@ mod tests {
             r#"{"enabled":true,"auto_preamp":true,"gains":[0,0,0,0,0,0,0,0,0,0],"preset":null,"user_presets":[{"name":"","gains":[0,0,0,0,0,0,0,0,0,0]}]}"#
                 .to_string(),
             format!(r#"{{{ok},"gains":"loud"}}"#),
+            "null".to_string(),
+            r#""loud""#.to_string(),
+            "[1,2,3]".to_string(),
+            format!(r#"{{{ok},"gains":[0,0,0,0,0,0,0,0,0]}}"#),
+            format!(r#"{{{ok},"gains":[0,0,0,0,0,0,0,0,0,1.5]}}"#),
+            format!(r#"{{{ok},"gains":[0,0,0,0,0,0,0,0,0,300]}}"#),
+            format!(r#"{{{ok},"gains":[0,0,0,0,0,0,0,0,0,-128]}}"#),
+            r#"{"enabled":true,"auto_preamp":true,"gains":[0,0,0,0,0,0,0,0,0,0],"preset":null,"user_presets":{}}"#
+                .to_string(),
         ];
         for block in blocks {
             let text = format!(r#"{{"active_source":"cd","volume":37,"random":true,"equalizer":{block}}}"#);
