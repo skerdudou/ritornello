@@ -39,7 +39,6 @@ pub enum Motif {
     /// The lock motif, then the unlock motif starting right after it ends
     /// (at `duration(sound, Motif::Lock)`): what the config page plays to let
     /// the owner hear a choice.
-    #[cfg_attr(not(test), expect(dead_code, reason = "played by `Core::preview_lock_sound`, which no route calls yet"))]
     Preview,
 }
 

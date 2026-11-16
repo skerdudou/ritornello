@@ -1793,6 +1793,7 @@ async fn main() -> Result<()> {
     let (enrich_tx, mut enrich_rx) = mpsc::channel::<(String, Enrichment)>(32);
     let (audio_tx, mut audio_rx) = mpsc::channel::<Option<String>>(4);
     let (eq_tx, mut eq_rx) = mpsc::channel::<equalizer::EqualizerSettings>(4);
+    let (lock_sound_preview_tx, mut lock_sound_rx) = mpsc::channel::<lock_sound::LockSound>(1);
     let (update_sources_tx, mut update_sources_rx) = mpsc::channel::<Vec<String>>(4);
     let (pack_preferences_tx, mut pack_preferences_rx) = mpsc::channel::<Vec<state::PackPreference>>(4);
     let (locale_tx, mut locale_rx) = mpsc::channel::<String>(4);
@@ -2407,6 +2408,7 @@ async fn main() -> Result<()> {
             audio_tx: audio_tx.clone(),
             eq_current: eq_current.clone(),
             eq_tx: eq_tx.clone(),
+            lock_sound_preview_tx,
             catalog: catalog.clone(),
             registry: registry.clone(),
             locale_current: locale_current.clone(),
@@ -2899,6 +2901,7 @@ async fn main() -> Result<()> {
                     tracing::warn!("audio output change: {e}");
                 }
             }
+            Some(sound) = lock_sound_rx.recv() => core.preview_lock_sound(sound).await,
             Some(settings) = eq_rx.recv() => {
                 if let Err(e) = core.set_equalizer(settings).await {
                     tracing::warn!("equalizer change: {e}");

@@ -69,7 +69,6 @@ impl<P: Player> Core<P> {
 
     /// The config page lets the owner hear `sound` — whatever the setting
     /// holds — by the same route as a lock change.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the config page's preview route is not wired yet"))]
     pub async fn preview_lock_sound(&mut self, sound: LockSound) {
         self.play_lock_sound(sound, Motif::Preview).await;
     }
