@@ -437,4 +437,25 @@ describe('current queue pane', () => {
     expect(w.findAll('[data-track-row]')).toHaveLength(2)
     expect(w.find('[data-track-path]').exists()).toBe(false)
   })
+
+  it('a file name with no space breaks anywhere instead of widening the table', async () => {
+    const { w } = await mountAdmin({ playlist: THREE })
+    for (const b of w.findAll('[data-track-name]')) {
+      expect(b.classes()).toContain('wrap-anywhere')
+    }
+  })
+
+  it('unresolved m3u lines break like paths', async () => {
+    const { w } = await mountAdmin({ playlist: THREE, unresolved: ['Albums/Rock/lost.mp3'] })
+    expect(w.find('[data-unresolved-row]').element.parentElement!.classList).toContain('break-all')
+  })
+
+  it('the playlist selects never grow past the card', async () => {
+    const { w } = await mountAdmin({
+      playlist: THREE,
+      saved: [{ name: 'Jazz', where: 'internal' }],
+    })
+    expect(w.get('[data-playlist-where]').classes()).toContain('max-w-full')
+    expect(w.get('[data-saved-pick]').classes()).toContain('max-w-full')
+  })
 })

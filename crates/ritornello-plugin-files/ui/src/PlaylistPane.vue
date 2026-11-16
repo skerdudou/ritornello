@@ -289,7 +289,7 @@ function load(): void {
                 <button
                   type="button"
                   data-track-name
-                  class="cursor-pointer text-left underline decoration-dotted underline-offset-4"
+                  class="cursor-pointer text-left wrap-anywhere underline decoration-dotted underline-offset-4"
                   :title="p.path"
                   :aria-expanded="openPath === p.path"
                   @click="togglePath(p.path)"
@@ -396,7 +396,7 @@ function load(): void {
             : t('unresolved_title', { count: data.unresolved.length })
         }}
       </p>
-      <ul class="text-xs text-muted-foreground">
+      <ul class="break-all text-xs text-muted-foreground">
         <li v-for="u in data.unresolved" :key="u" data-unresolved-row>{{ u }}</li>
       </ul>
     </div>
@@ -411,7 +411,7 @@ function load(): void {
       <select
         v-model="destination"
         data-playlist-where
-        class="h-9 rounded-md border border-input bg-transparent px-2 text-sm"
+        class="h-9 max-w-full rounded-md border border-input bg-transparent px-2 text-sm"
         :aria-label="t('dest_label')"
       >
         <!-- Only the **writable** roots are offered: a share mounted
@@ -434,7 +434,7 @@ function load(): void {
         <select
           v-model="toLoad"
           data-saved-pick
-          class="h-9 rounded-md border border-input bg-transparent px-2 text-sm"
+          class="h-9 max-w-full rounded-md border border-input bg-transparent px-2 text-sm"
           :aria-label="t('load_playlist_label')"
         >
           <!-- The location is displayed with the name: two "Jazz" lists can
