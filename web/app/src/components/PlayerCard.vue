@@ -9,6 +9,7 @@ import AppleMusicIcon from './icons/AppleMusicIcon.vue'
 import DeezerIcon from './icons/DeezerIcon.vue'
 import YoutubeIcon from './icons/YoutubeIcon.vue'
 import { LINK_LABEL } from './links'
+import { useCoverZoom, type ZoomMeasure } from './useCoverZoom'
 import { useCatalog } from '../composables/useCatalog'
 import { formatDuration, nothingToShow } from '../composables/usePlayer'
 import type { PlayerPayload } from '../types'
@@ -169,8 +170,35 @@ const enlargedLoading = ref(false)
  * be just as slow as the first if the core's cache has since evicted it.
  */
 function openEnlarged() {
+  zoom.reset()
   enlarged.value = true
   enlargedLoading.value = true
+}
+/** The overlay (the zoom's viewport) and the enlarged `<img>` in it. */
+const overlayEl = ref<HTMLElement | null>(null)
+const enlargedImg = ref<HTMLImageElement | null>(null)
+/**
+ * The sizes the zoom arithmetic needs, read at the moment of each gesture.
+ * The image's box is its laid-out size at ×1 (`offsetWidth` ignores the CSS
+ * transform), the viewport the overlay's inner area. Zero when absent, which
+ * the arithmetic treats as "nothing to pan".
+ */
+function measure(): ZoomMeasure {
+  const img = enlargedImg.value
+  const el = overlayEl.value
+  const rect = el?.getBoundingClientRect()
+  return {
+    box: { width: img?.offsetWidth ?? 0, height: img?.offsetHeight ?? 0 },
+    viewport: { width: el?.clientWidth ?? 0, height: el?.clientHeight ?? 0 },
+    center: rect ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } : { x: 0, y: 0 },
+  }
+}
+const zoom = useCoverZoom(measure)
+// The browser fires a `click` at the end of a drag (mouse or one finger) as
+// after a press; only the gesture machine knows whether what ended was a
+// still press at ×1.
+function onVeilClick() {
+  if (zoom.shouldClose()) enlarged.value = false
 }
 // Escape closes, like any modal overlay. The listener only exists while open:
 // a permanent global listener for a rarely-opened view is a debt, and it would
@@ -178,14 +206,25 @@ function openEnlarged() {
 function onEscape(e: KeyboardEvent) {
   if (e.key === 'Escape') enlarged.value = false
 }
+// A new viewport invalidates the pan limits the current view was clamped to:
+// back to original size rather than leave the image off its edges.
+function onResize() {
+  zoom.reset()
+}
 watch(enlarged, (open) => {
-  if (open) window.addEventListener('keydown', onEscape)
-  else window.removeEventListener('keydown', onEscape)
+  if (open) {
+    window.addEventListener('keydown', onEscape)
+    window.addEventListener('resize', onResize)
+  } else {
+    window.removeEventListener('keydown', onEscape)
+    window.removeEventListener('resize', onResize)
+  }
 })
-// Without this, leaving the page with the cover open leaves the listener
+// Without this, leaving the page with the cover open leaves the listeners
 // behind — and the retry timer would run against an unmounted component.
 onUnmounted(() => {
   window.removeEventListener('keydown', onEscape)
+  window.removeEventListener('resize', onResize)
   cancelRetry()
 })
 // The duration is only shown when there is no progress bar: when a position is
@@ -453,27 +492,44 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
     </CardContent>
     <!-- The cover full screen. `Teleport` to the `body`: the card has an
          `overflow-hidden` (rounded corners) and its own stacking context, an
-         overlay rendered inside it would have ended up clipped. A click
-         **anywhere** closes, including on the image: that is the request
-         ("close by clicking again"), and it is also what every image viewer
-         does. -->
+         overlay rendered inside it would have ended up clipped. A tap
+         **anywhere** closes at original size, including on the image: that is
+         the request ("close by clicking again"), and it is also what every
+         image viewer does. Once zoomed a tap is for looking, a double tap
+         returns to original size, X and Escape always close. `touch-action:
+         none` keeps the browser from panning or zooming the page under the
+         fingers: the gestures are the overlay's. -->
     <Teleport to="body">
       <div
         v-if="enlarged"
-        class="fixed inset-0 z-50 flex cursor-zoom-out items-center justify-center bg-black/80 p-4"
+        ref="overlayEl"
+        class="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-black/80 p-4"
+        :class="zoom.view.value.scale > 1 ? 'cursor-grab' : 'cursor-zoom-out'"
+        :style="{ touchAction: 'none' }"
         role="dialog"
         aria-modal="true"
         :aria-label="t('cover_alt')"
         data-cover-enlarged
-        @click="enlarged = false"
+        @click="onVeilClick"
+        @pointerdown="zoom.onPointerdown"
+        @pointermove="zoom.onPointermove"
+        @pointerup="zoom.onPointerup"
+        @pointercancel="zoom.onPointercancel"
+        @lostpointercapture="zoom.onLostpointercapture"
+        @wheel="zoom.onWheel"
       >
         <!-- `object-contain` and not `object-cover`: enlarging is precisely
-             for seeing the whole cover, a crop would betray it. -->
+             for seeing the whole cover, a crop would betray it. No transition
+             while fingers are down: the image must follow them, not lag. -->
         <img
+          ref="enlargedImg"
           :src="state?.cover_href ?? ''"
           :alt="t('cover_alt')"
-          class="max-h-full max-w-full rounded-lg object-contain shadow-2xl"
-          @load="enlargedLoading = false"
+          draggable="false"
+          class="max-h-full max-w-full select-none rounded-lg object-contain shadow-2xl"
+          :class="zoom.gesturing.value ? '' : 'transition-transform duration-150'"
+          :style="{ transform: zoom.transform.value }"
+          @load="enlargedLoading = false; zoom.reclamp()"
           @error="enlargedLoading = false"
         />
         <!-- The full size is now fetched on demand (Task 8): it can take a
@@ -493,13 +549,18 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
         </div>
         <!-- The close button doubles the click on the backdrop, it does not
              replace it: without it, there is no way to close from the
-             keyboard other than Escape, which is announced nowhere. -->
+             keyboard other than Escape, which is announced nowhere.
+             `@pointerdown.stop` keeps the overlay from taking pointer capture
+             on a press that starts here: with capture held, the browser
+             retargets the click to the overlay, and a zoomed cover would not
+             close. -->
         <button
           type="button"
           class="absolute right-4 top-4 rounded-full bg-black/50 p-3 text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
           :aria-label="t('cover_zoom_close')"
           :title="t('cover_zoom_close')"
           data-cover-close
+          @pointerdown.stop
           @click.stop="enlarged = false"
         >
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">

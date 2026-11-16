@@ -581,6 +581,190 @@ describe('PlayerCard', () => {
     w.unmount()
   })
 
+  describe('zooming the enlarged cover', () => {
+    // The overlay is teleported: everything goes through `document.body`, with
+    // events dispatched as the browser would (bubbling, on the overlay).
+    function overlay(): HTMLElement | null {
+      return document.body.querySelector<HTMLElement>('[data-cover-enlarged]')
+    }
+    function enlargedImg(): HTMLImageElement {
+      return document.body.querySelector<HTMLImageElement>('[data-cover-enlarged] img')!
+    }
+    function pointer(target: Element, type: string, id: number, x: number, y: number) {
+      target.dispatchEvent(
+        new PointerEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          pointerId: id,
+          pointerType: 'touch',
+          isPrimary: id === 1,
+          clientX: x,
+          clientY: y,
+        }),
+      )
+    }
+    function click(target: Element) {
+      target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    }
+    /** Two fingers spreading from 100 px apart to 300 px apart: a ×3 pinch. */
+    async function pinchOpen() {
+      const el = overlay()!
+      pointer(el, 'pointerdown', 1, 150, 200)
+      pointer(el, 'pointerdown', 2, 250, 200)
+      pointer(el, 'pointermove', 1, 50, 200)
+      pointer(el, 'pointermove', 2, 350, 200)
+      pointer(el, 'pointerup', 1, 50, 200)
+      pointer(el, 'pointerup', 2, 350, 200)
+      await nextTick()
+    }
+    /**
+     * The view the image is drawn with, read back from its inline transform.
+     * Parsed rather than compared as a string: the CSSOM serialises
+     * `translate(0px, 0px)` as `translate(0px)` (a zero second argument is
+     * dropped), and jsdom 31 follows it while jsdom 30 did not.
+     */
+    function viewOf(img: HTMLImageElement): { x: number; y: number; scale: number } {
+      const match = /^translate\((-?[\d.]+)px(?:, (-?[\d.]+)px)?\) scale\((-?[\d.]+)\)$/.exec(
+        img.style.transform,
+      )
+      if (!match) return { x: NaN, y: NaN, scale: NaN }
+      return { x: Number(match[1]), y: Number(match[2] ?? 0), scale: Number(match[3]) }
+    }
+    function scaleOf(img: HTMLImageElement): number {
+      return viewOf(img).scale
+    }
+    async function open() {
+      const w = mountWith({ title: 'So What', cover_href: '/api/cover/1a2b' })
+      await w.get('[data-cover-enlarge]').trigger('click')
+      expect(overlay()).not.toBeNull()
+      return w
+    }
+
+    it('a tap on the veil at original size still closes', async () => {
+      const w = await open()
+      const el = overlay()!
+      pointer(el, 'pointerdown', 1, 100, 100)
+      pointer(el, 'pointerup', 1, 100, 100)
+      click(el)
+      await nextTick()
+      expect(overlay()).toBeNull()
+      w.unmount()
+    })
+
+    it('the click that ends a pinch does not close the enlarged cover', async () => {
+      // The browser fires a `click` on the overlay after the last finger of a
+      // pinch lifts: closing on it would take away the image being looked at.
+      const w = await open()
+      await pinchOpen()
+      click(overlay()!)
+      await nextTick()
+      expect(overlay()).not.toBeNull()
+      expect(enlargedImg().style.transform).toContain('scale(')
+      expect(scaleOf(enlargedImg())).toBeGreaterThan(1)
+      w.unmount()
+    })
+
+    it('the close button and Escape still close a zoomed cover', async () => {
+      const w = await open()
+      await pinchOpen()
+      click(overlay()!)
+      document.body.querySelector<HTMLElement>('[data-cover-close]')!.click()
+      await nextTick()
+      expect(overlay()).toBeNull()
+
+      await w.get('[data-cover-enlarge]').trigger('click')
+      await pinchOpen()
+      click(overlay()!)
+      expect(scaleOf(enlargedImg())).toBeGreaterThan(1)
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+      await nextTick()
+      expect(overlay()).toBeNull()
+      w.unmount()
+    })
+
+    it('a press on the close button is not captured by the overlay', async () => {
+      // The overlay takes pointer capture on `pointerdown`; with capture held,
+      // the browser retargets the following `click` to the overlay, so a press
+      // starting on X would become a veil click and fail to close a zoomed
+      // cover. jsdom has no `setPointerCapture`: a spy stands in for it.
+      const capture = vi.fn()
+      const original = Object.getOwnPropertyDescriptor(Element.prototype, 'setPointerCapture')
+      Object.defineProperty(Element.prototype, 'setPointerCapture', {
+        value: capture,
+        configurable: true,
+        writable: true,
+      })
+      try {
+        const w = await open()
+        await pinchOpen()
+        click(overlay()!)
+        // The spy is reached at all: the pinch's own presses were captured.
+        expect(capture.mock.calls.length).toBe(2)
+        capture.mockClear()
+
+        const close = document.body.querySelector<HTMLElement>('[data-cover-close]')!
+        pointer(close, 'pointerdown', 7, 10, 10)
+        expect(capture).not.toHaveBeenCalled()
+        pointer(close, 'pointerup', 7, 10, 10)
+        click(close)
+        await nextTick()
+        expect(overlay()).toBeNull()
+        w.unmount()
+      } finally {
+        if (original) Object.defineProperty(Element.prototype, 'setPointerCapture', original)
+        else delete (Element.prototype as { setPointerCapture?: unknown }).setPointerCapture
+      }
+    })
+
+    it('reopening starts at original size', async () => {
+      const w = await open()
+      await pinchOpen()
+      click(overlay()!)
+      expect(scaleOf(enlargedImg())).toBeGreaterThan(1)
+      document.body.querySelector<HTMLElement>('[data-cover-close]')!.click()
+      await nextTick()
+      expect(overlay()).toBeNull()
+
+      await w.get('[data-cover-enlarge]').trigger('click')
+      expect(viewOf(enlargedImg())).toEqual({ x: 0, y: 0, scale: 1 })
+      w.unmount()
+    })
+
+    it('the full image arriving keeps the zoom', async () => {
+      // The full size loads on demand and may arrive in the middle of a
+      // gesture: resetting then would throw the image back to ×1 under the
+      // fingers.
+      const w = await open()
+      await pinchOpen()
+      click(overlay()!)
+      expect(scaleOf(enlargedImg())).toBeGreaterThan(1)
+      enlargedImg().dispatchEvent(new Event('load'))
+      await nextTick()
+      expect(scaleOf(enlargedImg())).toBeGreaterThan(1)
+      w.unmount()
+    })
+
+    it('a window resize returns a zoomed cover to original size', async () => {
+      // The pan limits were computed for the old viewport; keeping the view
+      // would leave the image off its edges.
+      const w = await open()
+      await pinchOpen()
+      click(overlay()!)
+      expect(scaleOf(enlargedImg())).toBeGreaterThan(1)
+      window.dispatchEvent(new Event('resize'))
+      await nextTick()
+      expect(viewOf(enlargedImg())).toEqual({ x: 0, y: 0, scale: 1 })
+      w.unmount()
+    })
+
+    it('the overlay keeps the page from panning or zooming under the fingers', async () => {
+      const w = await open()
+      expect(overlay()!.style.touchAction).toBe('none')
+      expect(enlargedImg().getAttribute('draggable')).toBe('false')
+      w.unmount()
+    })
+  })
+
   it('does not offer enlarging when there is no cover', () => {
     // A button that opens nothing is worse than no button: the ♫ fallback is
     // not an image.
