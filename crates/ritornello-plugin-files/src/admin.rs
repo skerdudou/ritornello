@@ -28,6 +28,26 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock as AsyncRwLock;
 
+#[cfg(test)]
+thread_local! {
+    /// Runs once inside `get_data`, just before the bounded `missing` probe:
+    /// the slow await where, under load, a scan ends during the request. It
+    /// sits at that await, not "between the two reads", so that it stays put
+    /// whichever order the reads are in — the test then judges the order.
+    /// Thread local, so that each `#[tokio::test]` (its own current-thread
+    /// runtime) sees only the hook it set.
+    static AT_THE_MISSING_PROBE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+/// Test seam at `get_data`'s `missing` probe; nothing outside tests.
+fn at_the_missing_probe() {
+    #[cfg(test)]
+    if let Some(hook) = AT_THE_MISSING_PROBE.with(|h| h.borrow_mut().take()) {
+        hook();
+    }
+}
+
 /// Progress of the running scan, as the page reads it.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ScanProgress {
@@ -448,6 +468,16 @@ impl AdminPlugin for FilesAdmin {
             }
         }
 
+        // The scan state is read **before** the playlist, never after. The
+        // scan task publishes its tracks into the list first and only then
+        // drops `running`, so a `running: false` read here guarantees the
+        // list read next already holds them. The other order let a scan
+        // ending in between (the `missing` probe below is slow under load)
+        // report "finished" next to the list from before it, and the page,
+        // seeing no work in progress, stopped polling on an empty list. A
+        // `running: true` next to a list already filled is harmless: the
+        // page polls once more.
+        let scan = self.scan.lock().unwrap().clone();
         let list = self.playlist.read().await;
         let paths: Vec<PathBuf> = list.entries.iter().map(|e| e.path.clone()).collect();
         let described: Vec<(String, String)> = list
@@ -457,6 +487,7 @@ impl AdminPlugin for FilesAdmin {
             .collect();
         let index = list.index;
         drop(list);
+        at_the_missing_probe();
         // Grouped by mount point and bounded: a single delay covers all the
         // tracks of a share, instead of one blocking call per track.
         let missing = self.health.missing(&paths).await;
@@ -483,7 +514,6 @@ impl AdminPlugin for FilesAdmin {
 
         // `std::sync` guards taken after the last `.await`: none of them
         // crosses an await point.
-        let scan = self.scan.lock().unwrap().clone();
         let unresolved = self.unresolved.lock().unwrap().clone();
         let browse = self.browse.lock().unwrap().clone();
         let volumes = volumes::volumes(&volumes::read_proc_mounts());
@@ -924,6 +954,10 @@ impl AdminPlugin for FilesAdmin {
                             params: HashMap::from([("detail".to_string(), e.to_string())]),
                         }),
                     };
+                    // Last, after the tracks are in the list and its lock is
+                    // released: `get_data` reads this state before the list
+                    // and relies on that order (a finished scan always comes
+                    // with its tracks).
                     if let Ok(mut g) = state.lock() {
                         g.running = false;
                         g.error = outcome.err();
@@ -1291,6 +1325,48 @@ mod tests {
         let d = admin.get_data().await;
         assert!(d.get("durations").is_none(), "{d}");
         assert!(d["playlist"].is_array());
+    }
+
+    #[tokio::test]
+    async fn a_scan_ending_during_get_data_never_reads_as_finished_with_the_old_list() {
+        // Seen as an intermittent e2e failure under load (`files.spec.ts`,
+        // "Add this folder", 0 tracks): `get_data` snapshotted the playlist,
+        // then waited on the bounded `missing` probe, and only then read the
+        // scan state. A scan ending in that gap produced "scan finished" next
+        // to the list as it was **before** the scan, and the page, seeing no
+        // work in progress, stopped polling on an empty list.
+        //
+        // The end of the scan is reproduced in the writer's own order (the
+        // tracks enter the list, then `running` drops) at the slow `missing`
+        // probe, the await where it happened: the interleaving is produced,
+        // not hoped for. Either read order is consistent or not by itself;
+        // the seam does not move with it.
+        let (admin, _) = test_admin();
+        *admin.scan.lock().unwrap() =
+            ScanProgress { running: true, found: 0, dir: "Album".into(), error: None };
+        let playlist = admin.playlist.clone();
+        let scan = admin.scan.clone();
+        AT_THE_MISSING_PROBE.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                playlist
+                    .try_write()
+                    .expect("no snapshot may hold the playlist across the seam")
+                    .entries
+                    .push(Entry { path: "/media/Album/01.mp3".into(), title: None });
+                scan.lock().unwrap().running = false;
+            }));
+        });
+        let d = admin.get_data().await;
+        assert!(
+            AT_THE_MISSING_PROBE.with(|h| h.borrow().is_none()),
+            "the seam was never reached: the test proves nothing"
+        );
+        let finished = d["scan"]["running"] == false;
+        let tracks = d["playlist"].as_array().unwrap().len();
+        assert!(
+            !finished || tracks == 1,
+            "a finished scan was reported next to the list from before it: {d}"
+        );
     }
 
     #[tokio::test]
