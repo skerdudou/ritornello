@@ -41,19 +41,17 @@ pub struct StoredEntry {
     pub path: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duration_s: Option<u32>,
 }
 
 impl From<&StoredEntry> for Entry {
     fn from(s: &StoredEntry) -> Self {
-        Entry { path: s.path.clone(), title: s.title.clone(), duration_s: s.duration_s }
+        Entry { path: s.path.clone(), title: s.title.clone() }
     }
 }
 
 impl From<&Entry> for StoredEntry {
     fn from(e: &Entry) -> Self {
-        StoredEntry { path: e.path.clone(), title: e.title.clone(), duration_s: e.duration_s }
+        StoredEntry { path: e.path.clone(), title: e.title.clone() }
     }
 }
 
@@ -94,7 +92,6 @@ mod tests {
         StoredEntry {
             path: "/mnt/ritornello/nas/Album/01.mp3".into(),
             title: Some("So What".into()),
-            duration_s: Some(245),
         }
     }
 
@@ -171,11 +168,45 @@ mod tests {
     }
 
     #[test]
+    fn a_state_written_with_track_lengths_loads_without_loss() {
+        // What every device holds today: the plugin persisted probed lengths.
+        // No `deny_unknown_fields` here, so the key is ignored on read; the next
+        // write must drop it.
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("plugin-files.json");
+        std::fs::write(
+            &f,
+            r#"{
+  "playlist": [
+    { "path": "/mnt/ritornello/nas/Album/01.mp3", "title": "So What", "duration_s": 545 },
+    { "path": "/mnt/ritornello/nas/Album/02.mp3", "duration_s": 337 },
+    { "path": "/mnt/ritornello/nas/Album/03.mp3" }
+  ],
+  "index": 1,
+  "cover_name": "folder"
+}"#,
+        )
+        .unwrap();
+        let s = load(&f);
+        assert_eq!(s.playlist.len(), 3);
+        assert_eq!(s.playlist[0].path, PathBuf::from("/mnt/ritornello/nas/Album/01.mp3"));
+        assert_eq!(s.playlist[1].path, PathBuf::from("/mnt/ritornello/nas/Album/02.mp3"));
+        assert_eq!(s.playlist[2].path, PathBuf::from("/mnt/ritornello/nas/Album/03.mp3"));
+        assert_eq!(s.playlist[0].title.as_deref(), Some("So What"));
+        assert_eq!(s.playlist[1].title, None);
+        assert_eq!(s.playlist[2].title, None);
+        assert_eq!(s.index, 1);
+        assert_eq!(s.cover_name, CoverName::Folder);
+        update(&f, |_| {}).unwrap();
+        assert!(!std::fs::read_to_string(&f).unwrap().contains("duration_s"));
+        assert_eq!(load(&f).playlist, s.playlist);
+    }
+
+    #[test]
     fn the_conversion_with_the_m3u_entry_round_trips() {
         let e = Entry {
             path: "/musique/01.mp3".into(),
             title: Some("So What".into()),
-            duration_s: Some(245),
         };
         let stored = StoredEntry::from(&e);
         assert_eq!(Entry::from(&stored), e);

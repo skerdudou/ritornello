@@ -114,7 +114,6 @@ mod tests {
                 .map(|i| Entry {
                     path: PathBuf::from(format!("/musique/{i:02}.mp3")),
                     title: None,
-                    duration_s: None,
                 })
                 .collect(),
             index: 0,

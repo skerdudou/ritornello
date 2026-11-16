@@ -354,7 +354,7 @@ mod tests {
         let files = three_files(&dir);
         let entries: Vec<Entry> = files
             .iter()
-            .map(|p| Entry { path: p.clone(), title: None, duration_s: None })
+            .map(|p| Entry { path: p.clone(), title: None })
             .collect();
         save(&entries, "Jazz", &Location::Internal, dir.path(), &roots).unwrap();
         let reloaded = load("Jazz", &Location::Internal, dir.path(), &roots).unwrap();
@@ -370,7 +370,7 @@ mod tests {
         let (dir, roots) = writable_fixture();
         let base = roots.by_name("nas").unwrap().base_dir();
         let entries =
-            vec![Entry { path: base.join("Album/01.mp3"), title: None, duration_s: None }];
+            vec![Entry { path: base.join("Album/01.mp3"), title: None }];
         save(&entries, "Jazz", &Location::Root("nas".into()), dir.path(), &roots).unwrap();
         let text = std::fs::read_to_string(base.join("Jazz.m3u")).unwrap();
         assert!(text.contains("Album/01.mp3"), "{text}");

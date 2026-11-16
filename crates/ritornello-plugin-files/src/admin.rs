@@ -296,7 +296,7 @@ impl FilesAdmin {
             return Err(self.text_with("too_many_tracks", "cap", &scan::MAX_TRACKS.to_string()));
         }
         list.entries.extend(
-            paths.into_iter().map(|path| Entry { path, title: None, duration_s: None }),
+            paths.into_iter().map(|path| Entry { path, title: None }),
         );
         Ok(())
     }
@@ -450,10 +450,10 @@ impl AdminPlugin for FilesAdmin {
 
         let list = self.playlist.read().await;
         let paths: Vec<PathBuf> = list.entries.iter().map(|e| e.path.clone()).collect();
-        let described: Vec<(String, String, Option<u32>)> = list
+        let described: Vec<(String, String)> = list
             .entries
             .iter()
-            .map(|e| (e.path.to_string_lossy().into_owned(), e.display_name(), e.duration_s))
+            .map(|e| (e.path.to_string_lossy().into_owned(), e.display_name()))
             .collect();
         let index = list.index;
         drop(list);
@@ -463,11 +463,10 @@ impl AdminPlugin for FilesAdmin {
         let tracks: Vec<serde_json::Value> = described
             .into_iter()
             .zip(missing)
-            .map(|((path, name, duration_s), is_missing)| {
+            .map(|((path, name), is_missing)| {
                 serde_json::json!({
                     "path": path,
                     "name": name,
-                    "duration_s": duration_s,
                     // Flagged, never hidden: a list that shrinks without
                     // saying anything is a defect that takes months to
                     // attribute.
@@ -899,7 +898,6 @@ impl AdminPlugin for FilesAdmin {
                                 list.entries.extend(paths.into_iter().map(|path| Entry {
                                     path,
                                     title: None,
-                                    duration_s: None,
                                 }));
                                 let count = list.preset_count();
                                 let stored: Vec<state::StoredEntry> =
@@ -1396,8 +1394,8 @@ mod tests {
             vec![PathBuf::from("/mnt/ritornello/nas")],
         ));
         admin.playlist.write().await.entries = vec![
-            Entry { path: PathBuf::from("/mnt/ritornello/nas/a.mp3"), title: None, duration_s: None },
-            Entry { path: PathBuf::from("/home/pi/absent.mp3"), title: None, duration_s: None },
+            Entry { path: PathBuf::from("/mnt/ritornello/nas/a.mp3"), title: None },
+            Entry { path: PathBuf::from("/home/pi/absent.mp3"), title: None },
         ];
 
         // Deliberately wide margin. The circuit breaker is **already open**
@@ -1768,7 +1766,6 @@ mod tests {
                 .map(|i| Entry {
                     path: PathBuf::from(format!("/m/{i}.mp3")),
                     title: None,
-                    duration_s: None,
                 })
                 .collect();
             list.index = 2;
@@ -1794,7 +1791,6 @@ mod tests {
                 .map(|i| Entry {
                     path: PathBuf::from(format!("/m/{i}.mp3")),
                     title: None,
-                    duration_s: None,
                 })
                 .collect();
             list.index = 2;
@@ -1829,7 +1825,6 @@ mod tests {
                     .map(|i| Entry {
                         path: PathBuf::from(format!("/m/{i}.mp3")),
                         title: None,
-                        duration_s: None,
                     })
                     .collect();
                 list.index = before;
@@ -1857,7 +1852,6 @@ mod tests {
                         .map(|i| Entry {
                             path: PathBuf::from(format!("/m/{i}.mp3")),
                             title: None,
-                            duration_s: None,
                         })
                         .collect();
                     list.index = 2;
