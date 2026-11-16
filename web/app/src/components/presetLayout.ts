@@ -29,6 +29,20 @@ export function savePresetLayout(layout: PresetLayout): void {
   }
 }
 
+// A horizontal swipe on the card turns the page. Both thresholds exist to keep
+// vertical page scrolling and sloppy taps from turning pages: a drag must travel
+// at least SWIPE_MIN_PX sideways and at least SWIPE_RATIO times more sideways
+// than vertically (a ratio of exactly SWIPE_RATIO is accepted).
+export const SWIPE_MIN_PX = 50
+export const SWIPE_RATIO = 2
+
+// Left (dx < 0) is the next page, right the previous one, like a book.
+export function classifySwipe(dx: number, dy: number): 'next' | 'previous' | null {
+  const ax = Math.abs(dx)
+  if (ax < SWIPE_MIN_PX || ax < SWIPE_RATIO * Math.abs(dy)) return null
+  return dx < 0 ? 'next' : 'previous'
+}
+
 // Where to scroll a list frame so that a row is visible. A row already fully
 // inside the frame leaves the scroll untouched (no jump while the user reads);
 // otherwise the row is centred, clamped to the scrollable range.

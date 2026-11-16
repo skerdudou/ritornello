@@ -1,5 +1,21 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { LAYOUT_KEY, loadPresetLayout, revealScrollTop, savePresetLayout } from './presetLayout'
+import { classifySwipe, LAYOUT_KEY, loadPresetLayout, revealScrollTop, savePresetLayout } from './presetLayout'
+
+describe('classifySwipe', () => {
+  it.each([
+    [-50, 0, 'next'],
+    [50, 0, 'previous'],
+    [-49, 0, null],
+    [49, 0, null],
+    [-60, 31, null],
+    [-60, -31, null],
+    [-60, 30, 'next'],
+    [60, -30, 'previous'],
+    [0, -200, null],
+  ])('(%d, %d) is %j', (dx, dy, expected) => {
+    expect(classifySwipe(dx, dy)).toBe(expected)
+  })
+})
 
 afterEach(() => {
   vi.restoreAllMocks()

@@ -3,7 +3,7 @@ import { Button, Card, CardAction, CardContent, CardHeader, CardTitle } from '@r
 import { ChevronLeftIcon, ChevronRightIcon, ListBulletIcon, ViewGridIcon } from '@radix-icons/vue'
 import { computed, ref, watch } from 'vue'
 import { useCatalog } from '../composables/useCatalog'
-import { loadPresetLayout, revealScrollTop, savePresetLayout, type PresetLayout } from './presetLayout'
+import { classifySwipe, loadPresetLayout, revealScrollTop, savePresetLayout, type PresetLayout } from './presetLayout'
 import type { PlayerPayload } from '../types'
 import { unavailable } from '../views/remoteCommands'
 
@@ -112,13 +112,57 @@ watch([listMode, activePreset], () => {
   frame.scrollTop = revealScrollTop(frame.scrollTop, frame.clientHeight, row.offsetTop, row.offsetHeight, frame.scrollHeight)
 }, { flush: 'post', immediate: true })
 
+// A horizontal swipe on the card turns the page, pages mode only (see
+// classifySwipe). Touch and pen only: a mouse drag is a text selection, not a
+// gesture. `touch-action: pan-y` on the card keeps the browser's vertical page
+// scroll; when it takes over it fires `pointercancel`, which aborts the swipe.
+// Hand-written Pointer Events: no second library for ten lines.
+let start: { id: number; x: number; y: number } | null = null
+let swallowClick = false
+
+function onPointerDown(e: PointerEvent) {
+  if (e.pointerType !== 'touch' && e.pointerType !== 'pen') return
+  if (listMode.value || start) return
+  swallowClick = false
+  start = { id: e.pointerId, x: e.clientX, y: e.clientY }
+}
+function onPointerUp(e: PointerEvent) {
+  if (!start || start.id !== e.pointerId) return
+  const direction = classifySwipe(e.clientX - start.x, e.clientY - start.y)
+  start = null
+  if (!direction) return
+  if (direction === 'next') nextPage()
+  else previousPage()
+  swallowClick = true
+}
+function onPointerCancel() {
+  start = null
+}
+// The browser still sends a click when a swipe ends on the element it started
+// on: without this, swiping from a tile would also choose that preset and
+// change what is playing.
+function onClickCapture(e: Event) {
+  if (!swallowClick) return
+  swallowClick = false
+  e.preventDefault()
+  e.stopPropagation()
+}
+
 // The page arrows stay usable in standby on purpose: paging is local to the
 // page and sends nothing.
 const dimmed = computed(() => unavailable('Select', props.state))
 </script>
 
 <template>
-  <Card data-preset-grid :data-preset-layout="listMode ? 'list' : 'pages'">
+  <Card
+    data-preset-grid
+    :data-preset-layout="listMode ? 'list' : 'pages'"
+    :style="listMode ? undefined : { touchAction: 'pan-y' }"
+    @pointerdown="onPointerDown"
+    @pointerup="onPointerUp"
+    @pointercancel="onPointerCancel"
+    @click.capture="onClickCapture"
+  >
     <CardHeader class="items-center">
       <CardTitle>{{ t('presets_label') }}</CardTitle>
       <!-- The layout toggle is always there; the position and the arrows only

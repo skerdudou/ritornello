@@ -1,5 +1,6 @@
 import { mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { nextTick } from 'vue'
 import { resetCatalog, useCatalog } from '../composables/useCatalog'
 import type { PlayerPayload } from '../types'
 import PresetGrid from './PresetGrid.vue'
@@ -225,6 +226,10 @@ describe('layout', () => {
     // jsdom has no layout: give the frame and row 17 the geometry the
     // computation reads, and back scrollTop with a map so the write is visible.
     const proto = HTMLElement.prototype as unknown as Record<string, unknown>
+    // jsdom defines offsetTop/offsetHeight on this very prototype: keep the
+    // originals to put them back, rather than deleting them.
+    const own = (k: string) => Object.getOwnPropertyDescriptor(proto, k)
+    const originals = new Map(['clientHeight', 'scrollHeight', 'offsetTop', 'offsetHeight', 'scrollTop', 'scrollIntoView'].map((k) => [k, own(k)]))
     const scrollIntoView = vi.fn()
     proto.scrollIntoView = scrollIntoView
     const tops = new WeakMap<object, number>()
@@ -248,7 +253,92 @@ describe('layout', () => {
       expect(frame.scrollTop).toBe(900 + 24 - 100)
       expect(scrollIntoView).not.toHaveBeenCalled()
     } finally {
-      for (const k of ['clientHeight', 'scrollHeight', 'offsetTop', 'offsetHeight', 'scrollTop', 'scrollIntoView']) delete proto[k]
+      for (const [k, d] of originals) {
+        if (d) Object.defineProperty(proto, k, d)
+        else delete proto[k]
+      }
     }
+  })
+})
+
+describe('swipe', () => {
+  afterEach(() => {
+    localStorage.clear()
+  })
+
+  // jsdom does not synthesize the click that ends a touch gesture: dispatch it.
+  async function swipe(el: Element, from: [number, number], to: [number, number], pointerType = 'touch') {
+    el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1, pointerType, clientX: from[0], clientY: from[1] }))
+    el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1, pointerType, clientX: to[0], clientY: to[1] }))
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await nextTick()
+  }
+  const windowOf = (w: ReturnType<typeof mounted>) => w.get('[data-preset-window]').text()
+
+  it('a left swipe shows the next page, a right swipe the previous one', async () => {
+    const w = mounted({ preset_count: 23 })
+    const grid = w.get('[data-preset-grid]').element
+    await swipe(grid, [200, 100], [100, 110])
+    expect(windowOf(w)).toBe('11–20 of 23')
+    await swipe(grid, [200, 100], [100, 110])
+    expect(windowOf(w)).toBe('21–23 of 23')
+    await swipe(grid, [200, 100], [100, 110])
+    expect(windowOf(w)).toBe('21–23 of 23')
+    await swipe(grid, [100, 100], [200, 100])
+    expect(windowOf(w)).toBe('11–20 of 23')
+  })
+
+  it('a swipe starting on a tile turns the page without choosing the tile', async () => {
+    const w = mounted({ preset_count: 23 })
+    await swipe(w.get('[data-preset-button="3"]').element, [200, 100], [100, 110])
+    expect(windowOf(w)).toBe('11–20 of 23')
+    expect(w.emitted('choose')).toBeUndefined()
+  })
+
+  it('a plain tap on a tile still chooses it', async () => {
+    const w = mounted({ preset_count: 23 })
+    await swipe(w.get('[data-preset-button="3"]').element, [50, 50], [52, 51])
+    expect(w.emitted('choose')).toEqual([[3]])
+    expect(windowOf(w)).toBe('1–10 of 23')
+  })
+
+  it('a mostly vertical drag does not turn the page', async () => {
+    const w = mounted({ preset_count: 23 })
+    await swipe(w.get('[data-preset-grid]').element, [200, 100], [150, 300])
+    expect(windowOf(w)).toBe('1–10 of 23')
+  })
+
+  it('a cancelled gesture does not turn the page', async () => {
+    const w = mounted({ preset_count: 23 })
+    const grid = w.get('[data-preset-grid]').element
+    grid.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1, pointerType: 'touch', clientX: 200, clientY: 100 }))
+    grid.dispatchEvent(new PointerEvent('pointercancel', { bubbles: true, pointerId: 1, pointerType: 'touch' }))
+    grid.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1, pointerType: 'touch', clientX: 100, clientY: 100 }))
+    await nextTick()
+    expect(windowOf(w)).toBe('1–10 of 23')
+  })
+
+  it('a mouse drag does not turn the page', async () => {
+    const w = mounted({ preset_count: 23 })
+    await swipe(w.get('[data-preset-grid]').element, [200, 100], [100, 110], 'mouse')
+    expect(windowOf(w)).toBe('1–10 of 23')
+  })
+
+  it('in list mode a swipe does nothing', async () => {
+    const w = mounted({ preset_count: 23 })
+    await w.get('[data-preset-layout-toggle]').trigger('click')
+    await swipe(w.get('[data-preset-grid]').element, [200, 100], [100, 110])
+    expect(w.get('[data-preset-grid]').attributes('data-preset-layout')).toBe('list')
+    expect(w.emitted('choose')).toBeUndefined()
+    // Back to pages: still the first page, the swipe turned nothing behind the list.
+    await w.get('[data-preset-layout-toggle]').trigger('click')
+    expect(windowOf(w)).toBe('1–10 of 23')
+  })
+
+  it('the card lets the page scroll vertically in pages mode', async () => {
+    const w = mounted({ preset_count: 23 })
+    expect(w.get('[data-preset-grid]').attributes('style')).toContain('touch-action: pan-y')
+    await w.get('[data-preset-layout-toggle]').trigger('click')
+    expect(w.get('[data-preset-grid]').attributes('style') ?? '').not.toContain('touch-action')
   })
 })
