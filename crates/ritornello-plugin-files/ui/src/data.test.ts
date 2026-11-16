@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import {
   rootTarget,
   leaf,
-  formatDuration,
   normalizeBrowse,
   normalizeData,
   normalizeRoot,
@@ -206,7 +205,6 @@ describe('full payload normalization', () => {
     expect(d.playlist[0]).toEqual({
       path: 'Albums/Jazz/01.mp3',
       name: '01.mp3',
-      duration_s: 0,
       // `null` and not `false`: a payload that says nothing about the
       // file's existence does not allow asserting that it is there.
       // Defaulting to "present" would display a track as healthy when the
@@ -218,17 +216,6 @@ describe('full payload normalization', () => {
 })
 
 describe('formatting', () => {
-  it('renders an unknown duration as a dash, never as "0:00"', () => {
-    // "0:00" would assert an empty track; the dash says it is not known.
-    expect(formatDuration(0)).toBe('—')
-    expect(formatDuration(Number.NaN)).toBe('—')
-  })
-
-  it('switches to hours beyond sixty minutes', () => {
-    expect(formatDuration(245)).toBe('4:05')
-    expect(formatDuration(3725)).toBe('1:02:05')
-  })
-
   it('composes a root target according to its kind', () => {
     expect(rootTarget(normalizeRoot({ kind: 'local', path: '/mnt/usb' }))).toBe('/mnt/usb')
     expect(

@@ -212,8 +212,8 @@ function goUp(): void {
          mounted, it has gone silent. Two distinct causes, hence two
          distinct messages — confusing them would send the user retrying a
          mount that succeeded. This is also what explains the "unclear"
-         states of the queue and the durations that do not arrive; without
-         this block, the user has no cause to link them to. -->
+         states of the queue; without this block, the user has no cause to
+         link them to. -->
     <div
       v-if="data.unresponsive.length"
       class="min-w-0 rounded border border-destructive/50 p-2 text-sm"

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { api, Button, Input } from '@ritornello/ui'
 import { computed, ref, watch } from 'vue'
-import { formatDuration, INTERNAL, type Data, type Send, type T } from './data'
+import { INTERNAL, type Data, type Send, type T } from './data'
 
 const props = defineProps<{
   data: Data
@@ -238,7 +238,6 @@ function load(): void {
           <tr>
             <th class="w-12 text-left font-normal">{{ t('col_num') }}</th>
             <th class="text-left font-normal">{{ t('col_track') }}</th>
-            <th class="w-20 text-left font-normal">{{ t('col_duration') }}</th>
             <th class="w-28" />
           </tr>
         </thead>
@@ -322,7 +321,6 @@ function load(): void {
                   {{ t('missing_unknown') }}
                 </span>
               </td>
-              <td class="tabular-nums text-muted-foreground">{{ formatDuration(p.duration_s) }}</td>
               <td class="whitespace-nowrap">
                 <Button
                   variant="ghost"
@@ -368,7 +366,7 @@ function load(): void {
                  at, and would otherwise widen the table past the screen. -->
             <tr v-if="openPath === p.path" :class="offset + i === data.index ? 'bg-muted/50' : ''">
               <td
-                colspan="4"
+                colspan="3"
                 data-track-path
                 class="break-all pb-1 pl-8 pr-2 text-xs text-muted-foreground"
               >

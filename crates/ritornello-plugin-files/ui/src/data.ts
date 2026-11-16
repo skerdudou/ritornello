@@ -45,7 +45,6 @@ export interface Root {
 export interface Track {
   path: string
   name: string
-  duration_s: number
   /**
    * Track whose file was not found: marked, never hidden.
    *
@@ -197,14 +196,6 @@ export interface Data {
    * file playlist that was not playing.
    */
   playing: boolean
-  /**
-   * Progress of the duration survey.
-   *
-   * Asynchronous on the plugin side — reading the header of two thousand files
-   * on a share exceeds the core's 5 s cap — so the page probes as long as it
-   * runs, exactly as for the scan.
-   */
-  durations: { running: boolean; done: number; total: number }
   explore: Exploration
   /**
    * Failure of the last mount reconciliation, already translated.
@@ -219,8 +210,8 @@ export interface Data {
    * Mount points from which a probe never came back.
    *
    * Told by the plugin so that the page can explain the silence: without them
-   * the user sees durations that never arrive and undetermined states, with no
-   * indication of the cause.
+   * the user sees undetermined track states, with no indication of the
+   * cause.
    */
   unresponsive: string[]
   /**
@@ -467,7 +458,6 @@ export function normalizeData(raw: unknown): Data {
       return {
         path,
         name: string_(e.name) || leaf(path),
-        duration_s: number_(e.duration_s),
         // `=== true` / `=== false` and not a coercion: this is what tells
         // "present" apart from "unknown", the latter having to stay `null`
         // until display.
@@ -497,14 +487,6 @@ export function normalizeData(raw: unknown): Data {
     // that will fail on click without saying why.
     canBrowseSmb: o.can_browse_smb === true,
     playing: o.playing === true,
-    durations: (() => {
-      const d = (o.durations ?? {}) as Record<string, unknown>
-      return {
-        running: d.running === true,
-        done: number_(d.done),
-        total: number_(d.total),
-      }
-    })(),
     explore: normalizeExploration(o.explore),
     mountError: typeof o.mount_error === 'string' && o.mount_error ? o.mount_error : null,
     unresponsive: array(o.unresponsive).map(string_).filter((s) => s !== ''),
@@ -512,21 +494,6 @@ export function normalizeData(raw: unknown): Data {
     coverName: string_(o.cover_name) || 'cover',
     coverNames: array(o.cover_names).map(string_).filter((s) => s !== ''),
   }
-}
-
-/**
- * Readable duration. `0` (unknown duration, the case of a missing file or of a
- * container without header) renders as a dash rather than as "0:00", which
- * would assert an empty track.
- */
-export function formatDuration(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds <= 0) return '—'
-  const s = Math.round(seconds)
-  const h = Math.floor(s / 3600)
-  const m = Math.floor((s % 3600) / 60)
-  const r = s % 60
-  const two = (n: number) => String(n).padStart(2, '0')
-  return h ? `${h}:${two(m)}:${two(r)}` : `${m}:${two(r)}`
 }
 
 /** Label of a root's target: local path, or `//host/share/subpath`. */
