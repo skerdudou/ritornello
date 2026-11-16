@@ -41,6 +41,10 @@ pub(super) struct FakePlayer {
     /// `audio_filter_command` fails for this label only (`eq5`, `eqpre`):
     /// a change that fails halfway.
     pub(super) af_cmd_fails_for: Arc<Mutex<Option<String>>>,
+    /// What `chime_route` answers (`Idle` by default).
+    pub(super) route: Arc<Mutex<crate::player::ChimeRoute>>,
+    /// When true, `chime_route` fails — mpv unreachable.
+    pub(super) route_fails: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[async_trait::async_trait]
@@ -141,6 +145,17 @@ impl crate::player::Player for FakePlayer {
         if self.ytdl_fails.load(std::sync::atomic::Ordering::SeqCst) {
             anyhow::bail!("mpv: command timeout");
         }
+        Ok(())
+    }
+    /// Records nothing: a question, not an action.
+    async fn chime_route(&self) -> anyhow::Result<crate::player::ChimeRoute> {
+        if self.route_fails.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("mpv: command timeout");
+        }
+        Ok(*self.route.lock().unwrap())
+    }
+    async fn play_aside(&self, uri: &str) -> anyhow::Result<()> {
+        self.calls.lock().unwrap().push(format!("aside {uri}"));
         Ok(())
     }
 }

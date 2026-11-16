@@ -183,7 +183,7 @@ function payloads() {
       cover_source_max_mio: 20, cover_rendition: true, cover_max_edge_px: 640,
       cover_jpeg_quality: 85, cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16,
       update_policy: 'off', update_hour: 3, update_cadence: { kind: 'daily' },
-      update_prereleases: false,
+      update_prereleases: false, lock_sound: 'a',
     } as unknown,
     '/api/update': {
       outcome: { kind: 'never_checked' },
@@ -1660,7 +1660,7 @@ describe('ConfigView — language and display', () => {
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
           cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16, cover_rendition: true,
           update_policy: 'off', update_hour: 3, update_cadence: { kind: 'daily' },
-          update_prereleases: false,
+          update_prereleases: false, lock_sound: 'a',
         },
       },
       { url: '/api/locale', body: { locale: 'en' } },
@@ -2117,7 +2117,7 @@ describe('ConfigView — settings', () => {
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
           cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16, cover_rendition: true,
           update_policy: 'off', update_hour: 3, update_cadence: { kind: 'daily' },
-          update_prereleases: false,
+          update_prereleases: false, lock_sound: 'a',
         },
       },
     ])
@@ -2139,7 +2139,7 @@ describe('ConfigView — settings', () => {
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
           cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16, cover_rendition: true,
           update_policy: 'off', update_hour: 3, update_cadence: { kind: 'daily' },
-          update_prereleases: false,
+          update_prereleases: false, lock_sound: 'a',
         },
       },
     ])
@@ -2162,7 +2162,7 @@ describe('ConfigView — settings', () => {
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
           cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16, cover_rendition: true,
           update_policy: 'off', update_hour: 3, update_cadence: { kind: 'daily' },
-          update_prereleases: false,
+          update_prereleases: false, lock_sound: 'a',
         },
       },
     ])
@@ -2223,7 +2223,7 @@ describe('ConfigView — alarms', () => {
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
           cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16, cover_rendition: true,
           update_policy: 'off', update_hour: 3, update_cadence: { kind: 'daily' },
-          update_prereleases: false,
+          update_prereleases: false, lock_sound: 'a',
           alarms: expected,
         },
       },
@@ -2292,7 +2292,7 @@ describe('ConfigView — overlays', () => {
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
           cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16, cover_rendition: true,
           update_policy: 'off', update_hour: 3, update_cadence: { kind: 'daily' },
-          update_prereleases: false,
+          update_prereleases: false, lock_sound: 'a',
         },
       },
     ])
@@ -3298,5 +3298,85 @@ describe('ConfigView — table of contents', () => {
     const activeLinks = w.findAll('[data-toc-link][aria-current="true"]')
     expect(activeLinks).toHaveLength(1)
     expect(activeLinks[0]!.text()).toBe('Langue et affichage')
+  })
+})
+
+describe('ConfigView — lock sound', () => {
+  beforeEach(resetMocks)
+
+  /** Fake `EventSource` so a test can push a player frame to the page. */
+  class FakePlayerStream {
+    static last: FakePlayerStream | null = null
+    onmessage: ((e: MessageEvent) => void) | null = null
+    constructor(public url: string) { FakePlayerStream.last = this }
+    close() {}
+    push(frame: Record<string, unknown>) {
+      this.onmessage?.({ data: JSON.stringify(frame) } as MessageEvent)
+    }
+  }
+
+  const LOCK_CATALOGUE = {
+    lock_sound_label: 'Son du verrou', lock_sound_none: 'Aucun',
+    lock_sound_a: 'Deux notes', lock_sound_b: 'Petit carillon', lock_sound_c: 'Cloche',
+    lock_sound_d: 'Marimba feutré', lock_sound_e: 'Xylophone pentatonique',
+    lock_sound_preview: "Jouer sur l'appareil",
+    lock_sound_muted_note: 'Muet : rien ne sera entendu.',
+    lock_sound_paused_note: 'En pause : rien ne sera entendu.',
+  }
+
+  async function mountLock(sound: string) {
+    vi.stubGlobal('EventSource', FakePlayerStream)
+    const base = payloads()
+    return mountView({
+      '/api/i18n': { ...CATALOGUE, ...LOCK_CATALOGUE },
+      '/api/settings': { ...(base['/api/settings'] as object), lock_sound: sound },
+    })
+  }
+
+  function lockSelect(w: VueWrapper) {
+    return w.findAllComponents(Select).find((s) => s.find('[data-lock-sound-select]').exists())!
+  }
+
+  it('lock_sound_select_shows_the_saved_value_and_saves_it', async () => {
+    const { w, puts } = await mountLock('c')
+    expect(w.get('[data-lock-sound-select]').text()).toContain('C · Cloche')
+    await lockSelect(w).vm.$emit('update:modelValue', 'e')
+    await flushPromises()
+    await w.find('[data-player-change]').trigger('click')
+    await flushPromises()
+    expect((puts[0]!.body as { lock_sound: string }).lock_sound).toBe('e')
+  })
+
+  it('preview_posts_the_value_on_screen', async () => {
+    const { w, posts } = await mountLock('c')
+    await lockSelect(w).vm.$emit('update:modelValue', 'b')
+    await flushPromises()
+    await w.get('[data-lock-sound-preview]').trigger('click')
+    await flushPromises()
+    expect(posts).toEqual([{ url: '/api/lock-sound/preview', body: { sound: 'b' } }])
+  })
+
+  it('preview_is_disabled_for_none', async () => {
+    const { w, posts } = await mountLock('none')
+    const btn = w.get('[data-lock-sound-preview]')
+    expect(btn.attributes('disabled')).toBeDefined()
+    expect(btn.attributes('aria-label')).toBe("Jouer sur l'appareil")
+    await btn.trigger('click')
+    expect(posts).toEqual([])
+  })
+
+  it('preview_shows_the_muted_note', async () => {
+    const { w } = await mountLock('a')
+    const stream = FakePlayerStream.last!
+    const frame = { source: 'radio', volume: 60, standby: false, muted: false }
+    stream.push({ ...frame, playback: 'playing' })
+    await flushPromises()
+    expect(w.find('[data-lock-sound-note]').exists()).toBe(false)
+    stream.push({ ...frame, muted: true, playback: 'playing' })
+    await flushPromises()
+    expect(w.get('[data-lock-sound-note]').text()).toBe('Muet : rien ne sera entendu.')
+    stream.push({ ...frame, muted: false, playback: 'paused' })
+    await flushPromises()
+    expect(w.get('[data-lock-sound-note]').text()).toBe('En pause : rien ne sera entendu.')
   })
 })

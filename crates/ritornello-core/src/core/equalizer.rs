@@ -80,7 +80,9 @@ impl<P: Player> Core<P> {
     /// `af-command` set. Rewrite `af` only if it no longer holds the current
     /// setting; either way the chain now carries the setting, so whatever a
     /// failed command left pending is moot. mpv refuses `af-command` until
-    /// `playback-restart` (`equalizer_live`).
+    /// `playback-restart` (`equalizer_live`). A lock chime still mixed in
+    /// makes `af` differ from the setting, so the new file gets the plain
+    /// chain and the chime's removal is dropped with it (`write_chain_with`).
     pub async fn reapply_equalizer(&mut self) {
         self.eq_live = false;
         let chain = crate::equalizer::af_chain(&self.equalizer);
@@ -117,9 +119,12 @@ impl<P: Player> Core<P> {
 
     /// The audio output changed: mpv may rebuild the chain from `af` when it
     /// reloads the output, dropping what `af-command` set. Rewrite it with
-    /// the current setting; the change cuts the sound anyway.
+    /// the current setting; the change cuts the sound anyway. A lock chime
+    /// mixed in goes with it, equalizer off included (the plain chain is then
+    /// empty), rather than sounding on until its own removal on an output
+    /// it was not mixed for.
     pub(super) async fn reapply_equalizer_after_output_change(&mut self) {
-        if !self.equalizer.enabled {
+        if !self.equalizer.enabled && self.lock_sound_mixed.is_none() {
             return;
         }
         if let Err(e) = self.write_chain().await {
@@ -130,12 +135,26 @@ impl<P: Player> Core<P> {
     /// Writes the whole chain of the current setting (empty when disabled)
     /// and records what mpv then holds. A failure leaves `af` unknown.
     async fn write_chain(&mut self) -> Result<()> {
-        let chain = crate::equalizer::af_chain(&self.equalizer);
+        self.write_chain_with(None).await.map(|_| ())
+    }
+
+    /// `write_chain`, with `extra` (a lock chime, `lock_sound.rs`) after the
+    /// equalizer's filters; returns the chain written. Any whole-chain write
+    /// drops a chime mixed before it, so its pending removal goes too
+    /// (`lock_sound_mixed`): the caller mixing a new one sets it again.
+    pub(super) async fn write_chain_with(&mut self, extra: Option<&str>) -> Result<String> {
+        let eq = crate::equalizer::af_chain(&self.equalizer);
+        let chain = match extra {
+            Some(extra) if !extra.is_empty() && !eq.is_empty() => format!("{eq},{extra}"),
+            Some(extra) if !extra.is_empty() => extra.to_string(),
+            _ => eq,
+        };
+        self.lock_sound_mixed = None;
         let result = self.player.set_audio_filters(&chain).await;
-        self.eq_chain_written = result.is_ok().then_some(chain);
+        self.eq_chain_written = result.is_ok().then(|| chain.clone());
         self.eq_preamp_sent = crate::equalizer::effective_preamp_db(&self.equalizer);
         self.eq_bands_sent = self.equalizer.gains;
-        result
+        result.map(|()| chain)
     }
 
     /// The preamp, when it differs from what mpv holds.

@@ -49,13 +49,17 @@ impl<P: Player> Core<P> {
     /// refuse their own keys; the core keeps applying every command it
     /// receives. Not persisted — see the field. The overlay is shown even
     /// when the value did not change, so that pressing the unlock key on an
-    /// unlocked device still answers.
+    /// unlocked device still answers — and so is the lock sound, for the
+    /// same reason: a device asleep has no screen, and the chime is then the
+    /// key's only answer (`lock_sound.rs`; it never fails the lock).
     pub(super) async fn set_input_lock(&mut self, locked: bool) {
         self.input_locked = locked;
         tracing::info!("remote lock: {}", if locked { "on" } else { "off" });
         let key = if locked { "overlay_input_locked" } else { "overlay_input_unlocked" };
         let text = self.catalog.read().await.get(key).to_string();
         self.show_message(text);
+        let motif = if locked { crate::lock_sound::Motif::Lock } else { crate::lock_sound::Motif::Unlock };
+        self.play_lock_sound(self.settings.lock_sound, motif).await;
     }
 
     /// Absolute volume, the only way in for a setting that comes from no key:

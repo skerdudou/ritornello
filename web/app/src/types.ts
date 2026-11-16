@@ -543,6 +543,8 @@ export interface SettingsPayload {
    * core remembers on each `SetSleepTimer` and keeps across a `PUT`.
    */
   sleep_timer_mode: SleepMode
+  /** The sound played on the device at every lock change; `none` is silence. */
+  lock_sound: LockSound
   /**
    * The alarm clocks. Part of the full replace a `PUT /api/settings` is: a
    * body without them empties the list.
@@ -729,6 +731,8 @@ export interface PlayerPayload {
    */
   input_locked?: boolean
 }
+/** The sound played on the device at every lock change; `none` is silence. Mirrors the core's `lock_sound::LockSound`. */
+export type LockSound = 'none' | 'a' | 'b' | 'c' | 'd' | 'e'
 /** What a sleep timer does when its time is up. Mirrors `ritornello_proto::SleepMode`. */
 export type SleepMode = 'immediate' | 'fade' | 'end_of_track'
 /** Where a running sleep timer stands. Mirrors `ritornello_proto::SleepPhase`. */

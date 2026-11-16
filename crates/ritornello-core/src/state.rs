@@ -259,6 +259,15 @@ pub struct Settings {
     #[serde(deserialize_with = "lenient_sleep_mode")]
     pub sleep_timer_mode: ritornello_proto::SleepMode,
 
+    /// The sound played when the physical remote is locked or unlocked
+    /// (`None` is silence).
+    ///
+    /// Lenient at load: a value this core does not know (written by a newer
+    /// one before a rollback) reads as `A` instead of taking `load`'s
+    /// all-or-nothing path, which would reset every other setting.
+    #[serde(deserialize_with = "lenient_lock_sound")]
+    pub lock_sound: crate::lock_sound::LockSound,
+
     /// The alarm clocks, as edited on the config page (`PUT /api/settings`).
     /// Lenient at load, element by element: see `lenient_alarms`.
     #[serde(deserialize_with = "lenient_alarms")]
@@ -427,6 +436,13 @@ fn lenient_sleep_mode<'de, D: serde::Deserializer<'de>>(d: D) -> Result<ritornel
     Ok(serde_json::from_value(v).unwrap_or(ritornello_proto::SleepMode::Fade))
 }
 
+/// A lock sound this core cannot read is `A`, the default: only the chime is
+/// lost (`Settings::lock_sound`).
+fn lenient_lock_sound<'de, D: serde::Deserializer<'de>>(d: D) -> Result<crate::lock_sound::LockSound, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).unwrap_or_default())
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -485,6 +501,7 @@ impl Default for Settings {
             update_prereleases: false,
             // A fade: the gentlest ending, and the proto's own default.
             sleep_timer_mode: ritornello_proto::SleepMode::Fade,
+            lock_sound: crate::lock_sound::LockSound::A,
             alarms: Vec::new(),
         }
     }
@@ -789,6 +806,37 @@ mod tests {
         assert_eq!(st.settings.overlay_ms, 3000, "another setting must survive the bad alarm");
         assert_eq!(st.settings.alarms.len(), 1);
         assert_eq!(st.settings.alarms[0].id, 2);
+    }
+
+    #[test]
+    fn lock_sound_defaults_to_a() {
+        assert_eq!(Settings::default().lock_sound, crate::lock_sound::LockSound::A);
+        let st = load_text(r#"{"active_source":"cd","volume":33,"settings":{"overlay_ms":3000}}"#);
+        assert_eq!(st.settings.lock_sound, crate::lock_sound::LockSound::A);
+    }
+
+    #[test]
+    fn an_unknown_lock_sound_falls_back_to_a_and_keeps_every_other_setting() {
+        let st = load_text(r#"{"active_source":"cd","volume":33,"settings":{"lock_sound":"z","seek_step_s":30}}"#);
+        assert_eq!(st.settings.lock_sound, crate::lock_sound::LockSound::A);
+        assert_eq!(st.settings.seek_step_s, 30);
+    }
+
+    #[test]
+    fn lock_sound_round_trips_as_snake_case() {
+        use crate::lock_sound::LockSound;
+        for (wire, sound) in [
+            ("none", LockSound::None),
+            ("a", LockSound::A),
+            ("b", LockSound::B),
+            ("c", LockSound::C),
+            ("d", LockSound::D),
+            ("e", LockSound::E),
+        ] {
+            let st = load_text(&format!(r#"{{"active_source":"cd","volume":33,"settings":{{"lock_sound":"{wire}"}}}}"#));
+            assert_eq!(st.settings.lock_sound, sound, "{wire}");
+            assert_eq!(serde_json::to_string(&sound).unwrap(), format!("\"{wire}\""));
+        }
     }
 
     fn load_text(text: &str) -> PersistedState {
@@ -1286,6 +1334,8 @@ mod tests {
                 update_prereleases: true,
                 // Not the default (`Fade`), for the same reason.
                 sleep_timer_mode: ritornello_proto::SleepMode::Immediate,
+                // Not the default (`A`), for the same reason.
+                lock_sound: crate::lock_sound::LockSound::B,
                 alarms: vec![Alarm {
                     id: 3,
                     enabled: true,

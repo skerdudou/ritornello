@@ -9,6 +9,7 @@ mod i18n;
 mod metadata;
 mod docs_map;
 mod equalizer;
+mod lock_sound;
 mod langpack;
 mod lyrics;
 mod packaging_manifest;
@@ -1792,6 +1793,7 @@ async fn main() -> Result<()> {
     let (enrich_tx, mut enrich_rx) = mpsc::channel::<(String, Enrichment)>(32);
     let (audio_tx, mut audio_rx) = mpsc::channel::<Option<String>>(4);
     let (eq_tx, mut eq_rx) = mpsc::channel::<equalizer::EqualizerSettings>(4);
+    let (lock_sound_preview_tx, mut lock_sound_rx) = mpsc::channel::<lock_sound::LockSound>(1);
     let (update_sources_tx, mut update_sources_rx) = mpsc::channel::<Vec<String>>(4);
     let (pack_preferences_tx, mut pack_preferences_rx) = mpsc::channel::<Vec<state::PackPreference>>(4);
     let (locale_tx, mut locale_rx) = mpsc::channel::<String>(4);
@@ -2406,6 +2408,7 @@ async fn main() -> Result<()> {
             audio_tx: audio_tx.clone(),
             eq_current: eq_current.clone(),
             eq_tx: eq_tx.clone(),
+            lock_sound_preview_tx,
             catalog: catalog.clone(),
             registry: registry.clone(),
             locale_current: locale_current.clone(),
@@ -2641,6 +2644,15 @@ async fn main() -> Result<()> {
         let overlay_at = core.overlay_deadline().map(tokio::time::Instant::from);
         let overlay_sleep = async {
             match overlay_at {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
+        // Removal of a lock chime mixed into playback: absolute, and read
+        // before the `select!` like `overlay_at`, for the same reasons.
+        let lock_sound_at = core.lock_sound_deadline().map(tokio::time::Instant::from);
+        let lock_sound_sleep = async {
+            match lock_sound_at {
                 Some(at) => tokio::time::sleep_until(at).await,
                 None => std::future::pending().await,
             }
@@ -2889,6 +2901,7 @@ async fn main() -> Result<()> {
                     tracing::warn!("audio output change: {e}");
                 }
             }
+            Some(sound) = lock_sound_rx.recv() => core.preview_lock_sound(sound).await,
             Some(settings) = eq_rx.recv() => {
                 if let Err(e) = core.set_equalizer(settings).await {
                     tracing::warn!("equalizer change: {e}");
@@ -3215,6 +3228,9 @@ async fn main() -> Result<()> {
             _ = overlay_sleep => {
                 core.expire_overlay();
             }
+            _ = lock_sound_sleep => {
+                core.expire_lock_sound().await;
+            }
             _ = sleep_timer_sleep => {
                 core.on_sleep_deadline().await;
             }
@@ -3516,6 +3532,12 @@ mod toggle_tests {
             Ok(())
         }
         async fn audio_filter_command(&self, _cmd: &crate::equalizer::AfCommand) -> Result<()> {
+            Ok(())
+        }
+        async fn chime_route(&self) -> Result<crate::player::ChimeRoute> {
+            Ok(crate::player::ChimeRoute::Silent)
+        }
+        async fn play_aside(&self, _uri: &str) -> Result<()> {
             Ok(())
         }
     }
