@@ -776,9 +776,9 @@ is the highest number in use, not a count of how many exist (see
 [interface.md](interface.md) for the general rule). It is what lets the web
 grid show only the numbers that exist and reach past ten through its own
 `<`/`>` page arrows — the remote's bare digits alone only reach 1-10. The
-order is changed **by dragging a row** (or with the ▲▼ arrows, which remain
-the keyboard-and-touch-accessible path): moving a station therefore changes
-its remote digit.
+order is changed **by dragging a row by its ⠿ handle, with a finger or a
+mouse** (or with the ▲▼ arrows, which remain the keyboard path): moving a
+station therefore changes its remote digit.
 
 Saving a new station list from the admin page announces the fresh
 `preset_count` to the core right away, as a spontaneous notification
@@ -1171,7 +1171,11 @@ for free.
 Its page, `http://<host>:8080/plugins/files/`, is where roots are
 declared (host, share, subfolder, user, password, domain, whether writing
 is allowed), where a folder is browsed and added recursively to the
-current playlist, and where a playlist is saved and loaded again.
+current playlist, and where a playlist is saved and loaded again. The
+playlist is reordered by dragging a row's ⠿ handle, with a finger or a mouse
+(or with the ▲▼ arrows, which remain the keyboard path); only the visible
+page of the playlist can be dragged, the ranks it sends are absolute, and
+the handles are locked while the playlist is frozen.
 Declaring a share writes two things: the root into the plugin's own
 `media-roots.toml` (see `deploy/media-roots.example.toml`) and its password
 into its own `credentials/<name>.cred` (mode `0600`) — the password is
@@ -2564,7 +2568,8 @@ device. It needs **`python3`** on the device (see
 ### Presets
 
 Presets work like the radio's: numbered **by position** (1 to 99),
-reordered by dragging a row or with the ▲▼ arrows, announced to the core as
+reordered by dragging a row by its ⠿ handle, with a finger or a mouse (or with
+the ▲▼ arrows, the keyboard path), announced to the core as
 `preset_count`, listed by name for `list_presets`. They are kept in
 `entries.toml`. As on the radio, a save that moves or renames the preset
 that plays (or is armed) corrects its number and name on the card and in
@@ -4136,6 +4141,30 @@ Native ESM requires no build step: a simple plugin can ship a
 generic-input, mpd, musicbrainz, lrclib-lyrics) use a Vite build (see
 `crates/ritornello-plugin-radio/ui/`) to benefit from `.vue` files and
 TypeScript — a comfort choice, not a requirement.
+
+**Reordering a list: `ReorderList` and `ReorderHandle`.** For a list the user
+can rearrange, `@ritornello/ui` exports `ReorderList` and `ReorderHandle`, so a
+third-party page gets the same gesture as the bundled ones, finger and mouse
+alike. `ReorderList` owns the `v-for`: it takes `items`, an `item-key`
+function and the container `tag` (`tbody` for a table), and its default slot
+receives `item`, `index` and `itemAttrs`, which the slot must spread on the
+row's root element. The page puts a `ReorderHandle` in each row: **the handle
+is the only grab**, so a finger anywhere else still scrolls the page. The list
+reports a drop through an `onMove(from, to)` prop (positions among the
+reorderable items, in the parent's `items`) that returns a promise. **The
+list never mutates `items`:** it shows the dropped order until that promise
+settles, then the parent's own list, so a refused move shows the old order
+again with nothing to restore; while a drop awaits its answer no second drag
+starts. Near the top or bottom edge of the window a drag scrolls the page by
+itself. The handle is hidden from assistive technology: the ▲▼ buttons stay
+the keyboard path, and a page should keep them.
+
+These two components were added to the kit **without bumping `UI_CONTRACT`**,
+by the project owner's one-time decision. The cost is accepted: a `ui.js`
+built against this kit (`files`, `radio`, `web-streaming`) fails to load on an
+older core (a core rolled back alone, a partial update), and its page shows
+"unavailable" instead of the contract-mismatch message. The next incompatible
+change of the kit bumps the number as usual.
 
 Five things learned during this work stream, to know before writing a
 third-party plugin's UI:

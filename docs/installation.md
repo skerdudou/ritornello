@@ -2239,6 +2239,17 @@ pair, so the long press might never reach 2 seconds. The console's LOCKED and UN
 displays have not been seen on the device either. No preset binds a lock key;
 the owner binds one with Learn on the generic-input page ("Lock (long press)").
 
+**Reordering by finger has only run in Chromium's touch emulation.** Dragging
+a row by its handle with a finger (plugins table, `files` playlist, radio
+stations, web-streaming presets) is covered by Playwright journeys that
+dispatch touch gestures through the Chrome DevTools Protocol, in Chromium
+only. It has never been tried on a real phone or tablet, in iOS Safari, or in
+Firefox. Neither has the auto-scroll near the window's edge on a touch screen.
+The `ReorderList`/`ReorderHandle` kit components were added without bumping
+`UI_CONTRACT`, so a `files`, `radio` or `web-streaming` page built against
+this kit does not load on an older core; that was accepted, and the behaviour
+(a page shown as unavailable) has been read from the code, not observed.
+
 Not something left unverified, but worth recording here for whoever meets
 its traces in the history: `plugin_action_refusal`, the scaffold that made
 every not-yet-wired plugin gesture refuse honestly instead of silently

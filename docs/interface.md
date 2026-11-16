@@ -1443,10 +1443,18 @@ nothing to click; publishing a release, not uninstalling, is what makes a
 component installable again.
 
 **The physical remote's source key now cycles through the sources in
-this table's own order, not alphabetically.** Reordering with the arrows
-changes both: which source the key lands on next, and (see
+this table's own order, not alphabetically.** Reordering, by dragging a row's
+⠿ handle (finger or mouse) or with the ▲▼ arrows, changes both: which source the key lands on next, and (see
 [plugins.md](plugins.md)) metadata priority for the fields more than one
 plugin can supply.
+
+The handle is the only grab, so a finger anywhere else on the row scrolls the
+page; the arrows remain the keyboard path. While a row is held, the drop
+point shows as a dashed placeholder, and bringing the pointer within 120 px
+of the top or bottom edge of the window scrolls the page, at about 830 px a
+second. The order dropped stays on screen until the core answers; a refusal
+shows the previous order again. The same gesture reorders the radio's
+stations, the web-streaming presets and the `files` playlist.
 
 ### Third-party plugins
 
