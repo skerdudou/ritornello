@@ -310,15 +310,22 @@ function confirmDelete() {
         <Button variant="outline" data-eq-flat @click="resetFlat">{{ t('eq_reset_flat') }}</Button>
       </div>
 
-      <!-- Narrow screens: the ten bands scroll inside the card, never the page. -->
+      <!-- Phone: ten equal columns sharing the card's width (24 px each at
+           the 240 px floor; ≈ 26 px in the ≈ 260 px a 360 px screen leaves),
+           each slider narrowed to a 24 px wide hit area so neighbouring
+           thumbs never overlap. From `sm:` up, the fixed 44 px columns of the
+           desktop layout. `overflow-x-auto` is only the fallback under the
+           240 px floor (viewports narrower than ≈ 320 px): the bands then
+           scroll inside the card, never the page. -->
       <div data-eq-bands class="overflow-x-auto">
-        <div class="flex min-w-max justify-between gap-1">
+        <div data-eq-band-row class="grid min-w-60 grid-cols-10 sm:flex sm:min-w-max sm:justify-between sm:gap-1">
           <div
             v-for="(hz, i) in bandsHz" :key="hz"
-            class="flex w-11 flex-col items-center gap-1"
+            data-eq-band
+            class="flex min-w-0 flex-col items-center gap-1 sm:w-11"
           >
             <Slider
-              class="h-36"
+              class="h-36 data-[orientation=vertical]:px-[9px] sm:data-[orientation=vertical]:px-[19px]"
               orientation="vertical"
               :min="-12" :max="12" :step="1"
               :disabled="!state.enabled"

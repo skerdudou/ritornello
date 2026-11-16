@@ -427,8 +427,20 @@ describe('EqualizerCard', () => {
     expect((puts[0] as EqualizerSettings).gains[3]).toBe(-6)
   })
 
-  it('the sliders scroll inside the card, never the page', async () => {
+  it('the ten bands share the card width on a phone, scrolling only as a fallback', async () => {
+    // jsdom has no layout engine: this pins the classes, not the rendering
+    // (checked on a 360 px screenshot). What it does guard is the class
+    // merge: the kit's slider carries `data-[orientation=vertical]:px-[19px]`
+    // (44 px wide), and only a caller class under the same variant replaces
+    // it — a plain `px-[9px]` would lose, and ten 44 px sliders overflow a
+    // phone's card again.
     const w = await mountCard()
     expect(w.get('[data-eq-bands]').classes()).toContain('overflow-x-auto')
+    expect(w.get('[data-eq-band-row]').classes()).toEqual(expect.arrayContaining(['grid', 'grid-cols-10']))
+    for (const band of w.findAll('[data-eq-band]')) expect(band.classes()).toContain('min-w-0')
+    const root = w.get('[data-slot="slider"]').classes()
+    expect(root).toContain('data-[orientation=vertical]:px-[9px]')
+    expect(root).toContain('sm:data-[orientation=vertical]:px-[19px]')
+    expect(root).not.toContain('data-[orientation=vertical]:px-[19px]')
   })
 })
