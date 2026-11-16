@@ -1481,6 +1481,13 @@ machine, never on the device they are meant to run on. This section names
 each gesture, rather than leaving one blanket disclaimer that a reader could
 mistake for caution instead of fact.
 
+**A `ritornello-plugin-generic-input` older than the per-binding load still
+empties the whole key table** when a key is bound to "Lock (long press)"
+(`ToggleInputLock`): it does not know the command and drops every binding.
+That happens after a rollback or a channel switch to such a binary. The
+tolerant load protects the future only: it skips a binding it cannot read
+and keeps the rest.
+
 **The equalizer has been measured on WSL only, never on the Pi, never
 listened to.** The prototype ran on a development machine with mpv 0.37 and
 ffmpeg 6.1.1:

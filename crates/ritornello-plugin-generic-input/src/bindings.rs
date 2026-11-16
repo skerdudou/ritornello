@@ -121,16 +121,54 @@ impl Bindings {
                 return Bindings::default();
             }
         };
-        match toml::from_str::<Bindings>(&text) {
-            Ok(b) => b,
+        let root: toml::Value = match toml::from_str(&text) {
+            Ok(v) => v,
             Err(e) => {
                 tracing::warn!(
                     "bindings {} invalid ({e}): starting with no binding, use the admin page",
                     path.display()
                 );
-                Bindings::default()
+                return Bindings::default();
             }
+        };
+        Self::from_value(&root, path)
+    }
+
+    /// Per-binding tolerance: a binding this binary cannot read (typically a
+    /// command added by a newer binary, met again after a rollback) is skipped
+    /// with one `warn`, and everything else is kept. An all-or-nothing parse
+    /// would empty the table for one unknown key.
+    fn from_value(root: &toml::Value, path: &Path) -> Bindings {
+        let mut devices = Vec::new();
+        let Some(raw_devices) = root.get("devices").and_then(toml::Value::as_array) else {
+            return Bindings::default();
+        };
+        for raw in raw_devices {
+            let Some(name) = raw.get("name").and_then(toml::Value::as_str) else {
+                tracing::warn!("bindings {}: a device without a name is skipped", path.display());
+                continue;
+            };
+            let mut bindings = Vec::new();
+            let raw_bindings =
+                raw.get("bindings").and_then(toml::Value::as_array).map(Vec::as_slice);
+            for rb in raw_bindings.unwrap_or_default() {
+                match rb.clone().try_into::<Binding>() {
+                    Ok(b) => bindings.push(b),
+                    Err(e) => {
+                        let code = rb
+                            .get("code")
+                            .map(ToString::to_string)
+                            .unwrap_or_else(|| "?".to_string());
+                        tracing::warn!(
+                            "bindings {}: binding for code {code} on {name} skipped ({e})",
+                            path.display()
+                        );
+                    }
+                }
+            }
+            devices.push(Device { name: name.to_string(), bindings });
         }
+        Bindings { devices }
     }
 
     /// Atomic write: temporary file then `rename`, never a truncated file if
@@ -274,6 +312,43 @@ mod tests {
         let path = dir.path().join("broken.toml");
         std::fs::write(&path, "this is not = toml [").unwrap();
         assert_eq!(Bindings::load(&path), Bindings::default());
+    }
+
+    /// A binding this binary cannot read (a command added by a newer one, seen
+    /// after a rollback) must cost only itself, not the whole table.
+    #[test]
+    fn an_unknown_command_drops_only_its_own_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input-bindings.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[devices]]
+name = "eHome Infrared Transceiver"
+
+[[devices.bindings]]
+code = 115
+cmd = "VolumeUp"
+
+[[devices.bindings]]
+code = 200
+cmd = "FutureCommand"
+
+[[devices.bindings]]
+code = 2
+cmd = "Select"
+arg = 1
+
+[[devices]]
+name = "USB Keyboard"
+
+[[devices.bindings]]
+code = 57
+cmd = "PlayPause"
+"#,
+        )
+        .unwrap();
+        assert_eq!(Bindings::load(&path), sample());
     }
 
     #[test]
