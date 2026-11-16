@@ -2046,6 +2046,22 @@ reader rather than ending it. The core does **not** filter commands itself:
 what a locked state means for its own keys is the plugin's decision (the MPD
 plugin does not opt in: phone apps are an adult's remote).
 
+This plugin opts in. Its "Lock (long press)" action binds a key to
+`ToggleInputLock`, and the hold is timed **by the plugin**, not counted in
+autorepeats: a press arms a 2-second deadline, a release disarms it, and the
+toggle is sent when the deadline passes — whether the remote's receiver repeats
+the held key (an autorepeat only lets the plugin notice the deadline) or sends
+one press and one release. One hold toggles once; the key must be released and
+pressed again to toggle back. The lock key never sends anything on a plain
+press, and it keeps working while locked, since it is the way out. While
+locked, **every other key is ignored — Power included**, and so are their
+autorepeats; the core applies whatever it receives, so this is the only place
+that stays silent. Learning is unaffected: a key being learned is captured, not
+interpreted, locked or not. The state belongs to the core: the plugin only
+mirrors the `lock` frames the SDK feeds its `watch`, so a restarted plugin
+comes back locked if the core still is (it is told at connection), and a core
+restart unlocks.
+
 **Updating an existing installation** (old hard-coded-keyboard
 `ritornello-plugin-mce`): the old `deploy.sh` removed the
 `ritornello-plugin-mce` binary, but `ritornello-install` knows nothing of it,
