@@ -315,6 +315,12 @@ presets_window = "{first}–{last} sur {total}"
 
 # HTTP refusals (422/502/500)
 audio_output_name_empty = "nom de sortie audio vide"
+eq_error_gain_range = "gain de l'égaliseur hors bornes (-12 à 12 dB)"
+eq_error_name_empty = "nom de préréglage vide"
+eq_error_name_too_long = "nom de préréglage trop long (40 caractères au plus)"
+eq_error_duplicate_name = "un préréglage porte déjà ce nom"
+eq_error_too_many_presets = "trop de préréglages (20 au plus)"
+eq_error_unknown_preset = "préréglage d'égaliseur inconnu"
 settings_initial_delay_out_of_range = "délai initial hors bornes ({min}-{max} ms)"
 settings_repeat_interval_out_of_range = "intervalle de répétition hors bornes ({min}-{max} ms)"
 settings_overlay_out_of_range = "incrustation hors bornes ({min}-{max} ms)"

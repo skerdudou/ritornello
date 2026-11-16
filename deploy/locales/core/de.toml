@@ -318,6 +318,12 @@ presets_window = "{first}–{last} von {total}"
 
 # HTTP refusals (422/502/500)
 audio_output_name_empty = "leerer Name des Audioausgangs"
+eq_error_gain_range = "Equalizer-Verstärkung außerhalb des Bereichs (-12 bis 12 dB)"
+eq_error_name_empty = "leerer Name der Voreinstellung"
+eq_error_name_too_long = "Name der Voreinstellung zu lang (höchstens 40 Zeichen)"
+eq_error_duplicate_name = "eine Voreinstellung mit diesem Namen existiert bereits"
+eq_error_too_many_presets = "zu viele Voreinstellungen (höchstens 20)"
+eq_error_unknown_preset = "unbekannte Equalizer-Voreinstellung"
 settings_initial_delay_out_of_range = "Anfangsverzögerung außerhalb des Bereichs ({min}-{max} ms)"
 settings_repeat_interval_out_of_range = "Wiederholintervall außerhalb des Bereichs ({min}-{max} ms)"
 settings_overlay_out_of_range = "Anzeigedauer außerhalb des Bereichs ({min}-{max} ms)"

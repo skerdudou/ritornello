@@ -8,6 +8,7 @@ mod data_dirs_guard;
 mod i18n;
 mod metadata;
 mod docs_map;
+mod equalizer;
 mod langpack;
 mod lyrics;
 mod packaging_manifest;

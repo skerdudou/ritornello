@@ -318,6 +318,12 @@ presets_window = "{first}–{last} di {total}"
 
 # HTTP refusals (422/502/500)
 audio_output_name_empty = "nome dell'uscita audio vuoto"
+eq_error_gain_range = "guadagno dell'equalizzatore fuori dai valori ammessi (-12 a 12 dB)"
+eq_error_name_empty = "nome del preset vuoto"
+eq_error_name_too_long = "nome del preset troppo lungo (massimo 40 caratteri)"
+eq_error_duplicate_name = "esiste già un preset con questo nome"
+eq_error_too_many_presets = "troppi preset (massimo 20)"
+eq_error_unknown_preset = "preset dell'equalizzatore sconosciuto"
 settings_initial_delay_out_of_range = "ritardo iniziale fuori dai valori ammessi ({min}-{max} ms)"
 settings_repeat_interval_out_of_range = "intervallo di ripetizione fuori dai valori ammessi ({min}-{max} ms)"
 settings_overlay_out_of_range = "durata di visualizzazione fuori dai valori ammessi ({min}-{max} ms)"
