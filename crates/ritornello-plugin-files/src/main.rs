@@ -1435,8 +1435,10 @@ impl SourcePlugin for FilesSource {
 /// True for a frame that this plugin agrees to write to the log.
 ///
 /// **It discards only one thing: `lofty`'s chatter below the error level.**
-/// The durations survey opens the header of every file of the playlist, and
-/// `lofty` emits a `WARN` there for every MP3 without a Xing header —
+/// The one remaining `lofty` reader is `archive::album_from_tags` (the
+/// cover-archive homogeneity check): it opens up to `HOMOGENEITY_SAMPLE`
+/// neighbouring files with `Probe::read`, properties included, and `lofty`
+/// emits a `WARN` there for every MP3 without a Xing header —
 /// "MPEG: Using bitrate to estimate duration". This is not an incident: it is
 /// the normal estimation method for that format, it calls for no action, and
 /// it repeats per track. Reported by the owner as polluting his log, and the
@@ -1589,8 +1591,6 @@ async fn main() -> Result<()> {
         smb_ok,
         playlist_changed,
         plays,
-        durations: Arc::new(Mutex::new(admin::DurationsProgress::default())),
-        durations_task: None,
         roots_path,
         creds_dir,
         internal_playlists: playlists_dir,

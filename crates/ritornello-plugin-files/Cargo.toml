@@ -45,7 +45,7 @@ toml = "1.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
-# Reading the duration from the header, in-process.
+# Reading the album tag, in-process (`archive.rs`).
 #
 # `default-features = false` was tried and **does not compile**: the ID3v2 error
 # types live behind a default feature. Do not retry without checking.

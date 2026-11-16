@@ -44,21 +44,6 @@ pub struct ScanProgress {
     pub error: Option<Text>,
 }
 
-/// Progress of the duration probing, as the page reads it.
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct DurationsProgress {
-    pub running: bool,
-    pub done: usize,
-    pub total: usize,
-}
-
-/// How many tracks are probed before re-taking the lock.
-///
-/// Neither one by one — the lock would be taken thousands of times, competing
-/// with playback — nor all at once, which would show no progress and lose
-/// everything if the probing were aborted along the way.
-const PROBE_BATCH: usize = 25;
-
 pub struct FilesAdmin {
     pub roots_path: PathBuf,
     pub creds_dir: PathBuf,
@@ -115,11 +100,6 @@ pub struct FilesAdmin {
     /// five seconds: a single `is_file` that never completes wedges the
     /// whole plugin, page included. See `health` for the measurement.
     pub health: Arc<Health>,
-    /// Progress of the duration probing.
-    pub durations: Arc<Mutex<DurationsProgress>>,
-    /// Running probe. Launching a new one **abandons** the previous one:
-    /// after loading a list, probing the old one is useless.
-    pub durations_task: Option<tokio::task::JoinHandle<()>>,
     /// The name a found cover is archived under, on every root. Shared with
     /// the Source half, which reads it at each write; this half is the only
     /// writer, and persists it in the state file before publishing it.
@@ -384,141 +364,6 @@ impl FilesAdmin {
         *self.mount_error.lock().unwrap() = mount::reconcile(mount::UNIT).await.err();
     }
 
-    /// Starts probing the missing durations, as a background task.
-    ///
-    /// As a background task because there is no choice: the admin protocol
-    /// has a 5 s cap, and a two-thousand-track list coming from a share
-    /// needs more. The page follows the progress by polling, exactly as for
-    /// the scan.
-    ///
-    /// Only probes what is missing: a duration coming from an `#EXTINF` or
-    /// an earlier probe is kept, and `StoredEntry` persists it — a restart
-    /// therefore re-probes nothing.
-    ///
-    /// The results are applied **by path** and not by index: the page can
-    /// reorder or remove tracks during the probing, and applying by position
-    /// would write one file's duration onto another.
-    fn start_probe(
-        playlist: Arc<AsyncRwLock<Playlist>>,
-        durations: Arc<Mutex<DurationsProgress>>,
-        state_path: PathBuf,
-        health: Arc<Health>,
-    ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            let to_probe: Vec<PathBuf> = {
-                let list = playlist.read().await;
-                let mut v: Vec<PathBuf> = list
-                    .entries
-                    .iter()
-                    .filter(|e| e.duration_s.is_none())
-                    .map(|e| e.path.clone())
-                    .collect();
-                // The same file may appear twice: probing it once is enough,
-                // the duration will be set on all its occurrences.
-                v.sort();
-                v.dedup();
-                v
-            };
-            if to_probe.is_empty() {
-                *durations.lock().unwrap() = DurationsProgress::default();
-                return;
-            }
-            *durations.lock().unwrap() =
-                DurationsProgress { running: true, done: 0, total: to_probe.len() };
-
-            let mut done = 0usize;
-            // Split into batches **per mount point**: a batch thus never
-            // mixes two shares, and the circuit breaker of a silent mount
-            // immediately discards all its following batches without running
-            // anything — otherwise each batch would go back to waiting on
-            // the same share.
-            let batches: Vec<Vec<PathBuf>> = health
-                .group(&to_probe)
-                .into_iter()
-                .flat_map(|(_, indices)| {
-                    let paths: Vec<PathBuf> =
-                        indices.iter().map(|&i| to_probe[i].clone()).collect();
-                    paths.chunks(PROBE_BATCH).map(<[PathBuf]>::to_vec).collect::<Vec<_>>()
-                })
-                .collect();
-            for batch in batches {
-                let anchor = batch[0].clone();
-                // Under the circuit breaker, and not merely `spawn_blocking`:
-                // leaving the async thread protects the admin loop, but not
-                // the pool. On a blocked share, every `reprobe` restart lost
-                // one more thread there, without ever getting one back — the
-                // circuit breaker is what bounded that leak to one thread
-                // per mount point.
-                let measured = health
-                    .bounded(&anchor, move || {
-                        batch.into_iter()
-                            .map(|p| {
-                                let d = ritornello_plugin_files::duration::probe(&p);
-                                (p, d)
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .await;
-                // This mount does not answer: move on to the next batch,
-                // without abandoning the probing — the local tracks of the
-                // same list must go through. The remaining batches of the
-                // same share will be discarded at no cost by the circuit
-                // breaker.
-                //
-                // `done` does not advance for a skipped batch: the page will
-                // show fewer measured durations than tracks, which is the
-                // truth.
-                let Some(measured) = measured else { continue };
-
-                {
-                    let mut list = playlist.write().await;
-                    for (path, duration) in &measured {
-                        let Some(d) = duration else { continue };
-                        for e in list.entries.iter_mut() {
-                            // `is_none` again: between the survey and now, a
-                            // load may have set a duration.
-                            if e.path == *path && e.duration_s.is_none() {
-                                e.duration_s = Some(*d);
-                            }
-                        }
-                    }
-                    let stored: Vec<state::StoredEntry> =
-                        list.entries.iter().map(state::StoredEntry::from).collect();
-                    let index = list.index;
-                    drop(list);
-                    // Persist at every batch: a probe interrupted midway
-                    // keeps what it has already found, instead of redoing
-                    // everything.
-                    if let Err(e) = state::update(&state_path, |s| {
-                        s.playlist = stored;
-                        s.index = index;
-                    }) {
-                        tracing::warn!("persisting track lengths: {e}");
-                    }
-                }
-
-                done += measured.len();
-                let mut p = durations.lock().unwrap();
-                p.done = done;
-            }
-            let mut p = durations.lock().unwrap();
-            p.running = false;
-        })
-    }
-
-    /// Restarts the probing, abandoning the one that was running.
-    fn reprobe(&mut self) {
-        if let Some(t) = self.durations_task.take() {
-            t.abort();
-        }
-        self.durations_task = Some(Self::start_probe(
-            self.playlist.clone(),
-            self.durations.clone(),
-            self.state_path.clone(),
-            self.health.clone(),
-        ));
-    }
-
     /// Writes the roots table, atomically.
     ///
     /// The temporary file then the rename: a power cut in the middle of a
@@ -660,15 +505,11 @@ impl AdminPlugin for FilesAdmin {
             // cut the radio while clearing a files list that was not
             // playing.
             "playing": self.plays.load(std::sync::atomic::Ordering::Relaxed),
-            // Progress of the duration probing: this is what makes the page
-            // poll until they arrive, then stop.
-            "durations": self.durations.lock().unwrap().clone(),
             "explore": explore,
             "mount_error": mount_error,
             // Mount points from which a probe never came back. Told to the
             // page so it can explain the silence: without them, the user
-            // sees durations that never arrive and indeterminate states with
-            // no indication of cause.
+            // sees indeterminate states with no indication of cause.
             "unresponsive": self.health.silent().iter()
                 .map(|p| p.display().to_string()).collect::<Vec<_>>(),
             "playlist": tracks,
@@ -1029,10 +870,6 @@ impl AdminPlugin for FilesAdmin {
                 let counter = Arc::new(AtomicUsize::new(0));
                 let tx = self.preset_count_tx.clone();
                 let changed = self.playlist_changed.clone();
-                let playlist_for_durations = self.playlist.clone();
-                let durations = self.durations.clone();
-                let state_path_for_durations = self.state_path.clone();
-                let health_for_durations = self.health.clone();
                 let state_path = self.state_path.clone();
                 self.scan_task = Some(tokio::spawn(async move {
                     let c = counter.clone();
@@ -1074,18 +911,6 @@ impl AdminPlugin for FilesAdmin {
                                 // channel to the Source half.
                                 changed.store(true, Ordering::Relaxed);
                                 let _ = tx.send(count);
-                                // The probing starts from here and not from
-                                // the handler: that one returned long before
-                                // the recursive walk added anything. Its
-                                // handle is not kept — a concurrent probe
-                                // only duplicates work, it never sets a
-                                // wrong duration.
-                                Self::start_probe(
-                                    playlist_for_durations,
-                                    durations,
-                                    state_path_for_durations,
-                                    health_for_durations,
-                                );
                                 if let Err(e) = state::update(&state_path, |s| {
                                     s.playlist = stored;
                                     s.index = index;
@@ -1113,7 +938,6 @@ impl AdminPlugin for FilesAdmin {
                 let file = self.under_root(&root, &path).await?;
                 self.add(vec![file]).await?;
                 self.playlist_changed().await;
-                self.reprobe();
                 Ok(())
             }
 
@@ -1181,9 +1005,6 @@ impl AdminPlugin for FilesAdmin {
                 drop(list);
                 self.unresolved.lock().unwrap().clear();
                 self.playlist_changed().await;
-                // Abandons a running probe: it covered tracks that are no
-                // longer there, and its progress would lie on screen.
-                self.reprobe();
                 Ok(())
             }
 
@@ -1215,7 +1036,6 @@ impl AdminPlugin for FilesAdmin {
                 list.index = 0;
                 drop(list);
                 self.playlist_changed().await;
-                self.reprobe();
                 Ok(())
             }
 
@@ -1253,9 +1073,6 @@ impl AdminPlugin for FilesAdmin {
                 list.index = 0;
                 drop(list);
                 self.playlist_changed().await;
-                // An m3u may carry `#EXTINF` lines, but rarely all of them:
-                // the probing only fills what is missing.
-                self.reprobe();
                 Ok(())
             }
         }
@@ -1291,8 +1108,6 @@ mod tests {
             preset_count_tx: tx,
             playlist_changed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             plays: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            durations: Arc::new(Mutex::new(DurationsProgress::default())),
-            durations_task: None,
             explore: ritornello_plugin_files::explore::Browser::new(
                 root_dir.join("creds"),
                 smb_ok.clone(),
@@ -1467,6 +1282,17 @@ mod tests {
         assert_eq!(d["volumes"].as_array().unwrap().len(), 1, "proc must not be offered");
         assert!(d["can_browse_smb"].is_boolean());
         assert!(d["explore"].is_object());
+    }
+
+    #[tokio::test]
+    async fn get_data_no_longer_reports_a_length_survey() {
+        // The page polled every second while `durations.running` was true; the
+        // survey is gone (lengths were always empty in practice), so the key must
+        // be too, or a stale page would keep polling.
+        let (admin, _) = test_admin();
+        let d = admin.get_data().await;
+        assert!(d.get("durations").is_none(), "{d}");
+        assert!(d["playlist"].is_array());
     }
 
     #[tokio::test]
@@ -1952,100 +1778,6 @@ mod tests {
         let list = admin.playlist.read().await;
         assert_eq!(list.entries.len(), 3);
         assert_eq!(list.index, 1, "the playing track must stay the same");
-    }
-
-    /// Waits for the duration probing to finish, or gives up after a timeout.
-    ///
-    /// The probing is **asynchronous** on purpose: the admin protocol has a
-    /// 5 s cap, and a list coming from a share needs more. A test must
-    /// therefore wait for it, not assume it finished by the time the
-    /// operation returned.
-    async fn wait_for_durations(admin: &FilesAdmin) {
-        for _ in 0..200 {
-            let p = admin.durations.lock().unwrap().clone();
-            if p.total > 0 && !p.running {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-        panic!("the duration probing never completed");
-    }
-
-    /// Makes a real mp3, or returns `None` if ffmpeg is missing.
-    fn mp3_of(seconds: u32, path: &Path) -> Option<()> {
-        std::process::Command::new("ffmpeg")
-            .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i"])
-            .arg(format!("sine=frequency=440:duration={seconds}"))
-            .arg(path)
-            .status()
-            .ok()
-            .filter(|s| s.success())
-            .map(|_| ())
-    }
-
-    #[tokio::test]
-    async fn adding_a_file_probes_its_duration_in_the_background() {
-        // The requirement: missing durations fill themselves in, without
-        // blocking the addition — a folder of a thousand tracks would
-        // exceed the core's 5 s cap.
-        let (mut admin, root_dir) = admin_with_local_root().await;
-        let media = root_dir.join("media");
-        std::fs::create_dir_all(&media).unwrap();
-        if mp3_of(3, &media.join("piste.mp3")).is_none() {
-            eprintln!("ffmpeg missing: test skipped");
-            return;
-        }
-        admin
-            .set_data(serde_json::json!({
-                "op": "add_file", "root": "local", "path": "piste.mp3"
-            }))
-            .await
-            .unwrap();
-        wait_for_durations(&admin).await;
-        let list = admin.playlist.read().await;
-        let d = list.entries[0].duration_s.expect("a duration was expected");
-        assert!((2..=4).contains(&d), "duration read {d}");
-    }
-
-    #[tokio::test]
-    async fn an_already_known_duration_is_not_overwritten() {
-        // Those from an `#EXTINF` are the authority: the file may be an
-        // excerpt, and reprobing over it would erase what the list asserted.
-        let (admin, _) = admin_with_local_root().await;
-        {
-            let mut list = admin.playlist.write().await;
-            list.entries = vec![Entry {
-                path: PathBuf::from("/m/inexistant.mp3"),
-                title: None,
-                duration_s: Some(245),
-            }];
-        }
-        let mut admin = admin;
-        admin.reprobe();
-        // Nothing to probe: the probing terminates without touching anything.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert_eq!(admin.playlist.read().await.entries[0].duration_s, Some(245));
-        assert_eq!(admin.durations.lock().unwrap().total, 0, "nothing needed probing");
-    }
-
-    #[tokio::test]
-    async fn probed_durations_are_persisted() {
-        // Without persistence, every restart would reprobe the whole list —
-        // thousands of header reads on a share, for nothing.
-        let (mut admin, root_dir) = admin_with_local_root().await;
-        let media = root_dir.join("media");
-        std::fs::create_dir_all(&media).unwrap();
-        if mp3_of(2, &media.join("p.mp3")).is_none() {
-            eprintln!("ffmpeg missing: test skipped");
-            return;
-        }
-        admin
-            .set_data(serde_json::json!({"op": "add_file", "root": "local", "path": "p.mp3"}))
-            .await
-            .unwrap();
-        wait_for_durations(&admin).await;
-        let state = state::load(&admin.state_path);
-        assert!(state.playlist[0].duration_s.is_some(), "the duration must survive a restart");
     }
 
     #[tokio::test]
