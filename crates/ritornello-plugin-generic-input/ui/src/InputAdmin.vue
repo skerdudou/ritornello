@@ -58,7 +58,7 @@ const preset = ref('')
 // simply does not offer them.
 const sources = ref<string[]>([])
 
-// The complete table: the 23 fixed actions, then one row per source. A
+// The complete table: the 26 fixed actions, then one row per source. A
 // `computed`, not a plain array like the old `ACTIONS` alias, because its
 // tail depends on data that arrives asynchronously (`sources`, and the
 // current device's bindings, for the orphan rows) — every caller that used
