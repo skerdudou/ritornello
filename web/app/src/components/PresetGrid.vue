@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Button, Card, CardAction, CardContent, CardHeader, CardTitle } from '@ritornello/ui'
 import { ChevronLeftIcon, ChevronRightIcon, ListBulletIcon, ViewGridIcon } from '@radix-icons/vue'
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useCatalog } from '../composables/useCatalog'
 import { classifySwipe, loadPresetLayout, revealScrollTop, savePresetLayout, type PresetLayout } from './presetLayout'
 import type { PlayerPayload } from '../types'
@@ -103,14 +103,17 @@ const allPresets = computed(() => {
 // never `scrollIntoView`: that would also scroll the page, which jumps under
 // the thumb on a phone. (No `window.*` here: `window` is the computed above.)
 const listFrame = ref<HTMLElement | null>(null)
-watch([listMode, activePreset], () => {
+function revealActive() {
   const frame = listFrame.value
   const n = activePreset.value
   if (!listMode.value || n === null || !frame) return
   const row = frame.querySelector<HTMLElement>(`[data-preset-button="${n}"]`)
   if (!row) return
   frame.scrollTop = revealScrollTop(frame.scrollTop, frame.clientHeight, row.offsetTop, row.offsetHeight, frame.scrollHeight)
-}, { flush: 'post', immediate: true })
+}
+watch([listMode, activePreset], revealActive, { flush: 'post' })
+// Not `immediate`: that runs during setup, before the frame exists.
+onMounted(revealActive)
 
 // A horizontal swipe on the card turns the page, pages mode only (see
 // classifySwipe). Touch and pen only: a mouse drag is a text selection, not a
@@ -129,7 +132,10 @@ function onPointerDown(e: PointerEvent) {
   // Any new gesture, whatever the pointer, ends the swallow.
   swallowUntil = 0
   if (e.pointerType !== 'touch' && e.pointerType !== 'pen') return
-  if (listMode.value || start) return
+  // A second finger is ignored; a new primary pointer always starts afresh,
+  // so a start whose up never reached the card (a pen lifted off it) cannot
+  // go stale.
+  if (listMode.value || !e.isPrimary) return
   start = { id: e.pointerId, x: e.clientX, y: e.clientY }
 }
 function onPointerUp(e: PointerEvent) {
@@ -191,8 +197,8 @@ const dimmed = computed(() => unavailable('Select', props.state))
           data-preset-layout-toggle
           variant="outline"
           size="icon-sm"
-          :aria-label="t(listMode ? 'presets_show_pages' : 'presets_show_list')"
-          :title="t(listMode ? 'presets_show_pages' : 'presets_show_list')"
+          :aria-label="listMode ? t('presets_show_pages') : t('presets_show_list')"
+          :title="listMode ? t('presets_show_pages') : t('presets_show_list')"
           @click="toggleLayout"
         >
           <ViewGridIcon v-if="listMode" class="size-4" />
@@ -208,7 +214,7 @@ const dimmed = computed(() => unavailable('Select', props.state))
         ref="listFrame"
         :data-preset-list="listMode ? '' : undefined"
         :class="listMode
-          ? 'relative grid max-h-[min(60vh,32rem)] grid-cols-1 gap-2 overflow-y-auto overscroll-contain'
+          ? 'relative grid max-h-[min(60vh,32rem)] grid-cols-1 gap-2 overflow-y-auto p-1 overscroll-contain'
           : 'grid grid-cols-2 gap-2'"
       >
         <Button

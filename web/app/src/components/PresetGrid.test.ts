@@ -222,9 +222,9 @@ describe('layout', () => {
     expect(w.get('[data-preset-window]').text()).toBe('1–10 of 23')
   })
 
-  it('in list, scrolls the frame, not the page, to the active preset', async () => {
-    // jsdom has no layout: give the frame and row 17 the geometry the
-    // computation reads, and back scrollTop with a map so the write is visible.
+  // jsdom has no layout: give the frame and row 17 the geometry the
+  // computation reads, and back scrollTop with a map so the write is visible.
+  async function withFrameGeometry(run: (scrollIntoView: ReturnType<typeof vi.fn>) => Promise<void>) {
     const proto = HTMLElement.prototype as unknown as Record<string, unknown>
     // jsdom defines offsetTop/offsetHeight on this very prototype: keep the
     // originals to put them back, rather than deleting them.
@@ -245,6 +245,17 @@ describe('layout', () => {
       set(this: HTMLElement, v: number) { tops.set(this, v) },
     })
     try {
+      await run(scrollIntoView)
+    } finally {
+      for (const [k, d] of originals) {
+        if (d) Object.defineProperty(proto, k, d)
+        else delete proto[k]
+      }
+    }
+  }
+
+  it('in list, scrolls the frame, not the page, to the active preset', async () => {
+    await withFrameGeometry(async (scrollIntoView) => {
       const w = mounted({ preset_count: 23, preset: 17 })
       await toggle(w).trigger('click')
       await w.vm.$nextTick()
@@ -252,12 +263,19 @@ describe('layout', () => {
       expect(frame.scrollTop).toBe(revealScrollTop(0, 200, 900, 48, 1300))
       expect(frame.scrollTop).toBe(900 + 24 - 100)
       expect(scrollIntoView).not.toHaveBeenCalled()
-    } finally {
-      for (const [k, d] of originals) {
-        if (d) Object.defineProperty(proto, k, d)
-        else delete proto[k]
-      }
-    }
+    })
+  })
+
+  it('mounted in list with a preset already playing, reveals it at once', async () => {
+    // The reveal watcher's immediate run happens during setup, before the
+    // frame exists: the reveal at mount has to come from onMounted.
+    await withFrameGeometry(async () => {
+      localStorage.setItem(LAYOUT_KEY, 'list')
+      const w = mounted({ preset_count: 23, preset: 17 })
+      await w.vm.$nextTick()
+      const frame = w.get('[data-preset-list]').element as HTMLElement
+      expect(frame.scrollTop).toBe(900 + 24 - 100)
+    })
   })
 })
 
@@ -268,8 +286,8 @@ describe('swipe', () => {
 
   // jsdom does not synthesize the click that ends a touch gesture: dispatch it.
   async function swipe(el: Element, from: [number, number], to: [number, number], pointerType = 'touch') {
-    el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1, pointerType, clientX: from[0], clientY: from[1] }))
-    el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1, pointerType, clientX: to[0], clientY: to[1] }))
+    el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, isPrimary: true, pointerId: 1, pointerType, clientX: from[0], clientY: from[1] }))
+    el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, isPrimary: true, pointerId: 1, pointerType, clientX: to[0], clientY: to[1] }))
     el.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     await nextTick()
   }
@@ -305,7 +323,7 @@ describe('swipe', () => {
   // Mobile browsers usually send no click after a drag past the tap slop: the
   // swallow armed by the swipe must not eat whatever comes next.
   const touch = (type: string, id: number, x: number, y: number, pointerType = 'touch') =>
-    new PointerEvent(type, { bubbles: true, pointerId: id, pointerType, clientX: x, clientY: y })
+    new PointerEvent(type, { bubbles: true, isPrimary: true, pointerId: id, pointerType, clientX: x, clientY: y })
   const swipeWithoutClick = async (grid: Element) => {
     grid.dispatchEvent(touch('pointerdown', 1, 200, 100))
     const up = touch('pointerup', 1, 100, 110)
@@ -353,11 +371,30 @@ describe('swipe', () => {
   it('a cancelled gesture does not turn the page', async () => {
     const w = mounted({ preset_count: 23 })
     const grid = w.get('[data-preset-grid]').element
-    grid.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1, pointerType: 'touch', clientX: 200, clientY: 100 }))
-    grid.dispatchEvent(new PointerEvent('pointercancel', { bubbles: true, pointerId: 1, pointerType: 'touch' }))
-    grid.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1, pointerType: 'touch', clientX: 100, clientY: 100 }))
+    grid.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, isPrimary: true, pointerId: 1, pointerType: 'touch', clientX: 200, clientY: 100 }))
+    grid.dispatchEvent(new PointerEvent('pointercancel', { bubbles: true, isPrimary: true, pointerId: 1, pointerType: 'touch' }))
+    grid.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, isPrimary: true, pointerId: 1, pointerType: 'touch', clientX: 100, clientY: 100 }))
     await nextTick()
     expect(windowOf(w)).toBe('1–10 of 23')
+  })
+
+  it('a second finger (non-primary pointer) does not start a swipe', async () => {
+    const w = mounted({ preset_count: 23 })
+    const grid = w.get('[data-preset-grid]').element
+    grid.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, isPrimary: false, pointerId: 2, pointerType: 'touch', clientX: 200, clientY: 100 }))
+    grid.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, isPrimary: false, pointerId: 2, pointerType: 'touch', clientX: 100, clientY: 100 }))
+    await nextTick()
+    expect(windowOf(w)).toBe('1–10 of 23')
+  })
+
+  it('a new primary pointerdown replaces a start whose up never arrived', async () => {
+    // A pen lifted off the card sends no pointerup to it: the next gesture,
+    // another pointer id, must not be judged against the stale origin.
+    const w = mounted({ preset_count: 23 })
+    const grid = w.get('[data-preset-grid]').element
+    grid.dispatchEvent(touch('pointerdown', 1, 10, 10, 'pen'))
+    await swipe(grid, [200, 100], [100, 110], 'touch')
+    expect(windowOf(w)).toBe('11–20 of 23')
   })
 
   it('a mouse drag does not turn the page', async () => {

@@ -196,15 +196,29 @@ test('on a phone: the presets card toggles list and pages, and a vertical drag o
   await expect(grid).toHaveAttribute('data-preset-layout', 'pages')
   await expect(page.locator('[data-preset-list]')).toHaveCount(0)
 
-  // Clicking the toggle may have scrolled the page to the bottom already.
-  await page.evaluate(() => window.scrollTo(0, 0))
+  // Bring the card in the middle of the viewport, so the finger lands on it
+  // (the player card above it is taller than the viewport), while the page
+  // still has room to scroll below.
+  // The page height settles as the player card fills in: wait for it, or the
+  // scroll position is clamped under the finger.
+  await expect.poll(async () => {
+    const h = await page.evaluate(() => document.documentElement.scrollHeight)
+    await page.waitForTimeout(300)
+    return h === (await page.evaluate(() => document.documentElement.scrollHeight))
+  }).toBe(true)
+  await page.evaluate(() => {
+    const top = document.querySelector('[data-preset-grid]')!.getBoundingClientRect().top + window.scrollY
+    window.scrollTo(0, Math.max(0, top - 250))
+  })
   const box = await grid.boundingBox()
   if (!box) throw new Error('presets card not visible')
-  expect(await page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight)).toBeGreaterThan(100)
+  const x = box.x + box.width / 2
+  const y = box.y + Math.min(box.height / 2, 60)
+  // The drag must start on the card, and the page must have room left to scroll.
+  expect(await page.evaluate(([px, py]) => document.elementFromPoint(px!, py!)?.closest('[data-preset-grid]') != null, [x, y])).toBe(true)
+  expect(await page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight - window.scrollY)).toBeGreaterThan(0)
   const before = await page.evaluate(() => window.scrollY)
   const cdp = await page.context().newCDPSession(page)
-  const x = box.x + box.width / 2
-  const y = Math.min(box.y + box.height / 2, 400)
   await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] })
   for (const step of [1, 2, 3]) {
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x, y: y - (200 * step) / 3 }] })
