@@ -70,8 +70,10 @@ impl core::Source for SourceClient {
 /// so an input that arrives late is served exactly like one that was there at
 /// launch, the lock included.
 ///
-/// `lock` is `Some` only for a plugin that announced `input_lock`: the SDK
-/// then writes the current lock to it at connection and on each change. A
+/// The opt-in decision lives **here**, not at the two call sites: `input_lock`
+/// is the announcement's flag and `state_rx` the core's state receiver, and
+/// the plugin gets a clone of it (so the SDK writes the current lock at
+/// connection and on each change) only when it announced `input_lock`. A
 /// plugin that did not opt in receives no frame it does not know. A clone of
 /// the state receiver is enough, however stale its version: the writer sends
 /// the current value at once rather than waiting for a change (see the note on
@@ -85,10 +87,12 @@ fn spawn_input_relay(
     name: String,
     socket: PathBuf,
     cmd_tx: mpsc::Sender<InputMessage>,
-    lock: Option<watch::Receiver<PlayerState>>,
+    input_lock: bool,
+    state_rx: &watch::Receiver<PlayerState>,
     unreachable: mpsc::Sender<(String, u64)>,
     wiring: u64,
 ) {
+    let lock = input_lock.then(|| state_rx.clone());
     tokio::spawn(async move {
         if let Err(e) = run_input_client(&socket, cmd_tx, lock).await {
             tracing::warn!("input plugin {name} disconnected: {e}");
@@ -1084,7 +1088,8 @@ async fn hotplug<P: player::Player>(
                     name.clone(),
                     socket.clone(),
                     children.cmd_tx.clone(),
-                    announcement.input_lock.then(|| children.state_rx.clone()),
+                    announcement.input_lock,
+                    &children.state_rx,
                     children.unreachable_tx.clone(),
                     wiring,
                 );
@@ -2117,7 +2122,8 @@ async fn main() -> Result<()> {
                         name.clone(),
                         socket.clone(),
                         cmd_tx.clone(),
-                        announcement.input_lock.then(|| state_rx.clone()),
+                        announcement.input_lock,
+                        &state_rx,
                         unreachable_tx.clone(),
                         0,
                     );
