@@ -1894,7 +1894,7 @@ function goTo(id: string) {
             <!-- The card title is not associated with the trigger: without an
                  aria-label, the selector has no accessible name at all. -->
             <Select v-model="device">
-              <SelectTrigger class="min-w-64" :aria-label="t('audio_output')"><SelectValue>{{ deviceLabel }}</SelectValue></SelectTrigger>
+              <SelectTrigger class="min-w-64 max-w-full" :aria-label="t('audio_output')"><SelectValue>{{ deviceLabel }}</SelectValue></SelectTrigger>
               <SelectContent>
                 <SelectItem :value="SYSTEM_DEFAULT" data-audio-default>
                   {{ t('audio_default_device') }}

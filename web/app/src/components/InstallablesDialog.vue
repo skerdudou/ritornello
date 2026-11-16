@@ -281,7 +281,7 @@ watch(
             :data-name="row.offer.name"
             class="flex items-start justify-between gap-2"
           >
-            <div class="grid gap-0.5 text-sm">
+            <div class="grid min-w-0 gap-0.5 text-sm wrap-anywhere">
               <span>{{ row.offer.name }}</span>
               <!-- Where a stranger's offer comes from, and which version:
                    with no catalogue of its own, that is all there is to say

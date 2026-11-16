@@ -1588,6 +1588,20 @@ describe('SystemView', () => {
       empty.unmount()
     })
 
+    it('a log line with a long path breaks anywhere', async () => {
+      // A log line carries paths and URLs with no space: unbroken, one of
+      // them widens the card past a phone's width.
+      stub(payload(), CATALOGUE, { lines: ['WARN ' + '/mnt/share/' + 'x'.repeat(200)] })
+      const w = await mountView()
+      expect(w.get('[data-log-line]').element.parentElement!.classList).toContain('wrap-anywhere')
+      await w.get('[data-logs-all]').trigger('click')
+      await flushPromises()
+      const line = document.body.querySelector('[data-logs-dialog-line]')!
+      expect(line.parentElement!.classList).toContain('whitespace-pre-wrap')
+      expect(line.parentElement!.classList).toContain('wrap-anywhere')
+      w.unmount()
+    })
+
     it('the dialog lists the whole log', async () => {
       stub(payload(), CATALOGUE, { lines: TWELVE })
       const w = await mountView()

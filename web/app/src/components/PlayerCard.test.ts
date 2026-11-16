@@ -64,6 +64,26 @@ function mountWith(state: Partial<PlayerPayload> | null) {
 }
 
 describe('PlayerCard', () => {
+  it('a title, artist or album with no space breaks anywhere rather than widen the card', () => {
+    // A stream title can be a bare URL: without `overflow-wrap:anywhere` it
+    // is one unbreakable word and pushes the card wider than a phone.
+    const long = 'https://stream.example/' + 'x'.repeat(200)
+    const w = mountWith({
+      title: long,
+      artist: long,
+      album: long,
+      status: long,
+      preset: 1,
+      preset_name: long,
+      standby: false,
+    })
+    expect(w.get('[data-title]').classes()).toContain('wrap-anywhere')
+    expect(w.get('[data-artist]').classes()).toContain('wrap-anywhere')
+    expect(w.get('[data-album]').element.parentElement!.classList).toContain('wrap-anywhere')
+    expect(w.get('[data-player-status]').classes()).toContain('wrap-anywhere')
+    expect(w.get('[data-player-preset]').element.parentElement!.classList).toContain('wrap-anywhere')
+  })
+
   it('shows the source from the first frame', () => {
     const w = mountWith({ source: 'cd' })
     expect(w.get('[data-source]').text()).toBe('cd')

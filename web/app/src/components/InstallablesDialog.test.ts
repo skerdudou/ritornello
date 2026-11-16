@@ -411,6 +411,16 @@ describe('InstallablesDialog', () => {
       offer({ name: 'zed', kind: 'third_party', offered: '1.2.0', third_party_repo: 'z/zed', ...overrides })
     const row = (name: string) => document.body.querySelector(`[data-installable-row][data-name="${name}"]`)
 
+    it('a third-party repository address cannot widen the dialog', async () => {
+      // The address has no space to break at: the text column must be allowed
+      // to shrink (`min-w-0`, a grid item) and to break anywhere.
+      mountDialog([fresh({ third_party_repo: 'owner/' + 'x'.repeat(200) })])
+      await flushPromises()
+      const column = row('zed')!.querySelector('[data-installable-repo]')!.parentElement!
+      expect(column.classList).toContain('min-w-0')
+      expect(column.classList).toContain('wrap-anywhere')
+    })
+
     // Spec §6: without a catalogue of its own, a stranger's offer is shown
     // by name, source and version — and its Install does not install: it
     // hands the page the name **and the repository** for the second consent.
