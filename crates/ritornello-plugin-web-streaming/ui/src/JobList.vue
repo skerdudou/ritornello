@@ -43,10 +43,14 @@ function newestFirst(jobs: Job[]): Job[] {
         <li v-for="(r, i) in j.rows" :key="i" class="flex flex-wrap gap-x-2" data-job-row>
           <span class="min-w-0 flex-1 truncate" data-job-row-title>{{ rowTitle(t, j.rows, i) }}</span>
           <span class="text-muted-foreground" data-job-row-state>{{ rowState(r) }}</span>
-          <span v-if="r.detail" :class="r.state === 'failed' ? 'text-destructive' : 'text-muted-foreground'">
+          <span
+            v-if="r.detail"
+            class="min-w-0 wrap-anywhere"
+            :class="r.state === 'failed' ? 'text-destructive' : 'text-muted-foreground'"
+          >
             {{ faultText(t, r.detail) }}
           </span>
-          <span v-for="(n, k) in r.notes ?? []" :key="k" class="w-full pl-2 text-muted-foreground" data-job-row-note>
+          <span v-for="(n, k) in r.notes ?? []" :key="k" class="w-full min-w-0 pl-2 text-muted-foreground wrap-anywhere" data-job-row-note>
             {{ noteText(t, n) }}
           </span>
         </li>
