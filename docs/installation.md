@@ -1501,7 +1501,7 @@ ffmpeg 6.1.1:
   only, never heard on the Pi's output. The shelf is flat within 0.21 dB from
   31 Hz up and attenuates less below (half its gain at 10 Hz); the automatic
   compensation is computed on the shelf's real curve together with the
-  bands, down to 10 Hz, and leaves what lies below 10 Hz untouched. The
+  bands, down to 10 Hz; the compensation does not look below 10 Hz. The
   shelf's formula was checked against the WSL measurements only, never
   against the Pi. Whether a biquad this low stays stable in the Pi's float
   path is unverified;

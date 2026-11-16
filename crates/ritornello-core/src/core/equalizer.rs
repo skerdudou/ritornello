@@ -525,6 +525,25 @@ mod tests {
         assert_eq!(band_calls(&calls), vec![band_call(0, -3)]);
     }
 
+    /// The case that happens: something plays, the next file (a radio
+    /// connecting) starts, and the equalizer moves before its playback
+    /// restarts. The file start must end the live window it inherited.
+    #[tokio::test]
+    async fn a_change_while_the_next_file_loads_waits_for_its_playback_restart() {
+        let (mut core, calls, _sc, _rx, dir) = playing_with(enabled()).await;
+        core.handle_event(Event::FileStarting).await;
+        assert!(calls_of(&calls).is_empty(), "af holds the setting: {:?}", calls_of(&calls));
+        core.player.af_cmd_fails.store(true, Ordering::SeqCst);
+        let new = with_band(enabled(), 5, 12);
+        core.set_equalizer(new.clone()).await.expect("no command while loading, so no error");
+        assert!(calls_of(&calls).is_empty(), "{:?}", calls_of(&calls));
+        assert_eq!(disk_equalizer(&dir), new);
+
+        core.player.af_cmd_fails.store(false, Ordering::SeqCst);
+        core.handle_event(Event::PlaybackRestarted).await;
+        assert_eq!(calls_of(&calls), vec![preamp_call(effective_preamp_db(&new)), band_call(5, 12)]);
+    }
+
     /// `playback-restart` also follows every seek: with nothing changed, it
     /// costs no command.
     #[tokio::test]

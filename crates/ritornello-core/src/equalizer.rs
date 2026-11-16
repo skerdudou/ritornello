@@ -175,17 +175,23 @@ fn biquad_response_db(b: &[f64; 3], den: &[f64; 3], f: f64) -> f64 {
     10.0 * (mag2(b) / mag2(den)).log10()
 }
 
-/// The preamp's shelf: centre frequency and Q, as `af_chain` writes them.
+/// The preamp's shelf: centre frequency and Q. `af_chain` writes the
+/// filter from these, so the model and the chain cannot drift apart.
 const SHELF_HZ: f64 = 10.0;
 const SHELF_Q: f64 = 0.707;
 
-/// Magnitude in dB of an RBJ high shelf (the one ffmpeg's `highshelf` uses,
-/// `t=q`) at frequency `f`.
-fn highshelf_response_db(f0: f64, q: f64, gain_db: f64, f: f64) -> f64 {
+/// The lowest frequency the compensation looks at: the shelf's own centre.
+/// Below it the shelf still attenuates partly, but nothing is searched.
+const COMPENSATED_FROM_HZ: f64 = SHELF_HZ;
+
+/// Coefficients (`b`, `den`) of the preamp's RBJ high shelf (the one
+/// ffmpeg's `highshelf` uses, `t=q`) at gain `gain_db`. They depend on the
+/// gain only: compute them once, then evaluate with `biquad_response_db`.
+fn highshelf_coefficients(gain_db: f64) -> ([f64; 3], [f64; 3]) {
     use std::f64::consts::PI;
     let a = 10f64.powf(gain_db / 40.0);
-    let w0 = 2.0 * PI * f0 / SAMPLE_RATE;
-    let (cos, alpha) = (w0.cos(), w0.sin() / (2.0 * q));
+    let w0 = 2.0 * PI * SHELF_HZ / SAMPLE_RATE;
+    let (cos, alpha) = (w0.cos(), w0.sin() / (2.0 * SHELF_Q));
     let beta = 2.0 * a.sqrt() * alpha;
     let b = [
         a * ((a + 1.0) + (a - 1.0) * cos + beta),
@@ -197,7 +203,7 @@ fn highshelf_response_db(f0: f64, q: f64, gain_db: f64, f: f64) -> f64 {
         2.0 * ((a - 1.0) - (a + 1.0) * cos),
         (a + 1.0) - (a - 1.0) * cos - beta,
     ];
-    biquad_response_db(&b, &den, f)
+    (b, den)
 }
 
 /// The least attenuation, in dB (never above 0), that keeps the chain mpv
@@ -208,15 +214,12 @@ fn highshelf_response_db(f0: f64, q: f64, gain_db: f64, f: f64) -> f64 {
 /// 20 Hz, -6 at 10 Hz (measured). Taking the preamp as the opposite of the
 /// bands' peak, as if it were flat, left a lone 31 Hz boost above 0 dB, so
 /// the preamp is searched on the combined curve instead: a bisection, since
-/// lowering the shelf's gain lowers its response at every frequency. Below
-/// 10 Hz nothing is compensated.
+/// lowering the shelf's gain lowers its response at every frequency. The
+/// search does not look below 10 Hz (`COMPENSATED_FROM_HZ`).
 pub fn preamp_db(gains: &[i8; 10]) -> f64 {
-    const POINTS: usize = 500;
     const FLOOR: f64 = -40.0;
-    let (lo, hi) = (SHELF_HZ.ln(), 20_000f64.ln());
-    let grid: Vec<(f64, f64)> = (0..POINTS)
-        .map(|i| {
-            let f = (lo + (hi - lo) * i as f64 / (POINTS - 1) as f64).exp();
+    let grid: Vec<(f64, f64)> = compensation_grid()
+        .map(|f| {
             let bands: f64 = BANDS_HZ
                 .iter()
                 .zip(gains)
@@ -225,7 +228,10 @@ pub fn preamp_db(gains: &[i8; 10]) -> f64 {
             (f, bands)
         })
         .collect();
-    let fits = |p: f64| grid.iter().all(|&(f, bands)| bands + highshelf_response_db(SHELF_HZ, SHELF_Q, p, f) <= 0.0);
+    let fits = |p: f64| {
+        let (b, den) = highshelf_coefficients(p);
+        grid.iter().all(|&(f, bands)| bands + biquad_response_db(&b, &den, f) <= 0.0)
+    };
     if fits(0.0) {
         return 0.0;
     }
@@ -240,6 +246,14 @@ pub fn preamp_db(gains: &[i8; 10]) -> f64 {
         }
     }
     low
+}
+
+/// The frequencies `preamp_db` checks: 500 points, evenly spaced on a log
+/// scale from `COMPENSATED_FROM_HZ` to 20 kHz.
+fn compensation_grid() -> impl Iterator<Item = f64> {
+    const POINTS: usize = 500;
+    let (lo, hi) = (COMPENSATED_FROM_HZ.ln(), 20_000f64.ln());
+    (0..POINTS).map(move |i| (lo + (hi - lo) * i as f64 / (POINTS - 1) as f64).exp())
 }
 
 pub fn effective_preamp_db(s: &EqualizerSettings) -> f64 {
@@ -275,7 +289,7 @@ pub fn af_chain(s: &EqualizerSettings) -> String {
         return String::new();
     }
     let mut parts = vec![format!(
-        "@eqpre:lavfi=[highshelf=f=10:t=q:w=0.707:g={}]",
+        "@eqpre:lavfi=[highshelf=f={SHELF_HZ}:t=q:w={SHELF_Q}:g={}]",
         fmt_db(effective_preamp_db(s))
     )];
     for (i, (hz, g)) in BANDS_HZ.iter().zip(s.gains).enumerate() {
@@ -419,7 +433,8 @@ mod tests {
     /// half its gain at 10 Hz, and is flat from about 31 Hz up.
     #[test]
     fn the_shelf_matches_its_measured_curve() {
-        let at = |f| highshelf_response_db(SHELF_HZ, SHELF_Q, -12.0, f);
+        let (b, den) = highshelf_coefficients(-12.0);
+        let at = |f| biquad_response_db(&b, &den, f);
         for (f, want, tol) in [(10.0, -6.0, 0.3), (20.0, -11.0, 0.3), (31.0, -11.8, 0.2), (1000.0, -12.0, 0.05)] {
             assert!((at(f) - want).abs() <= tol, "{f} Hz: {} (want {want} ±{tol})", at(f));
         }
@@ -429,8 +444,14 @@ mod tests {
     /// the preamp's shelf — from 10 Hz to 20 kHz, on a grid finer than the
     /// one `preamp_db` searches.
     fn combined_peak_db(gains: &[i8; 10], preamp: f64) -> f64 {
+        combined_peak_at(gains, preamp).0
+    }
+
+    /// `combined_peak_db` and the frequency where it lies.
+    fn combined_peak_at(gains: &[i8; 10], preamp: f64) -> (f64, f64) {
         const POINTS: usize = 4000;
         let (lo, hi) = (10f64.ln(), 20_000f64.ln());
+        let (b, den) = highshelf_coefficients(preamp);
         (0..POINTS)
             .map(|i| {
                 let f = (lo + (hi - lo) * i as f64 / (POINTS - 1) as f64).exp();
@@ -439,9 +460,21 @@ mod tests {
                     .zip(gains)
                     .map(|(&hz, &g)| peaking_response_db(f64::from(hz), f64::from(g), f))
                     .sum();
-                bands + highshelf_response_db(SHELF_HZ, SHELF_Q, preamp, f)
+                (bands + biquad_response_db(&b, &den, f), f)
             })
-            .fold(f64::MIN, f64::max)
+            .fold((f64::MIN, 0.0), |best, x| if x.0 > best.0 { x } else { best })
+    }
+
+    /// The search starts at the shelf's own 10 Hz, not at 20 Hz. Pinned on
+    /// the grid itself: across every setting tried (bands 31 to 250 Hz in
+    /// steps of 3 dB, the others at -12), the point that binds the preamp
+    /// never lay below 26.8 Hz, so no result of `preamp_db` tells a 20 Hz
+    /// start from a 10 Hz one today.
+    #[test]
+    fn the_compensation_looks_down_to_10_hz() {
+        let grid: Vec<f64> = compensation_grid().collect();
+        assert!((grid[0] - 10.0).abs() < 1e-9, "starts at {}", grid[0]);
+        assert!((grid[grid.len() - 1] - 20_000.0).abs() < 1e-6, "ends at {}", grid[grid.len() - 1]);
     }
 
     #[test]
