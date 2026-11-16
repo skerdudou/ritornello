@@ -210,6 +210,20 @@ mod tests {
         }
     }
 
+    /// A contract's current version as a pair, so a fixture follows the next
+    /// contract bump instead of silently losing its meaning.
+    fn cur(c: Contract) -> (u32, u32) {
+        let v = c.current();
+        (v.major, v.minor)
+    }
+
+    /// The first minor newer than the core's: the smallest version that is a
+    /// gap, whatever the contract is at.
+    fn newer(c: Contract) -> (u32, u32) {
+        let (major, minor) = cur(c);
+        (major, minor + 1)
+    }
+
     fn gap(contract: Contract, plugin: (u32, u32), core: (u32, u32)) -> ContractGap {
         ContractGap { contract, plugin: ContractVersion::new(plugin.0, plugin.1), core: ContractVersion::new(core.0, core.1) }
     }
@@ -251,7 +265,10 @@ mod tests {
         assert_eq!(
             judge(&a),
             Verdict::Refused(Refusal::Major {
-                gaps: vec![gap(Contract::Display, (2, 0), (1, 4)), gap(Contract::Input, (0, 3), (1, 2))]
+                gaps: vec![
+                    gap(Contract::Display, (2, 0), cur(Contract::Display)),
+                    gap(Contract::Input, (0, 3), cur(Contract::Input))
+                ]
             })
         );
     }
@@ -261,9 +278,9 @@ mod tests {
         let a = ann(
             &[PluginKind::Display, PluginKind::Input],
             true,
-            &[(Contract::Display, (1, 5)), (Contract::Input, (1, 1)), (Contract::Admin, (1, 0))],
+            &[(Contract::Display, newer(Contract::Display)), (Contract::Input, cur(Contract::Input)), (Contract::Admin, (1, 0))],
         );
-        assert_eq!(judge(&a), Verdict::Accepted { limited: vec![gap(Contract::Display, (1, 5), (1, 4))] });
+        assert_eq!(judge(&a), Verdict::Accepted { limited: vec![gap(Contract::Display, newer(Contract::Display), cur(Contract::Display))] });
     }
 
     #[test]
@@ -329,8 +346,11 @@ mod tests {
 
     #[test]
     fn a_major_gap_outranks_a_minor_gap() {
-        let a = ann(&[PluginKind::Display, PluginKind::Input], false, &[(Contract::Display, (2, 0)), (Contract::Input, (1, 2))]);
-        assert_eq!(judge(&a), Verdict::Refused(Refusal::Major { gaps: vec![gap(Contract::Display, (2, 0), (1, 4))] }));
+        let a = ann(&[PluginKind::Display, PluginKind::Input], false, &[(Contract::Display, (2, 0)), (Contract::Input, newer(Contract::Input))]);
+        assert_eq!(
+            judge(&a),
+            Verdict::Refused(Refusal::Major { gaps: vec![gap(Contract::Display, (2, 0), cur(Contract::Display))] })
+        );
     }
 
     #[test]

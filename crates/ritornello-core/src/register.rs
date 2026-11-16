@@ -430,8 +430,8 @@ mod tests {
         assert_eq!(
             stamped["contracts"],
             serde_json::json!({
-                "display": {"major": 1, "minor": 4},
-                "input": {"major": 1, "minor": 2},
+                "display": {"major": 1, "minor": ritornello_proto::Contract::Display.current().minor},
+                "input": {"major": 1, "minor": ritornello_proto::Contract::Input.current().minor},
                 "admin": {"major": 1, "minor": 0},
             })
         );

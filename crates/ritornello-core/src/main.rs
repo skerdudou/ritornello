@@ -4813,6 +4813,12 @@ mod toggle_tests {
         );
     }
 
+    /// The first display minor newer than this core's, a limited plugin's.
+    fn newer_display() -> ContractVersion {
+        let v = Contract::Display.current();
+        ContractVersion::new(v.major, v.minor + 1)
+    }
+
     /// The gap a display contract at `plugin` makes with this core's.
     fn display_gap(plugin: ContractVersion) -> ContractGap {
         ContractGap { contract: Contract::Display, plugin, core: Contract::Display.current() }
@@ -4937,7 +4943,7 @@ mod toggle_tests {
             json["incompatible"],
             serde_json::json!({
                 "reason": "major",
-                "gaps": [{"contract": "display", "plugin": {"major": 2, "minor": 0}, "core": {"major": 1, "minor": 4}}],
+                "gaps": [{"contract": "display", "plugin": {"major": 2, "minor": 0}, "core": {"major": 1, "minor": Contract::Display.current().minor}}],
             }),
             "{json}"
         );
@@ -4997,7 +5003,8 @@ mod toggle_tests {
         // reason that is not this test's.
         let socket = ritornello_plugin_sdk::socket_kind(&b.children.sockets_dir.join("mpd"), PluginKind::Display);
         let _display = tokio::net::UnixListener::bind(&socket).unwrap();
-        let a = mpd_like(ContractVersion::new(1, 5));
+        let newer = newer_display();
+        let a = mpd_like(newer);
 
         hotplug(a, &b.children, &mut b.core, &mut b.gathered, &b.kill_triggers, &mut b.non_supervised, 1).await;
 
@@ -5015,7 +5022,7 @@ mod toggle_tests {
             assert_eq!(line.incompatible, None);
             assert_eq!(
                 line.limited,
-                vec![display_gap(ContractVersion::new(1, 5))],
+                vec![display_gap(newer)],
                 "the {} line must name the display contract, and only it",
                 line.kind
             );
