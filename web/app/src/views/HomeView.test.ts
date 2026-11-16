@@ -538,7 +538,7 @@ describe('HomeView — sliders and names', () => {
     const thumb = w.get('[data-volume-slider] [role="slider"]')
     ;(thumb.element as HTMLElement).focus()
     await thumb.trigger('keydown', { key: 'ArrowRight' })
-    expect(posts).toContain(JSON.stringify({ cmd: 'SetVolume', arg: 61 }))
+    expect(posts).toContain(JSON.stringify({ cmd: 'SetVolume', arg: 65 }))
   })
 
   it('the bar posts SeekTo, by the step configured by /api/settings', async () => {

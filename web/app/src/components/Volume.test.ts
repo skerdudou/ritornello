@@ -8,6 +8,12 @@ const mounted = (props: Record<string, unknown> = {}) => {
   return mount(Volume, { props: { volume: 60, muted: false, disabled: false, ...props } })
 }
 
+const press = async (w: ReturnType<typeof mounted>, key: string, opts: { shiftKey?: boolean } = {}) => {
+  const handle = w.get('[role="slider"]')
+  ;(handle.element as HTMLElement).focus()
+  await handle.trigger('keydown', { key, ...opts })
+}
+
 describe('Volume', () => {
   beforeAll(() => {
     Element.prototype.setPointerCapture ??= () => {}
@@ -35,13 +41,97 @@ describe('Volume', () => {
     expect(w.get('[data-volume]').text()).toBe('')
   })
 
-  it('commits an absolute setting on release, once only', async () => {
+  it('the slider moves by steps of 5', () => {
     const w = mounted()
-    const handle = w.get('[role="slider"]')
-    ;(handle.element as HTMLElement).focus()
-    await handle.trigger('keydown', { key: 'ArrowRight' })
-    expect(w.emitted('set')).toEqual([[61]])
-    expect(w.get('[data-volume]').text()).toBe('61 %')
+    expect(w.getComponent(Slider).props('step')).toBe(5)
+  })
+
+  it('arrows move by 5 and send at once', async () => {
+    const w = mounted()
+    await press(w, 'ArrowRight')
+    expect(w.emitted('set')).toEqual([[65]])
+    expect(w.get('[data-volume]').text()).toBe('65 %')
+    await press(w, 'ArrowLeft')
+    expect(w.emitted('set')).toEqual([[65], [60]])
+    await press(w, 'ArrowUp')
+    await press(w, 'ArrowDown')
+    expect(w.emitted('set')).toEqual([[65], [60], [65], [60]])
+  })
+
+  it('two quick presses add up before any frame confirms', async () => {
+    const w = mounted()
+    await press(w, 'ArrowRight')
+    await press(w, 'ArrowRight')
+    expect(w.emitted('set')).toEqual([[65], [70]])
+  })
+
+  it('a volume off the grid shows as is and the arrows land on the grid', async () => {
+    const w = mounted({ volume: 33 })
+    await flushPromises()
+    expect(w.get('[data-volume]').text()).toBe('33 %')
+    expect(w.get('[role="slider"]').attributes('aria-valuenow')).toBe('33')
+    await press(w, 'ArrowRight')
+    expect(w.emitted('set')).toEqual([[35]])
+    const w2 = mounted({ volume: 33 })
+    await press(w2, 'ArrowLeft')
+    expect(w2.emitted('set')).toEqual([[30]])
+  })
+
+  it("Page keys and Shift+arrows move by 10, never by reka's 50", async () => {
+    const w = mounted()
+    await press(w, 'PageUp')
+    expect(w.emitted('set')).toEqual([[70]])
+    await press(w, 'PageDown')
+    expect(w.emitted('set')).toEqual([[70], [60]])
+    const w2 = mounted()
+    await press(w2, 'ArrowRight', { shiftKey: true })
+    expect(w2.emitted('set')).toEqual([[70]])
+    const w3 = mounted({ volume: 33 })
+    await press(w3, 'PageUp')
+    expect(w3.emitted('set')).toEqual([[40]])
+    const w4 = mounted({ volume: 33 })
+    await press(w4, 'PageDown')
+    expect(w4.emitted('set')).toEqual([[20]])
+  })
+
+  it('Home and End go to 0 and 100', async () => {
+    const w = mounted()
+    await press(w, 'Home')
+    expect(w.emitted('set')).toEqual([[0]])
+    const w2 = mounted()
+    await press(w2, 'End')
+    expect(w2.emitted('set')).toEqual([[100]])
+  })
+
+  it('the ends clamp and a key that changes nothing sends nothing', async () => {
+    const w = mounted({ volume: 98 })
+    await press(w, 'ArrowRight')
+    expect(w.emitted('set')).toEqual([[100]])
+    const w2 = mounted({ volume: 100 })
+    await press(w2, 'ArrowRight')
+    expect(w2.emitted('set')).toBeUndefined()
+    const w3 = mounted({ volume: 2 })
+    await press(w3, 'ArrowLeft')
+    expect(w3.emitted('set')).toEqual([[0]])
+  })
+
+  it('keys do nothing while disabled or before the first frame', async () => {
+    const w = mounted({ disabled: true })
+    await press(w, 'ArrowRight')
+    expect(w.emitted('set')).toBeUndefined()
+    const w2 = mounted({ volume: null })
+    await press(w2, 'ArrowRight')
+    expect(w2.emitted('set')).toBeUndefined()
+  })
+
+  it('after a key press, a frame from elsewhere is shown', async () => {
+    // Regression pin: reka's post-commit `update:modelValue` used to leave
+    // `local` latched, freezing the display on the pressed value.
+    const w = mounted()
+    await press(w, 'ArrowRight')
+    await w.setProps({ volume: 65 })
+    await w.setProps({ volume: 70 })
+    expect(w.get('[data-volume]').text()).toBe('70 %')
   })
 
   it('the speaker is the Mute toggle, and tells its state', async () => {
