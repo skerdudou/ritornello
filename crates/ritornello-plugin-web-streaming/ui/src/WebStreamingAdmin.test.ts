@@ -1,3 +1,4 @@
+import { ReorderList } from '@ritornello/ui'
 import { flushPromises } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Entry, Job, ProbeLine } from './data'
@@ -684,11 +685,14 @@ describe('WebStreamingAdmin', () => {
 
   // ---- reordering -----------------------------------------------------------
 
-  it('reorders by drag and drop, and the numbers follow the position', async () => {
+  it('reorders by its handle, and the numbers follow the position', async () => {
     const { w, s } = await mountAdmin({ entries: [video(1, 'A'), video(2, 'B'), video(3, 'C')] })
-    const rows = () => w.findAll('[data-entry-row]')
-    await rows()[0]!.trigger('dragstart')
-    await rows()[2]!.trigger('drop')
+    // `ReorderList` is generic, which `findComponent`'s typing cannot follow.
+    const onMove = (
+      w.findComponent(ReorderList as never) as unknown as { props(k: string): unknown }
+    ).props('onMove') as (from: number, to: number) => Promise<void>
+    await onMove(0, 2)
+    await flushPromises()
     expect(titles(w)).toEqual(['B', 'C', 'A'])
     await w.find('[data-save]').trigger('click')
     await flushPromises()
