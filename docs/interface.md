@@ -1004,8 +1004,8 @@ time).
 binary, without running it.** The core reads a small block of data embedded in
 the file, as bytes (see [The manifest block in your
 binary](plugins.md#the-manifest-block-in-your-binary)). A binary built before
-that block existed, or a third party's without it, shows `?` until it has been
-installed once by hand.
+that block existed shows `?` until it has been installed once by hand; a third
+party's binary without a block always shows `?` while it is switched off.
 
 A note that a rollback happened is read once, at process start, from the
 report the rollback service leaves behind. It is **not** limited to that

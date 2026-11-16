@@ -1756,10 +1756,11 @@ impl Worker {
 
     /// What the core knows about its plugins, before the release is consulted.
     ///
-    /// **Three** sources, and neither of the first two alone is enough:
+    /// **Four** sources, and neither of the first two alone is enough:
     /// `plugins.toml` says what is declared and where its binary should be,
-    /// the status lines say what each plugin announced about itself, and a
-    /// scan of the plugins directory (`plugins::undeclared_binaries`) is what
+    /// the status lines say what each plugin announced about itself, a
+    /// switched-off plugin's binary says what its manifest block carries
+    /// (below), and a scan of the plugins directory (`plugins::undeclared_binaries`) is what
     /// makes `Availability::Undeclared` reachable at all — a binary sitting
     /// there with nothing declaring it appears in neither of the first two.
     /// The same scan feeds `PluginStatus::undeclared_binary` on `/api/status`
@@ -1812,8 +1813,8 @@ impl Worker {
             })
             .collect();
         drop(statuses);
-        // The fourth source of a version: the block a switched-off plugin's
-        // binary carries. Only those, and only when a binary is there: an
+        // The third source: the block a switched-off plugin's binary
+        // carries. Only those, and only when a binary is there: an
         // enabled plugin that never announced keeps its `placed.json` repair
         // path (`a_plugin_whose_placed_binary_never_spoke_is_repaired_by_the_next_release`),
         // and a binary without a readable block stays "unknown", never
