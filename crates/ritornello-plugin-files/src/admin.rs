@@ -1285,8 +1285,8 @@ mod tests {
     #[tokio::test]
     async fn get_data_no_longer_reports_a_length_survey() {
         // The page polled every second while `durations.running` was true; the
-        // survey is gone (lengths were always empty in practice), so the key must
-        // be too, or a stale page would keep polling.
+        // survey is gone, so the key must be too: a page that saw
+        // `durations.running` would keep polling every second.
         let (admin, _) = test_admin();
         let d = admin.get_data().await;
         assert!(d.get("durations").is_none(), "{d}");
