@@ -170,3 +170,45 @@ test('on a phone: the Plugins tab leads to the list, which leads to the plugin p
   await page.locator('[data-plugins-list] a').first().click()
   await expect(page).toHaveURL(/\/plugins\/radio\/$/)
 })
+
+/**
+ * The presets card on a phone: the layout toggle is always there, and a
+ * vertical finger drag over the card still scrolls the page.
+ *
+ * The second half is the point only a real browser can make: jsdom has no
+ * `touch-action` and no scrolling, so the unit tests can pin the swipe's
+ * arithmetic but never that it leaves the vertical gesture to the page. The
+ * gesture goes through CDP touch events (a real touch pointer, which
+ * `page.mouse` is not). The harness declares one station, so there is no
+ * second page to swipe to.
+ */
+test('on a phone: the presets card toggles list and pages, and a vertical drag over it scrolls the page', async ({ page }) => {
+  await page.setViewportSize({ width: 412, height: 500 })
+  await page.goto('/')
+  const grid = page.locator('[data-preset-grid]')
+  await expect(grid).toHaveAttribute('data-preset-layout', 'pages')
+  const toggle = page.locator('[data-preset-layout-toggle]')
+  await expect(toggle).toHaveCount(1)
+  await toggle.click()
+  await expect(grid).toHaveAttribute('data-preset-layout', 'list')
+  await expect(page.locator('[data-preset-list] [data-preset-button]')).toHaveCount(1)
+  await toggle.click()
+  await expect(grid).toHaveAttribute('data-preset-layout', 'pages')
+  await expect(page.locator('[data-preset-list]')).toHaveCount(0)
+
+  // Clicking the toggle may have scrolled the page to the bottom already.
+  await page.evaluate(() => window.scrollTo(0, 0))
+  const box = await grid.boundingBox()
+  if (!box) throw new Error('presets card not visible')
+  expect(await page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight)).toBeGreaterThan(100)
+  const before = await page.evaluate(() => window.scrollY)
+  const cdp = await page.context().newCDPSession(page)
+  const x = box.x + box.width / 2
+  const y = Math.min(box.y + box.height / 2, 400)
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] })
+  for (const step of [1, 2, 3]) {
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x, y: y - (200 * step) / 3 }] })
+  }
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(before)
+})
