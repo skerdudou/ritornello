@@ -307,6 +307,14 @@ remote can be unlocked whatever the device is doing. The lock is held in
 memory only: **a core restart forgets it**, and the device comes back
 unlocked.
 
+Every lock change also plays a short **lock sound** on the device, chosen in
+the Player card (below): the same sound for locking and for unlocking. It is
+mixed into what plays — the music is never lowered — or plays alone when
+nothing is playing, standby included, without waking anything. It follows the
+volume and the mute, and is silent while the music is paused or while a file
+is still loading. The setting `lock_sound` is `none` or one of five sounds
+`a` to `e` (default `a`), part of `GET`/`PUT /api/settings`.
+
 The padlock counts in the header's width budget (`headerMode`), like the
 sleep timer and standby keys it closes the row with: a header too narrow for
 the source icons plus it falls back to the cycle key.
@@ -1613,6 +1621,23 @@ entry window described above. They are deliberately two independent
 settings, not one shared timer: the volume/mute overlay may want to
 shrink one day without shortening the time left to key in a two-digit
 preset, and vice versa.
+
+### Lock sound
+
+In the Player card, above its Save button: a selector (None, or A to E, each
+named) for the sound played at every lock change (see
+[The remote lock](#the-remote-lock)), saved with the card's Save button like
+the other player settings. Beside it, a play button (▶, "Play on the device")
+plays the sound **on the device**, not in the browser, so what is heard is what
+a lock change will sound like; it plays the value on screen, saved or not, and
+is disabled for None. Under them, a note explains why nothing will be heard
+when the player is muted ("Muted: nothing will be heard.") or paused ("Paused:
+nothing will be heard."), read from the same player stream as the Home page.
+
+The button posts `POST /api/lock-sound/preview` with `{"sound": "<value>"}`:
+`204` when the preview is queued (also for `none`, where nothing is), `422`
+with `{"error": …}` for an unknown value, `429` when a preview is already
+queued.
 
 ### Seek step card
 

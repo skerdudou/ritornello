@@ -2256,3 +2256,17 @@ every not-yet-wired plugin gesture refuse honestly instead of silently
 doing nothing, was retired once the last gesture (reordering) was wired.
 Nothing depends on it any more; it was dismantled on purpose, not
 forgotten.
+
+**The lock sound was measured on mpv 0.37 / FFmpeg 6.1 only, and never heard
+on the Pi (mpv 0.40 / FFmpeg 7.1).** The Task 1 spike chose to mix the chime
+into what plays (the music is never lowered): with mpv's `ao=pcm` output and
+a residual (notch) detector, 20/20 add/remove cycles were clean at 48 kHz with
+the equalizer on, and 5/5 for each variant (48 kHz equalizer off, 44.1 kHz
+equalizer on and off, sound C, a stereo bed, the rock preset); the largest
+residual was 0.0033 against a threshold of 0.01, with no gap, no lost sample
+and no output reinitialisation. `ao=pcm` cannot show ALSA underruns or
+latency, so neither the live mix nor the idle chime was heard through a real
+sound card (under `ao=pcm` the idle chime runs untimed). Unverified on the Pi:
+the mix rebuild, the idle load's event order behind the gate, and the
+`loadfile` named options there; and whether a seek within the ~1.2 s the chime
+stays in the chain replays it.
