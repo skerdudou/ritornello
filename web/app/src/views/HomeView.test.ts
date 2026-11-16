@@ -541,6 +541,37 @@ describe('HomeView — sliders and names', () => {
     expect(posts).toContain(JSON.stringify({ cmd: 'SetVolume', arg: 65 }))
   })
 
+  it('volume posts go one at a time, the newest waiting one last', async () => {
+    // Two parallel fetches may reach the core in any order, and the device
+    // would stay on the overtaken value: the POSTs must never overlap.
+    const posts: number[] = []
+    const releases: (() => void)[] = []
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        posts.push(JSON.parse(String(init.body)).arg)
+        await new Promise<void>((r) => releases.push(r))
+        return new Response(null, { status: 204 })
+      }
+      if (url === '/api/presets') return new Response(JSON.stringify({ sources: [] }), { status: 200 })
+      return new Response(JSON.stringify({ seek_step_s: 10 }), { status: 200 })
+    }))
+    vi.stubGlobal('EventSource', FakeEventSource)
+    const HomeView = (await import('./HomeView.vue')).default
+    const w = mount(HomeView)
+    FakeEventSource.last!.push({ volume: 60 })
+    await nextTick()
+    const thumb = w.get('[data-volume-slider] [role="slider"]')
+    ;(thumb.element as HTMLElement).focus()
+    for (let i = 0; i < 3; i++) await thumb.trigger('keydown', { key: 'ArrowRight' })
+    expect(posts).toEqual([65])
+    releases[0]!()
+    await flushPromises()
+    expect(posts).toEqual([65, 75])
+    releases[1]!()
+    await flushPromises()
+    expect(posts).not.toContain(70)
+  })
+
   it('the bar posts SeekTo, by the step configured by /api/settings', async () => {
     const posts: string[] = []
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {

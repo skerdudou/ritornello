@@ -9,6 +9,7 @@ import StandbyIcon from '../components/icons/StandbyIcon.vue'
 import PlayerCard from '../components/PlayerCard.vue'
 import Transport from '../components/Transport.vue'
 import Volume from '../components/Volume.vue'
+import { latestWins } from '../composables/latestWins'
 import { useCatalog } from '../composables/useCatalog'
 import { usePlayer } from '../composables/usePlayer'
 import { usePresets } from '../composables/usePresets'
@@ -27,6 +28,9 @@ async function send(cmd: Command) {
   const err = await api.post('/api/command', cmd)
   if (err) toast.error(err)
 }
+
+// Volume goes one POST at a time, the newest waiting value last.
+const sendVolume = latestWins((v: number) => send({ cmd: 'SetVolume', arg: v }))
 
 // The tile names: loaded on mount, reloaded when the active source changes —
 // it is the frame that says so, nothing is probed.
@@ -163,7 +167,7 @@ onMounted(async () => {
           :volume="state?.volume ?? null"
           :muted="state?.muted ?? false"
           :disabled="unavailable(REMOTE_MUTE.cmd.cmd, state)"
-          @set="(v: number) => send({ cmd: 'SetVolume', arg: v })"
+          @set="sendVolume"
           @mute="send(REMOTE_MUTE.cmd)"
         />
       </template>
