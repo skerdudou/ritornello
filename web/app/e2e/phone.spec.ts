@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
 import { sidewaysCulprits } from './overflow'
+import { pluginOrder, restoreOrder } from './plugin-order'
 import { touchDrag } from './touch'
 
 test('on a phone: bottom bar, top nav absent, named tile', async ({ page }) => {
@@ -291,16 +292,9 @@ test('at desktop width the generic-input buttons show their words', async ({ pag
 // page under a finger. Every gesture goes through CDP touch events (see
 // `touch.ts`). A reorder rewrites the harness's `plugins.toml`, which other
 // journeys depend on: each test that may move a plugin restores the declared
-// order through the API in a `finally`, as the desktop arrow journey does.
+// order in a `finally` (`plugin-order.ts`), as the desktop journeys do.
 
-type Request = import('@playwright/test').APIRequestContext
 type Page = import('@playwright/test').Page
-
-const pluginOrder = (request: Request) => async () => {
-  const status = (await (await request.get('/api/status')).json()) as { plugins: { name: string }[] }
-  // One entry per name: a multi-kind plugin is listed once per kind.
-  return [...new Set(status.plugins.map((p) => p.name))]
-}
 
 const pluginRow = (page: Page, name: string) =>
   page.locator('[data-plugins-table] [data-plugin-row]', { has: page.getByText(name, { exact: true }) })
@@ -339,20 +333,6 @@ const onHandle = (page: Page, p: { x: number; y: number }, selector: string) =>
     [p.x, p.y, selector] as const,
   )
 
-/** Puts the declared order back through the API, whatever the page did. */
-async function restoreOrder(request: Request, before: string[]) {
-  const order = pluginOrder(request)
-  // Retried as a whole: the gesture's own move may still be in flight when
-  // this starts, and land after a first pass read the order.
-  await expect(async () => {
-    for (const [to, name] of before.entries()) {
-      const current = await order()
-      if (current[to] !== name) await request.post(`/api/plugins/${name}/move`, { data: { to } })
-    }
-    expect(await order()).toEqual(before)
-  }).toPass({ timeout: 10_000 })
-}
-
 test('on a phone: a plugin is reordered by its handle with a finger', async ({ page, request }) => {
   const order = pluginOrder(request)
   await page.goto('/config')
@@ -387,7 +367,7 @@ test('on a phone: a plugin is reordered by its handle with a finger', async ({ p
     await touchDrag(page, back, { x: back.x, y: above.y + above.height * 0.25 })
     await expect.poll(order).toEqual(before)
   } finally {
-    await restoreOrder(request, before)
+    await restoreOrder(request, before, page)
   }
 })
 
@@ -429,7 +409,7 @@ test('on a phone: a swipe on a row scrolls; the handle does not', async ({ page,
     expect(Math.abs((await scrollY(page)) - still)).toBeLessThanOrEqual(2)
     expect(await order()).toEqual(before)
   } finally {
-    await restoreOrder(request, before)
+    await restoreOrder(request, before, page)
   }
 })
 
@@ -465,11 +445,11 @@ test('on a phone: holding a dragged row near the edge scrolls the page', async (
     const start = await scrollY(page)
     await touchDrag(page, from, to, { holdMs: 600 })
     const moved = (await scrollY(page)) - start
-    // The drop reorders too (the row went past others): let its answer settle
-    // so the restore below does not race it.
-    await expect(handle).not.toHaveClass(/cursor-not-allowed/)
+    // The drop reorders too (the row went past others). No wait here for
+    // its answer: an unlocked handle may only mean the lock has not rendered
+    // yet. The restore below is what copes with a move still in flight.
     expect(down ? moved : -moved).toBeGreaterThanOrEqual(300)
   } finally {
-    await restoreOrder(request, before)
+    await restoreOrder(request, before, page)
   }
 })

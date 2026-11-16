@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { pluginOrder, restoreOrder } from './plugin-order'
 
 // Reads a **computed** CSS variable on the document root: it is the only
 // proof that a theme engine really acts on the rendering — an attribute or a
@@ -576,12 +577,7 @@ test('dragging a plugin by its handle writes a real reorder, checked against the
   page,
   request,
 }) => {
-  const order = async () => {
-    const status = (await (await request.get('/api/status')).json()) as {
-      plugins: { name: string }[]
-    }
-    return [...new Set(status.plugins.map((p) => p.name))]
-  }
+  const order = pluginOrder(request)
 
   await page.goto('/config')
   const before = await order()
@@ -642,11 +638,10 @@ test('dragging a plugin by its handle writes a real reorder, checked against the
     await mouseDrag(page, back, above)
     await expect.poll(order).toEqual(before)
   } finally {
-    const current = await order()
-    if (JSON.stringify(current) !== JSON.stringify(before)) {
-      await request.post('/api/plugins/radio/move', { data: { to: at } })
-      await expect.poll(order).toEqual(before)
-    }
+    // Not a single read-and-post: a drop's own POST may still be in flight
+    // and land after it, leaving `plugins.toml` moved for the specs after
+    // this one.
+    await restoreOrder(request, before, page)
   }
 })
 
