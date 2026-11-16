@@ -421,6 +421,18 @@ describe('InstallablesDialog', () => {
       expect(column.classList).toContain('wrap-anywhere')
     })
 
+    it('a contested name\'s repository list cannot widen the dialog', async () => {
+      // The conflict sentence is a direct flex child of the row, outside the
+      // text column: it needs its own `min-w-0` and `wrap-anywhere`.
+      mountDialog([
+        offer({ name: 'dup', kind: 'third_party', installable: false, conflict_repos: ['a/' + 'x'.repeat(200), 'b/two'] }),
+      ])
+      await flushPromises()
+      const span = row('dup')!.querySelector('[data-installable-conflict]')!
+      expect(span.classList).toContain('min-w-0')
+      expect(span.classList).toContain('wrap-anywhere')
+    })
+
     // Spec §6: without a catalogue of its own, a stranger's offer is shown
     // by name, source and version — and its Install does not install: it
     // hands the page the name **and the repository** for the second consent.

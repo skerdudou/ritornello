@@ -319,7 +319,7 @@ watch(
             <span
               v-if="row.offer.conflict_repos"
               data-installable-conflict
-              class="text-xs text-muted-foreground"
+              class="min-w-0 text-xs text-muted-foreground wrap-anywhere"
             >{{ t('installables_conflict', { repos: row.offer.conflict_repos.join(', ') }) }}</span>
             <!-- The sentence follows why the row is refused: a release that
                  publishes no contracts for it says so whatever the row is
