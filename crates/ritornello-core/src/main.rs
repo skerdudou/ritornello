@@ -1051,7 +1051,7 @@ async fn hotplug<P: player::Player>(
                 let task_name = name.clone();
                 let unreachable = children.unreachable_tx.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = run_input_client(&socket_for_task, tx).await {
+                    if let Err(e) = run_input_client(&socket_for_task, tx, None).await {
                         tracing::warn!("input plugin {task_name} disconnected: {e}");
                     }
                     // `run_input_client` **never** returns `Ok`: it exits with an
@@ -2085,7 +2085,7 @@ async fn main() -> Result<()> {
                     let task_name = name.clone();
                     let unreachable = unreachable_tx.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = run_input_client(&socket_for_task, tx).await {
+                        if let Err(e) = run_input_client(&socket_for_task, tx, None).await {
                             tracing::warn!("input plugin {task_name} disconnected: {e}");
                         }
                         // `0`: this is the startup rendezvous's wiring, and

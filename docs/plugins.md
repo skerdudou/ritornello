@@ -2033,6 +2033,19 @@ physical key for the timer is out of scope — but any input plugin may send
 them; the web page's menu does (see [Sleep timer and
 alarms](interface.md#sleep-timer-and-alarms)).
 
+`input` contract 1.2 adds the **remote lock**: two commands, `ToggleInputLock`
+and `SetInputLock(bool)`, and a plugin-side opt-in. A plugin that honours the
+lock overrides `InputPlugin::input_lock`, returning the sender of a `watch`
+channel it reads; the SDK announces that as `input_lock` (omitted from the
+announcement when false). Only such a plugin ever receives anything from the
+core on its input socket, and the only frame the core writes back is
+`{"frame":"lock","locked":true|false}` — the current value at connection, then
+once on each change of it. A plugin that did not opt in is never written to,
+and an unknown frame, or an unreadable line, is logged and skipped by the SDK's
+reader rather than ending it. The core does **not** filter commands itself:
+what a locked state means for its own keys is the plugin's decision (the MPD
+plugin does not opt in: phone apps are an adult's remote).
+
 **Updating an existing installation** (old hard-coded-keyboard
 `ritornello-plugin-mce`): the old `deploy.sh` removed the
 `ritornello-plugin-mce` binary, but `ritornello-install` knows nothing of it,
