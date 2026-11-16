@@ -1,10 +1,9 @@
-import { flushPromises, mount } from '@vue/test-utils'
+import { flushPromises } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Entry, Job, ProbeLine } from './data'
 import {
-  BASE, CATALOG, cleanup, clickDialog, inDialog, LIST_URL, mountAdmin, OTHER_URL, server, state, typeDialog, VIDEO_URL,
+  CATALOG, cleanup, clickDialog, inDialog, LIST_URL, mountAdmin, mountPage, OTHER_URL, server, state, typeDialog, VIDEO_URL,
 } from './harness'
-import WebStreamingAdmin from './WebStreamingAdmin.vue'
 
 const video = (preset: number, title = `Video ${preset}`): Entry => ({
   preset, url: VIDEO_URL, kind: 'video', title, channel: 'Chan', count: null,
@@ -917,7 +916,7 @@ describe('WebStreamingAdmin', () => {
   it('is inert when the first load failed: nothing can overwrite what it could not read', async () => {
     const s = server()
     s.spy.mockImplementation(async () => new Response(JSON.stringify({ error: 'plugin_timeout' }), { status: 502 }))
-    const w = mount(WebStreamingAdmin, { props: { catalog: CATALOG, base: BASE }, attachTo: document.body })
+    const w = mountPage()
     await flushPromises()
     expect(w.text()).toContain('Error: plugin_timeout')
     expect(w.find('[data-save]').attributes('disabled')).toBeDefined()
