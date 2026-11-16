@@ -169,6 +169,62 @@ mod tests {
         }
     }
 
+    /// Every `.rs` file under a plugin crate's `src/`, recursively.
+    fn source_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        let entries = std::fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("cannot list {}: {e}", dir.display()));
+        for entry in entries {
+            let path = entry.expect("a directory entry").path();
+            if path.is_dir() {
+                source_files(&path, out);
+            } else if path.extension().is_some_and(|x| x == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// `declare_runtime!` written in code, not in a comment: a line comment
+    /// or a doc comment that names the macro is not a call.
+    fn declare_runtime_calls(text: &str) -> usize {
+        text.lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .map(|l| l.matches("declare_runtime!").count())
+            .sum()
+    }
+
+    /// Each plugin calls `declare_runtime!` exactly once in its whole crate.
+    ///
+    /// Each call embeds a manifest block, and the core reads a binary with
+    /// two blocks as "version unknown" (`ritornello_plugin_sdk::embedded`):
+    /// a second call — a test helper, a second entry point — would make that
+    /// plugin unknown whenever it is switched off, in silence, since a
+    /// running plugin still announces itself. `registration_chain` only
+    /// finds the first call, so it cannot see a second one.
+    #[test]
+    fn every_plugin_calls_declare_runtime_exactly_once() {
+        for name in declared_plugins() {
+            let src = repo_root()
+                .join("crates")
+                .join(format!("ritornello-plugin-{name}"))
+                .join("src");
+            let mut files = Vec::new();
+            source_files(&src, &mut files);
+            let calls: usize = files.iter().map(|f| declare_runtime_calls(&read(f))).sum();
+            assert_eq!(
+                calls, 1,
+                "{name} calls declare_runtime! {calls} time(s) under {}: each call embeds a manifest block, and two blocks read as \"version unknown\"",
+                src.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_comment_naming_the_macro_is_not_a_call() {
+        let text = "//! Built by `declare_runtime!`.\nfn main() {\n    // declare_runtime!() below\n    let rt = declare_runtime!()?;\n}\n";
+        assert_eq!(declare_runtime_calls(text), 1);
+        assert_eq!(declare_runtime_calls(&text.repeat(2)), 2);
+    }
+
     /// The declared admin page is the one the binary registers. A plugin that
     /// serves a page without declaring it would not be required to move when
     /// the admin contract breaks, and would be refused on the device.

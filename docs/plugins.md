@@ -75,9 +75,12 @@ announcement cannot misreport any of them. The version is
 `option_env!("CARGO_PKG_REPOSITORY")`, both expanded in the *plugin's own*
 crate by the `ritornello_plugin_sdk::declare_runtime!()` macro: written inside
 the SDK instead, they would report the SDK's, since that is whose `Cargo.toml`
-a Rust binary compiles against. That is also why it is a macro rather than two
-more parameters on `Runtime::from_args` — `env!` expands where it is written,
-and the next derived field then costs nothing at ten call sites.
+a Rust binary compiles against. The macro expands them into a block embedded
+in the binary (see [The manifest block in your
+binary](#the-manifest-block-in-your-binary)) and the announcement is built
+from that block, so the two cannot disagree. That is also why it is a macro
+rather than extra parameters — `env!` expands where it is written, and the
+next derived field then costs nothing at ten call sites.
 `contracts` holds one `major.minor` version per wire contract the plugin
 speaks: one for each kind it registered (`source`, `display`, `input`,
 `metadata`) and `admin` when it serves an admin page. `protocol` is
@@ -408,7 +411,8 @@ development machine only (see
 [installation.md](installation.md#what-has-not-been-verified)).
 
 **How a device learns your repository.** From the `repository` an installed,
-running plugin of yours announces; from the `source` of an installed language
+running plugin of yours announces, or the block in the binary of an installed
+plugin of yours that is switched off; from the `source` of an installed language
 pack of yours; or because its operator typed `owner/repo` into the sources
 dialog (see [interface.md](interface.md#update-sources)). A device reads at
 most sixteen such repositories next to ours, which is always read first and
@@ -523,6 +527,54 @@ not match is not marked: under the fourth policy it is downloaded and refused
 again every night, as a corrupted download would be, until you publish a
 corrected release.
 
+### The manifest block in your binary
+
+A switched-off plugin is never run, so it cannot announce itself. To know its
+version and origin without executing it, the core reads a small block of data
+embedded in its binary, as bytes.
+
+**Built with the SDK, there is nothing to do:** `declare_runtime!()` embeds the
+block from your crate's `version` and `repository`.
+
+**Not built with the SDK**, embed the block yourself. At any offset in the
+file:
+
+| Bytes | Content |
+|---|---|
+| 24 | magic, ASCII `RITORNELLO-PLUGIN-BLOCK:` (no proper prefix equals a suffix, so occurrences never overlap) |
+| 1 | format, `0x01` |
+| 2 | payload length `L`, little-endian `u16`, `L <= 512` |
+| `L` | payload: UTF-8 lines `key=value\n` |
+
+The payload must be valid UTF-8 and every non-empty line must contain `=`. The
+key `version` is required, exactly once, non-empty, at most 64 bytes, with
+characters in `[0-9A-Za-z.+-]`. The key `repository` is optional, at most once,
+non-empty, at most 400 bytes, with no byte below `0x20` nor `0x7f`; give a full
+URL. Any other key is ignored. Anything else makes the block unreadable. Bytes
+after the payload are ignored.
+
+- **Embed it exactly once.** Two blocks in one binary are read as unknown,
+  never "the first one wins". The magic counts wherever it appears: if your
+  own code needs it (to read your block back), never write it as a literal,
+  and keep the optimiser from folding it into one. The SDK stores it masked
+  and unmasks it through volatile reads for that reason, and our release
+  packaging counts the markers in every binary it ships; check yours the
+  same way (`LC_ALL=C grep -a -o -F 'RITORNELLO-PLUGIN-BLOCK:' <binary> | wc -l`
+  must print `1`) on the optimised build you publish.
+- **Keep the linker from discarding it:** in Rust a `#[used] static`, in C
+  `__attribute__((used))`.
+
+A minimal block in Rust, for version `1.2.3` and no repository. The payload
+`version=1.2.3\n` is 14 bytes (`0x0e`, so the length bytes are `\x0e\x00`), and
+`N` is 24 + 1 + 2 + 14 = 41:
+
+```rust
+#[used] static BLOCK: [u8; 41] = *b"RITORNELLO-PLUGIN-BLOCK:\x01\x0e\x00version=1.2.3\n";
+```
+
+Without a block, a switched-off plugin reads "version unknown" and is never
+updated at night.
+
 ### Text, translations, and what a plugin owes the catalogue
 
 Every user-facing string a plugin hands to the core — `SourceMessage::
@@ -629,6 +681,10 @@ cycle, or leaves the device with no source at all, which is a
 legitimate state. And switching everything off does not fail startup:
 if it did, the admin UI would disappear along with everything else, and
 nothing would ever be switchable back on.
+
+A switched-off plugin's binary is still updated — by hand, and at night
+under the same scope rules as any other — but the update never starts it: it
+runs the new binary when it is switched back on.
 
 The file's order keeps arbitrating `metadata` priority even for a
 plugin currently switched off: a plugin turned back on regains the

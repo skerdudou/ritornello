@@ -12,6 +12,13 @@
 /// A macro rather than two more parameters, and that is the point: the next
 /// derived field costs nothing at ten call sites.
 ///
+/// The two values are also embedded in the binary as a manifest block (see
+/// [`crate::embedded`]), which is what lets the core read a switched-off
+/// plugin's version without running it. The runtime is built *from* that
+/// block, which keeps the static referenced (a `#[used]` static is kept by the
+/// compiler, and the read keeps it honest) and makes the announcement and the
+/// block one fact: they cannot disagree.
+///
 /// `option_env!` and not `env!` for the repository: a crate whose manifest
 /// carries no `repository` key still compiles, which is what a minimal
 /// third-party plugin looks like. The core has nothing to ask about such a
@@ -21,10 +28,13 @@
 /// not ours; `docs/plugins.md` says what happens if you do not.
 #[macro_export]
 macro_rules! declare_runtime {
-    () => {
-        $crate::runtime::Runtime::from_args(
-            env!("CARGO_PKG_VERSION"),
-            option_env!("CARGO_PKG_REPOSITORY"),
-        )
-    };
+    () => {{
+        #[used]
+        static RITORNELLO_PLUGIN_BLOCK: [u8; $crate::embedded::BLOCK_LEN] =
+            $crate::embedded::encode(
+                env!("CARGO_PKG_VERSION"),
+                option_env!("CARGO_PKG_REPOSITORY"),
+            );
+        $crate::runtime::Runtime::from_args(&RITORNELLO_PLUGIN_BLOCK)
+    }};
 }

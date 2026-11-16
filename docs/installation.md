@@ -1969,6 +1969,12 @@ Raspberry Pi, on a fresh install or an upgrade from an older release. See
 upgrading an already-deployed device would need to do themselves: there is
 no automatic migration, and none is planned.
 
+**Reading a switched-off plugin's version from its binary has never run on a
+device.** The manifest block is read as bytes, bounded in size and time, and
+covered by tests on fixtures and on binaries built on a development machine.
+Reading it from the release binaries built for armv7, on the Pi, with their
+real file sizes and the SD card's timings, has not been done.
+
 **Known edges and debts in the code, recorded here rather than fixed or
 dressed up as design:**
 

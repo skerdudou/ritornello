@@ -74,23 +74,21 @@ pub struct Runtime {
     /// own — the announcement still carries `Some({})`, not `None`, since
     /// this SDK always knows to write the field (see `announcement()`).
     texts: HashMap<String, Layer>,
-    /// Version of the **plugin's** crate, handed in by the caller.
+    /// Version of the **plugin's** crate, read back from the manifest block
+    /// `declare_runtime!` embedded in the binary.
     ///
     /// Not read from `env!` here: that macro expands where it is written, so a
-    /// version read in this file would be the SDK's. The two match today only
-    /// because the whole workspace shares one number — a coincidence that
-    /// would turn into the announcement lying the day they diverge.
-    version: &'static str,
-    /// The plugin crate's own `repository` key, handed in by the caller for
-    /// exactly the reason `version` is: `env!` — here `option_env!` — expands
-    /// where it is written, and written in this file it would report the
-    /// SDK's.
+    /// version read in this file would be the SDK's. The macro expands it at
+    /// the plugin's call site, into the block, and this is what the block says.
+    version: String,
+    /// The plugin crate's own `repository` key, read back from the same block,
+    /// for exactly the reason `version` is.
     ///
     /// Relayed verbatim, a full URL and not an `owner/repo` pair: this crate
     /// depends only on `ritornello-proto`, so it has no path to the core's
     /// `parse_repo_url` and no business inventing a second one. The core
     /// interprets what the manifest says; the SDK only carries it.
-    repository: Option<&'static str>,
+    repository: Option<String>,
 }
 
 /// Fingerprint of a plugin's UI assets.
@@ -111,19 +109,54 @@ pub fn ui_fingerprint(plugin: &impl AdminPlugin) -> String {
 }
 
 impl Runtime {
-    /// Builds a `Runtime` from the arguments passed by the core.
+    /// Builds a `Runtime` from the arguments passed by the core and from the
+    /// manifest block embedded in this binary.
     ///
     /// Called through [`crate::declare_runtime!`] and not by hand: the macro
     /// is what expands the two `env!` at the plugin's own call site, which is
-    /// the only place they mean the plugin.
-    pub fn from_args(version: &'static str, repository: Option<&'static str>) -> Result<Self> {
-        Ok(Self::new(
+    /// the only place they mean the plugin, and embeds them as `block`.
+    pub fn from_args(block: &'static [u8]) -> Result<Self> {
+        Self::from_block(
+            block,
             crate::plugin_name(),
             crate::register_socket(),
             crate::socket_prefix(),
-            version,
-            repository,
-        ))
+        )
+    }
+
+    /// [`Self::from_args`] without reading `std::env::args`, for tests.
+    ///
+    /// The announced version and repository are read back from the block, so
+    /// the block and the announcement are one fact.
+    fn from_block(
+        block: &'static [u8],
+        name: String,
+        register: PathBuf,
+        prefix: PathBuf,
+    ) -> Result<Self> {
+        // Copied out through volatile reads before it is decoded. The block is
+        // a `static` whose bytes the optimiser knows; read plainly, a
+        // link-time-optimised build inlined `decode` here and copied the
+        // magic's first 16 and last 8 bytes into constant pools to compare
+        // against — pieces of a second marker, beside the block, one linker
+        // layout away from making the block unreadable (see
+        // `crate::embedded`). A volatile read must be performed as written,
+        // so the copy's contents are unknown to the optimiser.
+        let block: Vec<u8> = block
+            .iter()
+            // SAFETY: an aligned, in-bounds read of an initialised `u8`
+            // behind a shared reference.
+            .map(|b| unsafe { std::ptr::read_volatile(b) })
+            .collect();
+        let Some(embedded) = crate::embedded::decode(&block) else {
+            // Unreachable for a block `declare_runtime!` built: `encode`
+            // refuses at compile time whatever `decode` refuses.
+            anyhow::bail!("this binary's manifest block does not decode");
+        };
+        let mut rt = Self::new(name, register, prefix, "", None);
+        rt.version = embedded.version;
+        rt.repository = embedded.repository;
+        Ok(rt)
     }
 
     /// Useful for tests, which don't go through `std::env::args`.
@@ -142,8 +175,8 @@ impl Runtime {
             admin: None,
             ui_version: None,
             texts: HashMap::new(),
-            version,
-            repository,
+            version: version.to_string(),
+            repository: repository.map(str::to_string),
         }
     }
 
@@ -300,10 +333,10 @@ impl Runtime {
                 .chain(self.admin.is_some().then_some(Contract::Admin))
                 .map(|c| (c, c.current()))
                 .collect(),
-            version: Some(self.version.to_string()),
+            version: Some(self.version.clone()),
             // Derived like the rest of this line: the caller handed in what
             // its own manifest says, and nothing here can invent one.
-            repository: self.repository.map(str::to_string),
+            repository: self.repository.clone(),
             // Always `Some(_)`, never `None`: a plugin built against this SDK
             // always knows to write this field, whether or not `.texts()`
             // was ever called (see that method's own doc, and
@@ -411,6 +444,26 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::{UnixListener, UnixStream};
+
+    #[test]
+    fn from_args_takes_the_version_and_repository_from_the_block() {
+        static B: [u8; crate::embedded::BLOCK_LEN] = crate::embedded::encode(
+            "9.9.9",
+            Some("https://github.com/someone/their-plugin"),
+        );
+        let rt = Runtime::from_block(&B, "p".into(), "/r".into(), "/p".into()).unwrap();
+        let a = rt.announcement();
+        assert_eq!(a.version.as_deref(), Some("9.9.9"));
+        assert_eq!(a.repository.as_deref(), Some("https://github.com/someone/their-plugin"));
+    }
+
+    #[test]
+    fn a_block_that_does_not_decode_is_refused_at_startup() {
+        let err = Runtime::from_block(&[0u8; 8], "p".into(), "/r".into(), "/p".into())
+            .err()
+            .expect("a zeroed block must be refused");
+        assert!(err.to_string().contains("manifest block"), "{err}");
+    }
 
     struct PlaceholderDisplay {
         received: Arc<Mutex<Vec<PlayerState>>>,

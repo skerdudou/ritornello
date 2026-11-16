@@ -15,6 +15,7 @@ pub mod release;
 pub mod archive;
 pub mod catalogue;
 pub mod download;
+pub mod embedded;
 pub mod state;
 pub mod schedule;
 pub mod placed;
@@ -264,8 +265,10 @@ fn carries(published: &Published, name: &str) -> bool {
 ///   adding it is `ritornello-install`'s job;
 /// - a component whose **installed version is unknown and that this updater
 ///   has never placed** is left alone. That is not caution for its own sake: a
-///   plugin switched off, or dead, or predating the version field never
-///   announces one, so `differs` answers "yes" against every release for ever
+///   plugin dead, or predating the version field never announces one (a
+///   switched-off one is judged by the manifest block of its binary, and only
+///   one whose binary carries none stays here), so `differs` answers "yes"
+///   against every release for ever
 ///   — and without this line the device would download and install that
 ///   archive again every single night, learning nothing each time. The
 ///   operator can still install it by hand, where the gesture is asked for
@@ -626,7 +629,7 @@ fn carry_installable(previous: &[ComponentOffer], fresh: &mut [ComponentOffer]) 
 /// (`None` until an attempt, `Some(false)` after a refused one, set by
 /// `remember_manual_step`). `declared` and not `installed`: `install_one`
 /// tells an update from an installation by the same `plugins.toml`
-/// declaration, and a switched-off plugin, which announces no version, is
+/// declaration, and a switched-off plugin, whose version comes only from its binary's block, is
 /// still an update.
 ///
 /// **Called last**, after `carry_installable`, and not folded into it: that
@@ -1753,10 +1756,11 @@ impl Worker {
 
     /// What the core knows about its plugins, before the release is consulted.
     ///
-    /// **Three** sources, and neither of the first two alone is enough:
+    /// **Four** sources, and neither of the first two alone is enough:
     /// `plugins.toml` says what is declared and where its binary should be,
-    /// the status lines say what each plugin announced about itself, and a
-    /// scan of the plugins directory (`plugins::undeclared_binaries`) is what
+    /// the status lines say what each plugin announced about itself, a
+    /// switched-off plugin's binary says what its manifest block carries
+    /// (below), and a scan of the plugins directory (`plugins::undeclared_binaries`) is what
     /// makes `Availability::Undeclared` reachable at all — a binary sitting
     /// there with nothing declaring it appears in neither of the first two.
     /// The same scan feeds `PluginStatus::undeclared_binary` on `/api/status`
@@ -1765,6 +1769,12 @@ impl Worker {
     ///
     /// Read through `installed_when_settled`, never directly: a line that has
     /// not settled carries a `None` version that means "wait", not "unknown".
+    ///
+    /// A **switched-off** plugin is never launched, so it announces nothing;
+    /// its version and origin are then read, as bytes, from the manifest block
+    /// its binary carries (`embedded`). A binary without a readable block, and
+    /// every plugin that is switched on, are left exactly as the status lines
+    /// say.
     ///
     /// `None` when `plugins.toml` cannot be read. Most callers take that as an
     /// empty list (`installed_when_settled`): it keeps the core's own row
@@ -1779,6 +1789,10 @@ impl Worker {
                 return None;
             }
         };
+        // Built while the `status` lock is held, which costs memory and one
+        // `exists()` per plugin; the files read for a switched-off plugin's
+        // block come after it is dropped, so a slow SD card never stalls a
+        // status writer.
         let statuses = self.status.read().await;
         let mut out: Vec<Installed> = manifest
             .plugins
@@ -1798,6 +1812,24 @@ impl Worker {
                 }
             })
             .collect();
+        drop(statuses);
+        // The third source: the block a switched-off plugin's binary
+        // carries. Only those, and only when a binary is there: an
+        // enabled plugin that never announced keeps its `placed.json` repair
+        // path (`a_plugin_whose_placed_binary_never_spoke_is_repaired_by_the_next_release`),
+        // and a binary without a readable block stays "unknown", never
+        // guessed from `placed.json` or `installed.toml`. One file at a time.
+        for (i, p) in manifest.plugins.iter().enumerate() {
+            if p.enabled || !out[i].binary_present {
+                continue;
+            }
+            if let Some(block) =
+                embedded::read_block_within(PathBuf::from(&p.exec), embedded::READ_DEADLINE).await
+            {
+                out[i].version = Some(block.version);
+                out[i].repository = block.repository;
+            }
+        }
         let dir = plugins_dir(&self.root);
         for file in crate::plugins::undeclared_binaries(&dir, &manifest) {
             out.push(Installed {
@@ -7869,6 +7901,135 @@ mod tests {
         assert_eq!(targets.last().map(|t| t.repo.as_str()), Some("o/r15"));
     }
 
+    /// What a plugin built with the SDK carries: the block between whatever
+    /// else a binary holds.
+    fn binary_with(version: &str, repo: Option<&str>) -> Vec<u8> {
+        let mut bytes = b"\x7fELF junk before ".to_vec();
+        bytes.extend_from_slice(&ritornello_plugin_sdk::embedded::encode(version, repo));
+        bytes.extend_from_slice(b" junk after");
+        bytes
+    }
+
+    /// A worker whose only plugin, `radio`, is switched off in `plugins.toml`
+    /// and in its status line, with `binary` as its executable.
+    fn switched_off(root: &Path, binary: &[u8]) -> Worker {
+        let worker = worker_at(root, one_line(PluginStatus::disabled("radio")));
+        let exec = plugins_dir(root).join("ritornello-plugin-radio");
+        std::fs::write(&exec, binary).unwrap();
+        std::fs::write(
+            &worker.manifest,
+            format!("[[plugin]]\nname = \"radio\"\nexec = {:?}\nenabled = false\n", exec.to_string_lossy()),
+        )
+        .unwrap();
+        worker
+    }
+
+    const OURS: &str = "https://github.com/skerdudou/ritornello";
+
+    /// **A switched-off plugin is never launched, so its binary is the only
+    /// thing that can say which version is on the disk.**
+    #[tokio::test]
+    async fn a_disabled_plugin_reports_the_version_and_origin_its_binary_carries() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = switched_off(dir.path(), &binary_with("0.2.0", Some(OURS)));
+        let installed = worker.installed().await.unwrap();
+        let radio = installed.iter().find(|i| i.name == "radio").unwrap();
+        assert_eq!(radio.version.as_deref(), Some("0.2.0"));
+        assert_eq!(radio.repository.as_deref(), Some(OURS));
+    }
+
+    #[tokio::test]
+    async fn a_disabled_plugin_at_the_offered_version_reads_aligned() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = switched_off(dir.path(), &binary_with("0.2.0", Some(OURS)));
+        let installed = worker.installed().await.unwrap();
+        let rows =
+            component_offers("0.2.0", &radio_published("0.2.0"), &[], &installed, &[], &[], &[], &[]);
+        let radio = rows.iter().find(|r| r.name == "radio").unwrap();
+        assert_eq!(radio.installed.as_deref(), Some("0.2.0"));
+        assert_eq!(radio.availability, Availability::Aligned);
+    }
+
+    #[tokio::test]
+    async fn a_disabled_plugin_behind_the_release_is_installed_at_night() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = switched_off(dir.path(), &binary_with("0.2.0", Some(OURS)));
+        let installed = worker.installed().await.unwrap();
+        let rows =
+            component_offers("0.2.0", &radio_published("0.3.0"), &[], &installed, &[], &[], &[], &[]);
+        let radio = rows.iter().find(|r| r.name == "radio").unwrap();
+        assert_eq!(radio.availability, Availability::UpdateAvailable);
+        assert_eq!(
+            automatic_install_list(&rows, &placed::read(&worker.staging), schedule::InstallScope::Official),
+            names(&["radio"])
+        );
+    }
+
+    /// Every device at the transition: a binary that predates the block.
+    #[tokio::test]
+    async fn a_disabled_plugin_without_a_block_stays_unknown_and_is_not_installed_at_night() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = switched_off(dir.path(), b"\x7fELF junk, no block anywhere");
+        let installed = worker.installed().await.unwrap();
+        let radio = installed.iter().find(|i| i.name == "radio").unwrap();
+        assert_eq!(radio.version, None);
+        let rows =
+            component_offers("0.2.0", &radio_published("0.3.0"), &[], &installed, &[], &[], &[], &[]);
+        let row = rows.iter().find(|r| r.name == "radio").unwrap();
+        assert_eq!(row.installed, None);
+        assert_eq!(row.availability, Availability::UpdateAvailable);
+        assert!(
+            automatic_install_list(&rows, &placed::read(&worker.staging), schedule::InstallScope::Official)
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_disabled_third_party_plugin_follows_the_third_party_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker =
+            switched_off(dir.path(), &binary_with("0.2.0", Some("https://github.com/someone/theirs")));
+        let installed = worker.installed().await.unwrap();
+        let offer = ThirdPartyOffer {
+            name: "radio".to_string(),
+            published: radio_published("9.9.9")[0].clone(),
+            repo: "someone/theirs".into(),
+        };
+        let rows = component_offers(
+            "0.2.0",
+            &radio_published("0.2.0"),
+            &[offer],
+            &installed,
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+        let radio = rows.iter().find(|r| r.name == "radio").unwrap();
+        assert_eq!(radio.kind, ComponentKind::ThirdParty);
+        assert_eq!(radio.third_party_repo.as_deref(), Some("someone/theirs"));
+        let placed = placed::read(&worker.staging);
+        assert!(automatic_install_list(&rows, &placed, schedule::InstallScope::Official).is_empty());
+        assert_eq!(
+            automatic_install_list(&rows, &placed, schedule::InstallScope::IncludingThirdParty),
+            names(&["radio"])
+        );
+    }
+
+    /// Only a switched-off plugin is read: an enabled one that never spoke
+    /// keeps the `placed.json` repair path, whatever its binary carries.
+    #[tokio::test]
+    async fn an_enabled_plugin_that_never_spoke_is_not_read_from_its_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = worker_at(dir.path(), stalled_line());
+        let exec = plugins_dir(dir.path()).join("ritornello-plugin-radio");
+        std::fs::write(&exec, binary_with("0.2.0", Some(OURS))).unwrap();
+        let installed = worker.installed().await.unwrap();
+        let radio = installed.iter().find(|i| i.name == "radio").unwrap();
+        assert_eq!(radio.version, None);
+        assert_eq!(radio.repository, None);
+    }
+
     fn radio_published(version: &str) -> Vec<Published> {
         vec![Published {
             offer: Offer::Plugin("radio".to_string()),
@@ -9532,5 +9693,42 @@ mod tests {
             assert_eq!(check_row(&state, CORE).contracts.breaking, expected);
             assert_eq!(state.major_update_waiting, expected);
         }
+    }
+
+    /// **An update never starts a switched-off plugin.** The order channel is
+    /// held by the test: nothing may be queued on it for a plugin that is off.
+    #[tokio::test]
+    async fn restarting_after_an_update_leaves_a_switched_off_plugin_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut worker = switched_off(dir.path(), &binary_with("0.2.0", Some(OURS)));
+        let (tx, mut rx) = mpsc::channel::<PluginOrder>(8);
+        worker.plugins_tx = tx;
+        // Bounded: were the guard gone, the call would wait for an ack that
+        // never comes.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            worker.restart_plugin("radio"),
+        )
+        .await;
+        assert!(rx.try_recv().is_err(), "a switched-off plugin must receive no order");
+    }
+
+    /// The positive control: the same rig with the plugin on does queue the
+    /// order, so the test above cannot pass on a broken channel.
+    #[tokio::test]
+    async fn restarting_after_an_update_relaunches_an_enabled_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut worker = worker_at(dir.path(), one_line(PluginStatus::kind("radio", "source", true, false)));
+        let (tx, mut rx) = mpsc::channel::<PluginOrder>(8);
+        worker.plugins_tx = tx;
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            worker.restart_plugin("radio"),
+        )
+        .await;
+        // `rx` is still alive here, so the send succeeded and the order waits.
+        let order = rx.try_recv().expect("an enabled plugin is relaunched");
+        assert_eq!(order.name, "radio");
+        assert!(matches!(order.action, PluginAction::Restart));
     }
 }

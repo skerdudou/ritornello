@@ -24,16 +24,18 @@ pub struct Installed {
     pub declared: bool,
     /// Its `exec` path exists on disk.
     pub binary_present: bool,
-    /// As its announcement gave it. `None` for a plugin that never announced —
-    /// switched off, absent, or predating the field.
+    /// As its announcement gave it, or, for a switched-off plugin, as the
+    /// manifest block of its binary says. `None` for a plugin that never
+    /// announced and whose binary carries no readable block — absent, dead, or
+    /// predating the field.
     pub version: Option<String>,
     /// Where its announcement said its releases live, **verbatim**: today a
     /// full URL, because that is what `CARGO_PKG_REPOSITORY` holds.
     ///
     /// Stored raw and interpreted through `release::origin`, in one place, so
     /// there is exactly one fact here and no second field to disagree with it.
-    /// A plugin that never announced — switched off, dead, predating the
-    /// field — says `None`, which is "nothing to say", never "ours".
+    /// A plugin that never announced and carries no readable block — dead,
+    /// predating the field — says `None`, which is "nothing to say", never "ours".
     pub repository: Option<String>,
 }
 
@@ -382,7 +384,8 @@ pub fn component_offers(
         // `Cargo.toml` on the author's side settles it.
         //
         // **What stops it is `placement_target`, not the automatic policy.** A
-        // row that is switched off or dead announces no version, and
+        // row that is dead, or switched off with a binary predating the
+        // manifest block, has no version, and
         // `automatic_install_list` does exclude those — but a **running** one
         // announces its version, so the automatic policy does reach it. What
         // it then meets is the check that the archive's bare name is the file

@@ -1000,6 +1000,13 @@ note, so the page comes back reading "Never checked" until the next check
 unattended device that is the next night; **Check** answers at once at any
 time).
 
+**A switched-off plugin's row shows the version and origin read from its
+binary, without running it.** The core reads a small block of data embedded in
+the file, as bytes (see [The manifest block in your
+binary](plugins.md#the-manifest-block-in-your-binary)). A binary built before
+that block existed shows `?` until it has been installed once by hand; a third
+party's binary without a block always shows `?` while it is switched off.
+
 A note that a rollback happened is read once, at process start, from the
 report the rollback service leaves behind. It is **not** limited to that
 run: the report is never deleted, so the note stays until a core update
@@ -1093,11 +1100,13 @@ they sit. The warning only informs: the hour is saved as typed, and the zone
 is changed from the [Time card](#time-card) of the System page.
 
 An automatic install only ever touches a component the device **already
-runs**: under no setting does it introduce a plugin or a language pack the
-device does not have, and the first three never touch a third-party
-component at all (see [Third-party plugins](#third-party-plugins) below).
-It can restart the core and any plugin it updates, the same as a manual
-install.
+has**, running or switched off: under no setting does it introduce a plugin or
+a language pack the device does not have, and the first three never touch a
+third-party component at all (see [Third-party plugins](#third-party-plugins)
+below). It can restart the core and any plugin it updates, the same as a
+manual install. A switched-off plugin is updated at night under the same scope
+rules and stays switched off: the new binary runs when it is switched back on.
+One whose version is unknown is still left alone.
 
 **It never installs a major update.** When the offered core breaks the wire
 (another bootstrap or contract major), the night run leaves out the core. It
