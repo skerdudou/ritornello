@@ -569,7 +569,8 @@ describe('HomeView — sliders and names', () => {
     expect(posts).toEqual([65, 75])
     releases[1]!()
     await flushPromises()
-    expect(posts).not.toContain(70)
+    // Exactly two POSTs: neither the dropped 70 nor a duplicated 75 nor a stray one.
+    expect(posts).toEqual([65, 75])
   })
 
   it('the bar posts SeekTo, by the step configured by /api/settings', async () => {

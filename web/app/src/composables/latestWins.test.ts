@@ -41,6 +41,25 @@ describe('latestWins', () => {
     expect(calls).toEqual([1, 2])
   })
 
+  it('a run that throws synchronously does not stall the queue', async () => {
+    const calls: number[] = []
+    let first = true
+    const push = latestWins((v: number) => {
+      calls.push(v)
+      if (first) {
+        first = false
+        throw new Error('sync boom')
+      }
+      return Promise.resolve()
+    })
+    push(1)
+    await flushPromises()
+    push(2)
+    await flushPromises()
+    push(3)
+    expect(calls).toEqual([1, 2, 3])
+  })
+
   it('once everything settled, the next value runs at once', async () => {
     const { calls, settle, push } = controlled()
     push(1)

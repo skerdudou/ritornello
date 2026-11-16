@@ -28,8 +28,8 @@ const local = ref<number | null>(null)
 // of the intermediate sends come back after the release, and each would pull
 // the thumb back to a value the finger has already left.
 const target = ref<number | null>(null)
-// Values sent and not yet seen in a frame, oldest first. Not reactive: only
-// the frame watcher reads it.
+// Values sent and not yet seen in a frame, oldest first. Not reactive: nothing
+// renders from it; it is read by the frame watcher and by `finish`.
 let inFlight: number[] = []
 // Last value sent in the current gesture, and when. Reset at every release:
 // dedup and throttle are per gesture — a stale `lastSent` would swallow a tap
@@ -71,6 +71,13 @@ function release(): void {
 // frozen on its own value. The latch also lets go when the queue is empty:
 // the final send's echo has arrived. During a drag the queue is consumed the
 // same way, but the display stays on `local` regardless.
+// Known limit, bounded and self-correcting: `inFlight` may also hold values
+// that `latestWins` (in HomeView) dropped without ever POSTing. If the remote
+// or MPD lands on one of them before the final echo, that frame is taken for
+// an echo and the latch holds the released value until the final echo or the
+// 2 s backstop. Likewise when the final echo does not change `props.volume`
+// (60 -> 55 -> 60 coalesced): the watcher does not fire, only the backstop
+// releases.
 watch(
   () => props.volume,
   (v) => {
