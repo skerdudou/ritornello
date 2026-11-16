@@ -1969,6 +1969,9 @@ this plugin but never written by it, hence installed system-wide rather
 than kept in its own data directory; see [Where a plugin keeps its
 data](#where-a-plugin-keeps-its-data) above).
 
+On a phone its text buttons (Refresh, Learn, Clear, Load, Import, Export, Save)
+become icons, each still named by `aria-label` and `title`.
+
 Devices are found at startup and then **every five seconds** by the plugin
 itself: each tick lists `/dev/input` and opens any `eventN` node not already
 open, exactly what the page's "Refresh" button does (the button still

@@ -71,6 +71,17 @@ Tailwind's `md` and `lg`, not a separate mobile view or a fork in the code.
   progress bar, the transport, the volume slider and the preset tiles
   stack in that order, then a fixed bottom tab bar (see "Navigation") sits
   under everything, clear of the phone's own gesture bar.
+  The plugins' admin pages reflow their tables instead of scrolling
+  sideways: a radio station is two lines (number and name, then the URL
+  with its up, down and delete keys), a web-streaming entry is two lines
+  (selection, number and order keys, then the title), and the MusicBrainz
+  station table puts the URL on its own line with each value under its
+  column name. The text buttons of `generic-input` become named icons (the
+  word stays as `aria-label` and `title`), and long unbroken names, URLs
+  and log lines wrap. The phone guard of `e2e/phone.spec.ts`
+  (`e2e/overflow.ts`) checks every harness page at 360 px, the home page,
+  four dialogs at 412 and 360 px, and any box that scrolls sideways unless
+  it carries `data-scrolls-sideways`.
 - **From `md` (desktop/tablet).** Two cards side by side, inside a
   `max-w-7xl` column (1280 px; every page shares it): the Player card on
   the left (cover, track block, progress bar, transport, volume), the
