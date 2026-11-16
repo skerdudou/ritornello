@@ -110,13 +110,22 @@ impl<P: Player> Core<P> {
 
     /// One `af-command` per band whose gain differs from what mpv holds.
     /// Every band is tried; the first error is returned.
+    ///
+    /// **The cuts go first, then the boosts.** Overlapping bands add up: a
+    /// raise sent while a neighbour still holds its old boost can peak above
+    /// both settings (+12 moved from 1 kHz to 500 Hz peaks several dB above
+    /// +12 in between). Each band's response grows with its gain at every
+    /// frequency, so after the cuts every gain is min(old, new) and during the
+    /// boosts each stays at most its final value: the peak never exceeds the
+    /// new setting's, which the preamp in place already compensates.
     async fn send_bands(&mut self) -> Result<()> {
         let mut result = Ok(());
-        for band in 0..self.eq_bands_sent.len() {
+        let order = (0..self.eq_bands_sent.len())
+            .filter(|&b| self.equalizer.gains[b] < self.eq_bands_sent[b])
+            .chain((0..self.eq_bands_sent.len()).filter(|&b| self.equalizer.gains[b] > self.eq_bands_sent[b]))
+            .collect::<Vec<_>>();
+        for band in order {
             let gain = self.equalizer.gains[band];
-            if self.eq_bands_sent[band] == gain {
-                continue;
-            }
             match self.player.audio_filter_command(&crate::equalizer::band_command(band, gain)).await {
                 Ok(()) => self.eq_bands_sent[band] = gain,
                 Err(e) => {
@@ -466,6 +475,32 @@ mod tests {
         calls.lock().unwrap().clear();
         core.handle_event(Event::FileStarting).await;
         assert!(calls_of(&calls).is_empty(), "{:?}", calls_of(&calls));
+    }
+
+    /// Two overlapping octave-wide bands both at +12 peak well above +12:
+    /// the cut must reach mpv before the boost, or the preamp in place is
+    /// not enough for the time between the two commands.
+    fn assert_cut_before_boost(calls: &Mutex<Vec<String>>) {
+        let all = calls_of(calls);
+        let at = |c: &str| all.iter().position(|x| x == c).unwrap_or_else(|| panic!("{c} missing: {all:?}"));
+        assert!(at("af_cmd eq5 g 0 equalizer") < at("af_cmd eq4 g 12 equalizer"), "{all:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn band_cuts_reach_mpv_before_band_boosts() {
+        // Preamp unchanged (≈ −12 both sides): the bands go at once.
+        let (mut core, calls, _sc, _rx, _dir) = launched_with(with_band(enabled(), 5, 12));
+        core.set_equalizer(with_band(enabled(), 4, 12)).await.unwrap();
+        run_ramp(&mut core, &calls).await;
+        assert_cut_before_boost(&calls);
+
+        // Preamp going down: the bands follow the ramp's last step, in the
+        // same order.
+        let (mut core, calls, _sc, _rx, _dir) = launched_with(with_band(enabled(), 5, 6));
+        core.set_equalizer(with_band(enabled(), 4, 12)).await.unwrap();
+        run_ramp(&mut core, &calls).await;
+        assert!(preamps(&calls).len() >= 6, "{:?}", calls_of(&calls));
+        assert_cut_before_boost(&calls);
     }
 
     #[tokio::test(start_paused = true)]
