@@ -350,6 +350,8 @@ mod tests {
         g[5] = 12;
         let p = preamp_db(&g);
         assert!((-12.5..=-11.5).contains(&p), "{p}");
+        // Pinned against an independent RBJ implementation (bw = 1 octave).
+        assert!((p + 12.00).abs() < 0.05, "{p}");
     }
 
     #[test]
@@ -359,6 +361,7 @@ mod tests {
         g[6] = 12;
         let p = preamp_db(&g);
         assert!(p < -12.5, "{p}");
+        assert!((p + 14.60).abs() < 0.05, "{p}");
     }
 
     fn flat_chain(pre: &str) -> String {
@@ -419,5 +422,45 @@ mod tests {
         }
         assert!(preamp_ramp(-3.0, -3.0).is_empty());
         assert_eq!(*preamp_ramp(-2.5, 0.0).last().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn validate_boundaries() {
+        for g in [12, -12] {
+            let s = EqualizerSettings { gains: [g; 10], ..Default::default() };
+            assert_eq!(validate(&s), Ok(()));
+        }
+
+        for (g, ok) in [(13, false), (-13, false), (12, true), (-12, true)] {
+            let mut u = with_users(&["a"]);
+            u.user_presets[0].gains[9] = g;
+            let want = if ok { Ok(()) } else { Err(EqualizerError::GainOutOfRange) };
+            assert_eq!(validate(&u), want, "user gain {g}");
+        }
+
+        assert_eq!(
+            validate(&with_users(&[" Salon ", "salon"])),
+            Err(EqualizerError::DuplicateName)
+        );
+        for bad in ["builtin:", "user:"] {
+            let s = EqualizerSettings { preset: Some(bad.into()), ..Default::default() };
+            assert_eq!(validate(&s), Err(EqualizerError::UnknownPreset), "{bad}");
+        }
+        let padded = format!("  {}  ", "x".repeat(40));
+        assert_eq!(validate(&with_users(&[&padded])), Ok(()));
+    }
+
+    #[test]
+    fn limit_texts_carry_the_constants() {
+        let dir = tempfile::tempdir().unwrap();
+        let cat = ritornello_i18n::Chain::load_for_tests("core", "en", dir.path(), crate::i18n::EN);
+        for (err, n) in [
+            (EqualizerError::GainOutOfRange, GAIN_MAX.to_string()),
+            (EqualizerError::NameTooLong, MAX_NAME_CHARS.to_string()),
+            (EqualizerError::TooManyPresets, MAX_USER_PRESETS.to_string()),
+        ] {
+            assert!(err.to_string().contains(&n), "Display {err:?}");
+            assert!(err.message(&cat).contains(&n), "catalog {err:?}");
+        }
     }
 }
