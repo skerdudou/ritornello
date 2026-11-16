@@ -84,8 +84,13 @@ impl MpvIpc {
                         };
                         let _ = tx.send(res);
                     }
-                } else if v["event"] == json!("property-change") || v["event"] == json!("file-loaded") {
-                    let ev = if v["event"] == json!("file-loaded") {
+                } else if v["event"] == json!("property-change")
+                    || v["event"] == json!("file-loaded")
+                    || v["event"] == json!("start-file")
+                {
+                    let ev = if v["event"] == json!("start-file") {
+                        Some(Event::FileStarting)
+                    } else if v["event"] == json!("file-loaded") {
                         // Documented by mpv (read from its own manual, not
                         // measured against a real running mpv — no session
                         // available here to confirm it) as sent "after a
@@ -617,8 +622,11 @@ pub fn readahead_setting(raw: Option<&str>) -> f64 {
 
 /// mpv launch arguments. Pure function, separate from `start` to be
 /// testable without spawning a process.
-pub fn mpv_args(socket: &Path, cd_dev: &str, audio_buffer: f64, readahead: f64) -> Vec<String> {
-    vec![
+///
+/// `af` is the audio filter chain (the equalizer's); an empty one adds no
+/// `--af` at all.
+pub fn mpv_args(socket: &Path, cd_dev: &str, audio_buffer: f64, readahead: f64, af: &str) -> Vec<String> {
+    let mut args = vec![
         "--idle=yes".to_string(),
         "--no-video".to_string(),
         // `--no-video` does not stop mpv from opening a `cover.jpg` it finds
@@ -647,7 +655,11 @@ pub fn mpv_args(socket: &Path, cd_dev: &str, audio_buffer: f64, readahead: f64) 
         // and does nothing, so a `ytdl://` address loaded before any `Play`
         // runs no `yt-dlp` found on the `PATH`.
         format!("--script-opts=ytdl_hook-exclude=.,ytdl_hook-ytdl_path={YTDL_NOWHERE}"),
-    ]
+    ];
+    if !af.is_empty() {
+        args.push(format!("--af={af}"));
+    }
+    args
 }
 
 /// The program mpv's yt-dlp hook runs for a load that named none: it
@@ -682,6 +694,7 @@ pub async fn start(
     cd_dev: &str,
     audio_buffer: f64,
     readahead: f64,
+    af: &str,
     events: mpsc::Sender<Event>,
 ) -> Result<(MpvPlayer, tokio::process::Child)> {
     if let Some(parent) = socket.parent() {
@@ -689,7 +702,7 @@ pub async fn start(
     }
     let _ = std::fs::remove_file(socket);
     let child = tokio::process::Command::new(mpv_bin)
-        .args(mpv_args(socket, cd_dev, audio_buffer, readahead))
+        .args(mpv_args(socket, cd_dev, audio_buffer, readahead, af))
         .kill_on_drop(true)
         .spawn()
         .context("starting mpv")?;
@@ -860,6 +873,19 @@ impl super::Player for MpvPlayer {
             .await?;
         Ok(())
     }
+    async fn set_audio_filters(&self, chain: &str) -> Result<()> {
+        self.ipc.command(&[json!("set_property"), json!("af"), json!(chain)]).await?;
+        Ok(())
+    }
+    async fn audio_filter_command(&self, cmd: &crate::equalizer::AfCommand) -> Result<()> {
+        // The fifth element, the filter's name inside the lavfi graph, is
+        // mandatory: measured on mpv 0.37, a missing target or `all` fails
+        // with "error running command".
+        self.ipc
+            .command(&[json!("af-command"), json!(cmd.label), json!(cmd.command), json!(cmd.arg), json!(cmd.target)])
+            .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -973,7 +999,7 @@ pub(crate) mod tests {
         let (tx, mut rx) = mpsc::channel(1024);
         tokio::spawn(async move { while rx.recv().await.is_some() {} });
         let (player, _child) =
-            start(mpv.to_str().unwrap(), &d.join("mpv.sock"), "/dev/null", AUDIO_BUFFER_DEFAULT, READAHEAD_DEFAULT, tx)
+            start(mpv.to_str().unwrap(), &d.join("mpv.sock"), "/dev/null", AUDIO_BUFFER_DEFAULT, READAHEAD_DEFAULT, "", tx)
                 .await
                 .unwrap();
         let count = |tag: &str| std::fs::read_to_string(&calls).unwrap_or_default().lines().filter(|l| *l == tag).count();
@@ -1603,7 +1629,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_arguments_carry_both_buffers() {
-        let args = mpv_args(std::path::Path::new("/run/rp/mpv.sock"), "/dev/sr0", 0.5, 10.0);
+        let args = mpv_args(std::path::Path::new("/run/rp/mpv.sock"), "/dev/sr0", 0.5, 10.0, "");
         assert!(args.contains(&"--audio-buffer=0.5".to_string()), "{args:?}");
         assert!(args.contains(&"--demuxer-readahead-secs=10".to_string()), "{args:?}");
         // The pre-existing arguments must not have been lost along the way.
@@ -1617,6 +1643,102 @@ pub(crate) mod tests {
         assert!(args.contains(&"--cdda-device=/dev/sr0".to_string()));
         // The yt-dlp hook: no http(s) fallback ever, a program that does nothing.
         assert!(args.contains(&"--script-opts=ytdl_hook-exclude=.,ytdl_hook-ytdl_path=/bin/false".to_string()), "{args:?}");
+    }
+
+    #[test]
+    fn mpv_args_carry_af_only_when_set() {
+        let socket = std::path::Path::new("/run/rp/mpv.sock");
+        let empty = mpv_args(socket, "/dev/sr0", 0.5, 10.0, "");
+        assert!(!empty.iter().any(|a| a.starts_with("--af")), "{empty:?}");
+        let chain = "@eqpre:lavfi=[highshelf=f=10:t=q:w=0.707:g=0],@eq0:lavfi=[equalizer=f=31:t=o:w=1:g=0]";
+        let set = mpv_args(socket, "/dev/sr0", 0.5, 10.0, chain);
+        let afs: Vec<_> = set.iter().filter(|a| a.starts_with("--af")).collect();
+        assert_eq!(afs, vec![&format!("--af={chain}")], "{set:?}");
+    }
+
+    #[tokio::test]
+    async fn start_file_becomes_file_starting() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let (tx, mut rx) = mpsc::channel(16);
+        let _ipc = MpvIpc::from_stream(client, tx);
+        let (_r, mut w) = server.into_split();
+        w.write_all(b"{\"event\":\"start-file\",\"playlist_entry_id\":1}\n").await.unwrap();
+        assert!(matches!(rx.recv().await, Some(Event::FileStarting)));
+    }
+
+    /// The real thing: `af-command` with its fifth element reaches a running
+    /// mpv holding the equalizer chain (measured on mpv 0.37: without the
+    /// target it fails), and `set_audio_filters` replaces the chain.
+    ///
+    /// Needs `mpv`; without it the test says so on stderr and returns, like
+    /// the tests that need ffmpeg.
+    #[tokio::test]
+    async fn af_command_reaches_a_running_mpv() {
+        use crate::player::Player;
+        if std::process::Command::new("mpv").arg("--version").output().map(|o| !o.status.success()).unwrap_or(true) {
+            eprintln!("mpv missing: skipping test");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let mpv = d.join("mpv");
+        std::fs::write(&mpv, "#!/bin/sh\nexec mpv --no-config --ao=null \"$@\"\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&mpv, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // Built through the model, so this cannot drift from the real format.
+        let chain = crate::equalizer::af_chain(&crate::equalizer::EqualizerSettings {
+            enabled: true,
+            ..Default::default()
+        });
+        let (tx, mut rx) = mpsc::channel(1024);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let (player, _child) =
+            start(mpv.to_str().unwrap(), &d.join("mpv.sock"), "/dev/null", AUDIO_BUFFER_DEFAULT, READAHEAD_DEFAULT, &chain, tx)
+                .await
+                .unwrap();
+        let graph = |v: &Value, label: &str| -> Option<String> {
+            v.as_array()?.iter().find(|f| f["label"] == json!(label))?["params"]["graph"].as_str().map(str::to_string)
+        };
+        let af = player.ipc.command(&[json!("get_property"), json!("af")]).await.unwrap();
+        assert_eq!(graph(&af, "eq5").as_deref(), Some("equalizer=f=1000:t=o:w=1:g=0"), "{af}");
+        assert_eq!(graph(&af, "eqpre").as_deref(), Some("highshelf=f=10:t=q:w=0.707:g=0"), "{af}");
+
+        // Idle, the two facts `core/equalizer.rs` relies on: `af-command`
+        // is refused (no live chain), setting `af` is accepted.
+        assert!(
+            player.audio_filter_command(&crate::equalizer::band_command(5, 6)).await.is_err(),
+            "an idle mpv must refuse af-command"
+        );
+        let mut idle_eq = crate::equalizer::EqualizerSettings { enabled: true, ..Default::default() };
+        idle_eq.gains[5] = 3;
+        player.set_audio_filters(&crate::equalizer::af_chain(&idle_eq)).await.expect("setting af on an idle mpv");
+        let af = player.ipc.command(&[json!("get_property"), json!("af")]).await.unwrap();
+        assert_eq!(graph(&af, "eq5").as_deref(), Some("equalizer=f=1000:t=o:w=1:g=3"), "{af}");
+        player.set_audio_filters(&chain).await.unwrap();
+
+        // The chain only exists while something plays (an idle mpv answers
+        // "error running command" to any `af-command`): a generated tone.
+        player.play("av://lavfi:sine=frequency=440:duration=30").await.unwrap();
+        let cmd = crate::equalizer::band_command(5, 6);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while let Err(e) = player.audio_filter_command(&cmd).await {
+            assert!(std::time::Instant::now() < deadline, "af-command with its target never succeeded: {e}");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        // The same command without its target is the failure the fifth
+        // element guards against, on a chain that does exist.
+        assert!(
+            player.ipc.command(&[json!("af-command"), json!("eq5"), json!("g"), json!("6")]).await.is_err(),
+            "af-command without a target must fail on mpv"
+        );
+        let preamp = crate::equalizer::preamp_command(-6.0);
+        player.audio_filter_command(&preamp).await.expect("preamp af-command");
+
+        player.set_audio_filters("").await.unwrap();
+        let af = player.ipc.command(&[json!("get_property"), json!("af")]).await.unwrap();
+        assert_eq!(af.as_array().map(Vec::len), Some(0), "{af}");
     }
 
     /// mpv answers `null` on `time-pos` when nothing is loaded, and an

@@ -43,6 +43,7 @@ const CATALOGUE = {
   plugin_remove_binary_confirm: 'Supprimer le binaire « {file} » ? Cette action est irréversible.',
   plugin_order_note: "L'ordre commande la clé de source et la priorité des métadonnées.",
   audio_output: 'Sortie audio', audio_default_device: 'Par défaut (système)',
+  eq_title: 'Égaliseur',
   language: 'Langue', save: 'Enregistrer', ok: 'OK',
   display_card_title: 'Langue et affichage', player_card_title: 'Lecteur',
   recent_errors: 'Dernières erreurs',
@@ -3142,10 +3143,11 @@ describe('ConfigView — table of contents', () => {
     // are seven here (task 4): "Langue et affichage" folds in the old
     // "Langue", "Date et heure" and "Incrustations" entries, and "Lecteur"
     // folds in "Volume maintenu" and "Déplacement". "Réveils" came with the
-    // alarms, an eighth card of its own.
+    // alarms, an eighth card of its own; "Égaliseur" a ninth, right after
+    // the audio output it shapes.
     expect(links.map((l) => l.text())).toEqual([
-      'Mises à jour', 'Plugins', 'Sortie audio', 'Langue et affichage', 'Démarrage', 'Réveils',
-      'Lecteur', "Pochettes d'album",
+      'Mises à jour', 'Plugins', 'Sortie audio', 'Égaliseur', 'Langue et affichage', 'Démarrage',
+      'Réveils', 'Lecteur', "Pochettes d'album",
     ])
     // Hidden on small screens: the column follows the shell width, there is no
     // room for it on mobile.
@@ -3155,7 +3157,7 @@ describe('ConfigView — table of contents', () => {
   it('lists one entry per card, not one per former card', async () => {
     const { w } = await mountView({})
     const entries = w.findAll('[data-toc-link]').map((l) => l.text())
-    expect(entries).toHaveLength(8)
+    expect(entries).toHaveLength(9)
     expect(entries).not.toContain('Incrustations')
   })
 

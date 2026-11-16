@@ -14,6 +14,7 @@ impl<P: Player> Core<P> {
         }
         self.audio_device = device;
         self.persist();
+        self.reapply_equalizer_after_output_change().await;
         Ok(())
     }
 
@@ -203,6 +204,7 @@ impl<P: Player> Core<P> {
             last_alarm_minute: self.last_alarm_minute,
             last_alarm_local: self.last_alarm_local,
             sleep_timer: self.persisted_sleep(),
+            equalizer: self.equalizer.clone(),
         };
         if let Err(e) = state::save(&self.state_path, &st) {
             tracing::warn!("persistence failed: {e}");
@@ -241,6 +243,7 @@ mod tests {
             last_alarm_minute: None,
             last_alarm_local: None,
             sleep_timer: None,
+            equalizer: Default::default(),
         };
         let root = dir.path().to_path_buf();
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
@@ -313,6 +316,32 @@ mod tests {
         assert!(player_calls.lock().unwrap().contains(&"audio_device hw:CARD=Headphones".to_string()));
         let st = crate::state::load(&dir.path().join("state.json"));
         assert_eq!(st.audio_device.as_deref(), Some("hw:CARD=Headphones"));
+    }
+
+    /// A device change reloads mpv's audio output, which may rebuild the
+    /// filter chain from `af` and drop the gains `af-command` set: the chain
+    /// is rewritten with the current setting (the change cuts the sound
+    /// anyway, so the rewrite costs no click of its own).
+    #[tokio::test]
+    async fn set_audio_device_rewrites_an_enabled_equalizer_chain() {
+        let mut eq = crate::equalizer::EqualizerSettings { enabled: true, ..Default::default() };
+        let (mut core, player_calls, _sc, _rx, _dir) =
+            setup_persisted(PersistedState { equalizer: eq.clone(), ..Default::default() });
+        core.handle_event(Event::FileStarting).await;
+        eq.gains[5] = 6;
+        core.set_equalizer(eq.clone()).await.unwrap();
+        player_calls.lock().unwrap().clear();
+        core.set_audio_device(Some("hw:CARD=Headphones".into())).await.unwrap();
+        assert_eq!(
+            *player_calls.lock().unwrap(),
+            vec!["audio_device hw:CARD=Headphones".to_string(), format!("af {}", crate::equalizer::af_chain(&eq))]
+        );
+
+        // Disabled: no chain to restore.
+        let (mut core, player_calls, _sc, _rx, _dir) = setup();
+        player_calls.lock().unwrap().clear();
+        core.set_audio_device(Some("hw:CARD=Headphones".into())).await.unwrap();
+        assert_eq!(*player_calls.lock().unwrap(), vec!["audio_device hw:CARD=Headphones".to_string()]);
     }
 
     #[tokio::test]

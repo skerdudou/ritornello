@@ -41,5 +41,12 @@ pub enum Event {
     /// see `player::mpv`'s own comment on that arm.
     PlaybackActive,
     PlaybackIdle,
+    /// mpv's `start-file` IPC event: a file is about to load and mpv is
+    /// about to rebuild its audio filter chain from the recorded `af`.
+    /// Measured on mpv 0.37: a `set_property af` sent at this moment applies
+    /// from the first frame of the file (`audio-reconfig` comes several times
+    /// and too early, `playback-restart` leaves 100 to 730 ms of the old
+    /// curve).
+    FileStarting,
     TrackChanged(i64),
 }

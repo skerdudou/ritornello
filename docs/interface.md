@@ -964,7 +964,7 @@ there, so existing bookmarks and links keep working. It opens on
 self-update and plugin management (below), then the audio output and
 language pickers, the rest of the settings cards described here, and the
 recent error log. The Alarms card is described with the sleep timer, under
-[Sleep timer and alarms](#alarms-card). Every plugin — its connection state, its admin link,
+[Sleep timer and alarms](#alarms-card); the Equalizer card [below](#equalizer-card). Every plugin — its connection state, its admin link,
 and now whether it is declared, installed or neither — lives in the
 plugins table, not in a separate list.
 
@@ -1453,6 +1453,37 @@ explicitly picked — and it stays available afterwards to go back to
 `state.json` and pushes it to mpv immediately; the currently selected
 device is kept visible even if it disappears from `aplay -L` (a card
 unplugged since), rather than leaving the picker blank.
+
+### Equalizer card
+
+A ten-band graphic equalizer, at `/config#equalizer`: vertical sliders for
+31, 62, 125, 250, 500 Hz and 1, 2, 4, 8, 16 kHz, each from **-12 to +12 dB**
+in 1 dB steps, with its value under it. Because it is an mpv filter chain
+owned by the core, it applies to **every source**, whichever plugin plays.
+
+- **Enabled** switches the chain on. Off, the sliders keep their values and
+  the audio is left untouched.
+- **Automatic compensation** (on by default) lowers the overall level by the
+  combined peak of the curve, so boosting a band does not clip. Off, a
+  boosted curve may clip.
+- **Presets.** Seven built-in ones (flat, pop, rock, classical, jazz,
+  electronic, voice; their names are translated, their gains are fixed) and up
+  to **20 named user presets**, stored on the device. The selector reads
+  **Custom** whenever the sliders differ from the selected preset.
+
+Backed by `GET`/`PUT /api/equalizer`. `GET` answers the settings
+(`enabled`, `auto_preamp`, `gains`, `preset`, `user_presets`), the band
+frequencies and the built-ins. `PUT` is a **full replacement**: the body is
+strict (every field required, an unknown one refused, so a body without
+`user_presets` cannot wipe them). A body that parses but does not validate
+(a missing or mistyped field, a gain out of range, a preset too many) is
+refused with a `422` whose `error` is already translated; a body that is not
+JSON at all, or not sent as `application/json`, gets the framework's own
+`400`/`415`, untranslated. The route never touches mpv: it writes the shared copy
+and hands the change to the core's loop. The settings live in `state.json`
+(`equalizer`), read leniently as a whole: a block that does not pass
+validation is replaced by the defaults, and nothing else in the file is
+affected.
 
 ### Startup card
 

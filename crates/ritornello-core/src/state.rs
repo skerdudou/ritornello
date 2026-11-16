@@ -1,4 +1,5 @@
 use anyhow::Result;
+use crate::equalizer::EqualizerSettings;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -573,6 +574,26 @@ pub struct PersistedState {
     /// drops it. Lenient at load: see `lenient_option`.
     #[serde(default, deserialize_with = "lenient_option", skip_serializing_if = "Option::is_none")]
     pub sleep_timer: Option<PersistedSleep>,
+    /// The equalizer. Always written, so the file shows the setting. Lenient
+    /// at load, as a whole: see `lenient_equalizer`.
+    #[serde(default, deserialize_with = "lenient_equalizer")]
+    pub equalizer: EqualizerSettings,
+}
+
+/// A block that does not read as `EqualizerSettings`, or reads but does not
+/// pass `validate`, is the default equalizer and nothing else: it must never
+/// take `load`'s all-or-nothing path, which would reset every other setting
+/// (`PersistedState.fallback`'s doc measured why).
+fn lenient_equalizer<'de, D: serde::Deserializer<'de>>(d: D) -> Result<EqualizerSettings, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    let parsed = serde_json::from_value::<EqualizerSettings>(v).map_err(|e| e.to_string()).and_then(|s| {
+        crate::equalizer::validate(&s).map_err(|e| e.to_string())?;
+        Ok(s)
+    });
+    Ok(parsed.unwrap_or_else(|reason| {
+        tracing::warn!(%reason, "unreadable equalizer settings in state.json, using the defaults");
+        EqualizerSettings::default()
+    }))
 }
 
 /// A sleep timer as `state.json` keeps it: its deadline on the wall clock and
@@ -682,6 +703,7 @@ impl Default for PersistedState {
             last_alarm_minute: None,
             last_alarm_local: None,
             sleep_timer: None,
+            equalizer: EqualizerSettings::default(),
         }
     }
 }
@@ -774,6 +796,84 @@ mod tests {
         let path = dir.path().join("state.json");
         std::fs::write(&path, text).unwrap();
         load(&path)
+    }
+
+    #[test]
+    fn equalizer_round_trips() {
+        use crate::equalizer::{EqualizerSettings, UserPreset};
+        let st = PersistedState {
+            equalizer: EqualizerSettings {
+                enabled: true,
+                auto_preamp: false,
+                gains: [3, -2, 0, 5, -12, 12, 1, 0, -1, 2],
+                preset: Some("user:Night".into()),
+                user_presets: vec![
+                    UserPreset { name: "Night".into(), gains: [1; 10] },
+                    UserPreset { name: "Day".into(), gains: [-1; 10] },
+                ],
+            },
+            ..PersistedState::default()
+        };
+        let text = serde_json::to_string(&st).unwrap();
+        assert_eq!(load_text(&text).equalizer, st.equalizer);
+    }
+
+    /// A malformed equalizer block resets the equalizer alone: `load` is
+    /// all-or-nothing on the outer parse, so a block that failed it would take
+    /// the volume and every other setting with it.
+    #[test]
+    fn malformed_equalizer_resets_only_itself() {
+        use crate::equalizer::EqualizerSettings;
+        let ok = r#""enabled":true,"auto_preamp":true,"preset":null,"user_presets":[]"#;
+        let blocks = [
+            format!(r#"{{{ok},"gains":[1,1,1,1,1,1,1,1,1,1,1]}}"#),
+            format!(r#"{{{ok},"gains":[0,0,0,0,0,0,0,0,0,99]}}"#),
+            r#"{"enabled":true,"auto_preamp":true,"gains":[0,0,0,0,0,0,0,0,0,0],"preset":null,"user_presets":[{"name":"","gains":[0,0,0,0,0,0,0,0,0,0]}]}"#
+                .to_string(),
+            format!(r#"{{{ok},"gains":"loud"}}"#),
+            "null".to_string(),
+            r#""loud""#.to_string(),
+            "[1,2,3]".to_string(),
+            format!(r#"{{{ok},"gains":[0,0,0,0,0,0,0,0,0]}}"#),
+            format!(r#"{{{ok},"gains":[0,0,0,0,0,0,0,0,0,1.5]}}"#),
+            format!(r#"{{{ok},"gains":[0,0,0,0,0,0,0,0,0,300]}}"#),
+            format!(r#"{{{ok},"gains":[0,0,0,0,0,0,0,0,0,-128]}}"#),
+            r#"{"enabled":true,"auto_preamp":true,"gains":[0,0,0,0,0,0,0,0,0,0],"preset":null,"user_presets":{}}"#
+                .to_string(),
+        ];
+        for block in blocks {
+            let text = format!(r#"{{"active_source":"cd","volume":37,"random":true,"equalizer":{block}}}"#);
+            let st = load_text(&text);
+            assert_eq!(st.equalizer, EqualizerSettings::default(), "{block}");
+            assert_eq!(st.volume, 37, "{block}");
+            assert!(st.random, "{block}");
+            assert_eq!(st.active_source, "cd", "{block}");
+        }
+    }
+
+    #[test]
+    fn absent_equalizer_is_default() {
+        use crate::equalizer::EqualizerSettings;
+        let st = load_text(r#"{"active_source":"cd","volume":37}"#);
+        assert_eq!(st.equalizer, EqualizerSettings::default());
+        assert_eq!(st.volume, 37);
+    }
+
+    /// A block written without `user_presets` (hand-edited, or by a core that
+    /// had not got them yet) keeps what it did say.
+    #[test]
+    fn a_partial_equalizer_block_keeps_what_it_says() {
+        let st = load_text(r#"{"active_source":"cd","volume":37,"equalizer":{"enabled":true,"gains":[1,0,0,0,0,0,0,0,0,0]}}"#);
+        assert!(st.equalizer.enabled);
+        assert_eq!(st.equalizer.gains[0], 1);
+        assert!(st.equalizer.user_presets.is_empty());
+        assert_eq!(st.volume, 37);
+    }
+
+    #[test]
+    fn the_equalizer_block_is_always_written() {
+        let v: serde_json::Value = serde_json::to_value(PersistedState::default()).unwrap();
+        assert!(v.get("equalizer").is_some());
     }
 
     /// A rollback under a core that knew one more way to end a timer: only
@@ -963,6 +1063,7 @@ mod tests {
             last_alarm_minute: Some(28_333_333),
             last_alarm_local: Some(LocalMinute { day_key: 123_317, hour: 7, minute: 30 }),
             sleep_timer: Some(PersistedSleep { ends_at_unix_s: 1_700_000_000, mode: ritornello_proto::SleepMode::EndOfTrack }),
+            equalizer: Default::default(),
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
@@ -999,6 +1100,7 @@ mod tests {
             last_alarm_minute: None,
             last_alarm_local: None,
             sleep_timer: None,
+            equalizer: Default::default(),
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);
@@ -1028,6 +1130,7 @@ mod tests {
             last_alarm_minute: None,
             last_alarm_local: None,
             sleep_timer: None,
+            equalizer: Default::default(),
         };
         save(&path, &st).unwrap();
         assert_eq!(load(&path), st);

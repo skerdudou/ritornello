@@ -39,6 +39,7 @@ use tokio::sync::{mpsc, watch, RwLock};
 mod alarms;
 mod commands;
 mod deadlines;
+mod equalizer;
 mod play_request;
 mod playback;
 mod track_metadata;
@@ -539,6 +540,26 @@ pub struct Core<P: Player> {
     /// publication: reading the local time costs a `tzset`, and the state is
     /// published several times a second during playback.
     next_alarm: Option<ritornello_proto::NextAlarm>,
+    /// The equalizer setting, persisted. See `equalizer.rs` for how a change
+    /// reaches mpv.
+    equalizer: crate::equalizer::EqualizerSettings,
+    /// The preamp mpv's chain holds now: the last preamp command sent, or the
+    /// value the chain carried when it was last written whole (`--af` at
+    /// launch, a toggle, a file start). A change commands the preamp only
+    /// when it differs.
+    eq_preamp_sent: f64,
+    /// The band gains mpv's chain holds now, tracked like `eq_preamp_sent`:
+    /// the bands still to send are those that differ from the setting.
+    eq_bands_sent: [i8; 10],
+    /// The chain mpv's `af` property holds, as last written whole (`--af`
+    /// at launch, a toggle, a file start, an audio output change); `None`
+    /// when the last write failed and `af` is unknown. A file start rewrites
+    /// the chain only when it differs from the setting's.
+    eq_chain_written: Option<String>,
+    /// A file is loaded, so mpv holds a live chain `af-command` can reach:
+    /// set at `FileStarting`, cleared at `PlaybackIdle` (an idle mpv refuses
+    /// every `af-command`). False at launch: mpv starts idle.
+    eq_file_loaded: bool,
 }
 
 /// What the detached read of an armed file (`Core::arm`) found: its tags
@@ -696,6 +717,13 @@ impl<P: Player> Core<P> {
             last_alarm_minute: persisted.last_alarm_minute,
             last_alarm_local: persisted.last_alarm_local,
             next_alarm: None,
+            // mpv was launched with this chain (`--af`), so its preamp is
+            // the one in place.
+            eq_preamp_sent: crate::equalizer::effective_preamp_db(&persisted.equalizer),
+            equalizer: persisted.equalizer.clone(),
+            eq_bands_sent: persisted.equalizer.gains,
+            eq_chain_written: Some(crate::equalizer::af_chain(&persisted.equalizer)),
+            eq_file_loaded: false,
         };
         // The sources wired at startup are already known: without this
         // publication, the channel would keep its blank

@@ -1481,6 +1481,37 @@ machine, never on the device they are meant to run on. This section names
 each gesture, rather than leaving one blanket disclaimer that a reader could
 mistake for caution instead of fact.
 
+**The equalizer has been measured on WSL only, never on the Pi, never
+listened to.** The prototype ran on a development machine with mpv 0.37 and
+ffmpeg 6.1.1:
+
+- a per-band `af-command` does not click, while a `set_property af` during
+  playback does;
+- the gains set by `af-command` are lost at every new file, which is why the
+  core rewrites the chain on `start-file` when the setting changed since it
+  was last written; an idle mpv refuses every `af-command`, so a change made
+  while nothing plays waits for that rewrite;
+- the preamp is a high shelf at 10 Hz, not a `volume` filter: `volume`
+  clicked on any change faster than about 2.5 dB/s, while the shelf jumped
+  0 to -12 dB and back without a measurable click. That was measured on WSL
+  only, never heard on the Pi's output. The shelf is flat within 0.21 dB from
+  31 Hz up, but below about 20 Hz it attenuates less: infrasound is not
+  compensated. Whether a biquad this low stays stable in the Pi's float path
+  is unverified;
+- whether changing the audio output keeps the live gains is unknown: mpv may
+  rebuild the chain from `af` when it reloads the output, so the core rewrites
+  the chain after every output change while the equalizer is on — a rewrite
+  that the output change's own cut hides, but whose need nobody has observed;
+- the full chain cost about +3 % of one core on WSL. **That is not measured
+  on the Pi 2 B (mpv 0.40)**, where it may be 10 to 20 times more, and the
+  Audio dropouts section applies;
+- nobody has listened to it on the living-room installation: that the curves
+  sound right, that compensation prevents clipping in practice and that a
+  change during playback is inaudible are all unheard;
+- a rollback to a core without the equalizer drops its `equalizer` block,
+  user presets included, from `state.json` the next time that core writes it.
+  This is accepted.
+
 **The system permissions have never run on a Pi.** The installer's question,
 the two rules and the time-zone change were built and tested on a
 development machine, with a stand-in for `busctl`:

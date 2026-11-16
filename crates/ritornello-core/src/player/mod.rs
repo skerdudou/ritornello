@@ -66,4 +66,13 @@ pub trait Player: Send + Sync + 'static {
     /// so the core sends it before **every** `Play`. It never unloads the
     /// hook script (see `MpvPlayer`'s implementation for what that did).
     async fn set_ytdl(&self, path: Option<&std::path::Path>) -> Result<()>;
+    /// Replaces the whole audio filter chain (`set_property af`); an empty
+    /// chain removes every filter. It rebuilds the chain, which clicks if sent
+    /// mid-playback: reserved for moments when mpv rebuilds it anyway
+    /// (`start-file`) and for enabling or disabling the equalizer.
+    async fn set_audio_filters(&self, chain: &str) -> Result<()>;
+    /// Changes one parameter of one labelled filter of the running chain
+    /// (`af-command`), without a click. The change is lost at the next file
+    /// load, which rebuilds the chain from the recorded `af`.
+    async fn audio_filter_command(&self, cmd: &crate::equalizer::AfCommand) -> Result<()>;
 }
