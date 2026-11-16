@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {
   api, Badge, Button, Card, CardContent, CardHeader, CardTitle, Dialog, DialogContent,
-  DialogDescription, DialogHeader, DialogTitle, Input,
+  DialogDescription, DialogHeader, DialogTitle, Input, ReorderHandle, ReorderList,
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Switch, toast,
 } from '@ritornello/ui'
 import {
@@ -642,36 +642,13 @@ async function movePlugin(name: string, to: number) {
 }
 
 /** This plugin's own position among the declared rows, or `-1` for a name
- * `declaredOrder` no longer carries — a stale drop target disappearing
- * mid-drag, say. Both the arrows and the drag handle compute a target
+ * `declaredOrder` no longer carries. The arrows compute their target
  * position from this rather than from the row's index in the full table,
- * which also lists rows nothing declares. */
+ * which also lists rows nothing declares. (A drag needs no such lookup: the
+ * list already reports positions among the declared rows, and the table
+ * reads the name from `declaredOrder`.) */
 function declaredIndex(name: string): number {
   return declaredOrder.value.indexOf(name)
-}
-
-/** Name of the plugin currently being dragged, or `null`: the row grays out
- * from this, same idiom as `RadioAdmin.vue`'s station table. */
-const draggingPlugin = ref<string | null>(null)
-
-/**
- * Drop handler for the plugins table's own drag handle.
- *
- * `to` is the row dropped onto's own position in `declaredOrder`, read
- * **before** the drop takes effect — the same convention `move()` itself
- * uses (splice the source out, then insert at `to` into what remains) and
- * the one `move_entry` already implements server-side. There is nothing
- * else to compute: this table has no local list to keep in step, since the
- * write lands immediately and the next `/api/status` poll is what redraws
- * the row order.
- */
-async function dropPlugin(targetName: string) {
-  const from = draggingPlugin.value
-  draggingPlugin.value = null
-  if (!from || from === targetName) return
-  const to = declaredIndex(targetName)
-  if (to === -1) return
-  await movePlugin(from, to)
 }
 
 /**
@@ -1432,30 +1409,36 @@ function goTo(id: string) {
                   <th class="text-left font-normal">{{ t('col_actions') }}</th>
                 </tr>
               </thead>
-              <tbody class="max-md:block">
+              <ReorderList
+                tag="tbody"
+                class="max-md:block"
+                :items="plugins"
+                :item-key="(p) => p.name"
+                :reorderable="(p) => p.declared"
+                @move="(from, to) => {
+                  const name = declaredOrder[from]
+                  return name === undefined ? undefined : movePlugin(name, to)
+                }"
+                v-slot="{ item: p, itemAttrs }"
+              >
                 <!--
                   Draggable rows: only a declared row has a `plugins.toml`
-                  position to drop into, so the handle and the drag
-                  attributes are conditional on `p.declared` — an
-                  `undeclared_binary` or `missing_binary` row's arrows are
-                  already hidden the same way. `dragover.prevent` is
-                  essential, or the browser refuses the drop. The handle,
+                  position to drop into, so only a declared row is
+                  reorderable (the list marks it through `itemAttrs`) and
+                  carries a handle — an `undeclared_binary` or
+                  `missing_binary` row's arrows are already hidden the same
+                  way. Only the handle starts a drag, with a finger or a
+                  mouse; the rest of the row stays free to scroll. The list
+                  reports positions among the declared rows. The handle,
                   the admin link and the order arrows live inside the
                   plugin cell rather than in columns of their own: that is
                   what brought the table from eight columns down to six,
                   and the e2e journey locks the header at six.
                 -->
                 <tr
-                  v-for="p in plugins"
-                  :key="p.name"
+                  v-bind="itemAttrs"
                   data-plugin-row
                   class="border-t border-border max-md:flex max-md:flex-wrap max-md:items-center max-md:gap-x-3 max-md:gap-y-1 max-md:py-2 max-md:after:order-3 max-md:after:basis-full max-md:after:content-['']"
-                  :class="p.declared && draggingPlugin === p.name ? 'opacity-50' : ''"
-                  :draggable="p.declared"
-                  @dragstart="p.declared && (draggingPlugin = p.name)"
-                  @dragover.prevent
-                  @drop.prevent="p.declared && dropPlugin(p.name)"
-                  @dragend="draggingPlugin = null"
                 >
                   <td class="py-1 max-md:order-1 max-md:min-w-0 max-md:grow max-md:py-0">
                     <!-- The handle sits beside the name, not inside
@@ -1465,17 +1448,15 @@ function goTo(id: string) {
                          by it and the journey by the name's exact text, never
                          by the cell's accessible name: that name now also
                          carries the admin link's word and the arrows' labels). The
-                         handle is `aria-hidden` because dragging is
-                         decorative and keyboard-inaccessible either way —
-                         the arrows are the real affordance for anyone not
-                         using a pointer. -->
-                    <span
+                         handle is a pointer affordance and
+                         keyboard-inaccessible either way — the arrows are
+                         the real affordance for anyone not using a
+                         pointer. -->
+                    <ReorderHandle
                       v-if="p.declared"
-                      class="cursor-grab select-none pr-1"
                       :title="t('reorder_hint')"
-                      aria-hidden="true"
                       data-plugin-drag-handle
-                    >⠿</span>
+                    />
                     <span data-plugin-name>{{ p.name }}</span>
                     <!-- The admin page, as an icon beside the name: it used
                          to be a column of its own, mostly dashes. Named by
@@ -1773,7 +1754,7 @@ function goTo(id: string) {
                     </div>
                   </td>
                 </tr>
-              </tbody>
+              </ReorderList>
             </table>
             <p class="mt-2 text-xs text-muted-foreground">{{ t('plugin_order_note') }}</p>
             <!-- Its own screen, behind its own button: choosing to ADD a
