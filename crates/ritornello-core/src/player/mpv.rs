@@ -427,6 +427,12 @@ impl AsideGate {
         self.inside && !self.loading
     }
 
+    /// Whether a real load was sent whose `start-file` has not come yet:
+    /// nothing may replace it (`chime_route`).
+    pub(crate) fn loading(&self) -> bool {
+        self.loading
+    }
+
     /// Whether `line` (an event, never a response) reaches the core. When it
     /// does, `take_replay` gives what must follow it.
     pub(crate) fn admit(&mut self, line: &Value) -> bool {
@@ -1134,13 +1140,33 @@ impl super::Player for MpvPlayer {
     /// `start-file` may have been read meanwhile; otherwise the rare chime
     /// sent in those few milliseconds goes by mpv's own answer (most often
     /// `idle-active` true still: replaced as well).
+    ///
+    /// **A real load in flight is never replaced.** From a `play` or
+    /// `load_list` until its `start-file`, mpv may still answer
+    /// `idle-active` true (a load from idle or standby), and an `Idle` would
+    /// send a `replace` cutting the file just asked for. The answer is
+    /// `Silent`, without a question; and again after mpv's answer, should a
+    /// load have been sent meanwhile. The chime is lost, never the load.
     async fn chime_route(&self) -> Result<super::ChimeRoute> {
         use super::ChimeRoute;
+        let settled = |route: ChimeRoute| {
+            let gate = self.gate();
+            if gate.loading() {
+                ChimeRoute::Silent
+            } else if gate.sounding_aside() {
+                ChimeRoute::Idle
+            } else {
+                route
+            }
+        };
+        if self.gate().loading() {
+            return Ok(ChimeRoute::Silent);
+        }
         if self.gate().sounding_aside() {
             return Ok(ChimeRoute::Idle);
         }
         let route = self.ask_chime_route().await?;
-        Ok(if self.gate().sounding_aside() { ChimeRoute::Idle } else { route })
+        Ok(settled(route))
     }
 
     /// The named `loadfile` measured by the lock-sound spike on mpv 0.37
@@ -2428,8 +2454,8 @@ pub(crate) mod tests {
             g.set_loading(true);
         })
         .await;
-        assert_eq!(route.unwrap(), live, "a real load on its way");
-        assert_eq!(sent.len(), 3, "{sent:?}");
+        assert_eq!(route.unwrap(), ChimeRoute::Silent, "a real load on its way is never replaced");
+        assert_eq!(sent, Vec::<Value>::new(), "{sent:?}");
         // The real file's `start-file` closes both: nothing is an aside.
         let mut gate = AsideGate::default();
         inside_an_aside(&mut gate);
@@ -2477,6 +2503,40 @@ pub(crate) mod tests {
                 server.await.unwrap();
             }
         }
+    }
+
+    /// A `play` from idle, then a lock change before that file's
+    /// `start-file`: mpv still answers `idle-active` true, but an `Idle`
+    /// would send a chime replacing the load just asked for. `Silent`, and
+    /// mpv not asked; the same when the load is sent while mpv is asked.
+    ///
+    /// **[MUTATION]** the `loading` checks removed from `chime_route` →
+    /// `Idle`: fails.
+    #[tokio::test]
+    async fn a_load_in_flight_is_never_replaced_by_a_chime() {
+        use crate::player::{ChimeRoute, Player};
+        let (route, sent) = route_with_gate(vec![("idle-active", json!(true))], |g| g.set_loading(true)).await;
+        assert_eq!(route.unwrap(), ChimeRoute::Silent);
+        assert_eq!(sent, Vec::<Value>::new(), "no question while a load is in flight");
+
+        // The load sent while mpv is being asked: the answer is re-read.
+        let (client, server) = UnixStream::pair().unwrap();
+        let (tx, _rx) = mpsc::channel(16);
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        let gate = player.ipc.gate.clone();
+        let server = tokio::spawn(async move {
+            let (r, mut w) = server.into_split();
+            let mut lines = BufReader::new(r).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let req: Value = serde_json::from_str(&line).unwrap();
+                gate.lock().unwrap().set_loading(true);
+                let resp = json!({"data": true, "request_id": req["request_id"], "error": "success"});
+                w.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+            }
+        });
+        assert_eq!(player.chime_route().await.unwrap(), ChimeRoute::Silent);
+        drop(player);
+        server.await.unwrap();
     }
 
     /// Armed when asked, inside once mpv has answered: the chime's
