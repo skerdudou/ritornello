@@ -33,6 +33,11 @@ pub(super) struct FakePlayer {
     /// When true, `set_ytdl` fails — the IPC timeout, or an mpv that
     /// refuses the option.
     pub(super) ytdl_fails: Arc<std::sync::atomic::AtomicBool>,
+    /// When true, `set_audio_filters` fails — the chain write mpv never
+    /// confirmed.
+    pub(super) af_fails: Arc<std::sync::atomic::AtomicBool>,
+    /// When true, `audio_filter_command` fails.
+    pub(super) af_cmd_fails: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[async_trait::async_trait]
@@ -107,6 +112,9 @@ impl crate::player::Player for FakePlayer {
     }
     async fn set_audio_filters(&self, chain: &str) -> anyhow::Result<()> {
         self.calls.lock().unwrap().push(format!("af {chain}"));
+        if self.af_fails.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("mpv: command timeout");
+        }
         Ok(())
     }
     async fn audio_filter_command(&self, cmd: &crate::equalizer::AfCommand) -> anyhow::Result<()> {
@@ -114,6 +122,9 @@ impl crate::player::Player for FakePlayer {
             .lock()
             .unwrap()
             .push(format!("af_cmd {} {} {} {}", cmd.label, cmd.command, cmd.arg, cmd.target));
+        if self.af_cmd_fails.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("mpv: command timeout");
+        }
         Ok(())
     }
     async fn set_ytdl(&self, path: Option<&std::path::Path>) -> anyhow::Result<()> {

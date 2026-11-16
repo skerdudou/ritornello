@@ -9,18 +9,26 @@
 //! Hence:
 //! - toggling `enabled` rewrites the chain (empty when disabled) — the only
 //!   rewrite tolerated during playback, a brief cut the design accepts;
-//! - otherwise, while enabled, one `af-command` per band whose gain moved,
-//!   then the preamp in steps of at most 1 dB, one every `RAMP_STEP`;
-//! - while disabled, nothing reaches mpv at all: the chain is empty, there is
-//!   no filter to command;
+//! - otherwise, while enabled, one `af-command` per band whose gain differs
+//!   from what mpv holds, and the preamp in steps of at most 1 dB, one every
+//!   `RAMP_STEP`;
+//! - **never a boost before its attenuation**: when the preamp must go down
+//!   (more compensation), the ramp runs first and the bands follow its last
+//!   step; when it goes up or stays, the bands go first. Either way the
+//!   signal is never louder than the compensation allows in between;
+//! - while disabled, nothing reaches mpv: the chain is empty, there is no
+//!   filter to command;
 //! - at each file start (`reapply_equalizer`), the whole chain is rewritten
 //!   with the current gains and preamp: mpv rebuilds it then anyway, so it
-//!   costs no extra click.
+//!   costs no extra click. Disabled, nothing is written — unless an earlier
+//!   chain write failed (`eq_chain_stale`), and the empty chain is retried.
 //!
 //! The ramp is not a task of its own: like the sleep timer's fade, its
-//! state lives here and `main` wakes the core at `eq_ramp_deadline`. A new
-//! change replaces that state, starting from the last preamp actually sent
-//! (`eq_preamp_sent`) — that is how a running ramp is cancelled.
+//! state lives here and `main` wakes the core at `eq_ramp_deadline`. What
+//! mpv holds is tracked (`eq_preamp_sent`, `eq_bands_sent`): a new change
+//! replaces the ramp, starting from the last preamp actually sent — that is
+//! how a running ramp is cancelled — and keeps the running ramp's next step
+//! time, so steps stay `RAMP_STEP` apart however fast the changes come.
 
 use super::*;
 use std::collections::VecDeque;
@@ -33,6 +41,9 @@ const RAMP_STEP: Duration = Duration::from_millis(20);
 pub(super) struct PreampRamp {
     steps: VecDeque<f64>,
     next_step: tokio::time::Instant,
+    /// The bands wait for the last step: the preamp is going down, and a
+    /// boost sent before it would clip.
+    bands_after: bool,
 }
 
 impl<P: Player> Core<P> {
@@ -40,52 +51,82 @@ impl<P: Player> Core<P> {
     /// returned **after** the setting is saved: it is not lost, and the next
     /// file start rewrites the chain from it anyway.
     ///
-    /// The first preamp step goes out at once; the rest from
+    /// The first preamp step goes out at once when no ramp was running;
+    /// otherwise at the running ramp's next step. The rest from
     /// `on_eq_ramp_deadline`.
     #[cfg_attr(not(test), expect(dead_code, reason = "called by the HTTP route, not wired yet"))]
     pub async fn set_equalizer(&mut self, new: crate::equalizer::EqualizerSettings) -> Result<()> {
-        let old = std::mem::replace(&mut self.equalizer, new.clone());
-        let mut result = Ok(());
-        if old.enabled != new.enabled {
+        let old_enabled = self.equalizer.enabled;
+        self.equalizer = new;
+        let result = if old_enabled != self.equalizer.enabled {
             self.eq_ramp = None;
-            self.eq_preamp_sent = crate::equalizer::effective_preamp_db(&new);
-            result = self.player.set_audio_filters(&crate::equalizer::af_chain(&new)).await;
-        } else if new.enabled {
-            for (band, (&was, &now)) in old.gains.iter().zip(&new.gains).enumerate() {
-                if was != now {
-                    let sent = self.player.audio_filter_command(&crate::equalizer::band_command(band, now)).await;
-                    if result.is_ok() {
-                        result = sent;
-                    }
-                }
+            self.write_chain().await
+        } else if self.equalizer.enabled {
+            let target = crate::equalizer::effective_preamp_db(&self.equalizer);
+            let attenuating = target < self.eq_preamp_sent;
+            let mut result = Ok(());
+            if !attenuating {
+                result = self.send_bands().await;
             }
-            let target = crate::equalizer::effective_preamp_db(&new);
             let steps: VecDeque<f64> = crate::equalizer::preamp_ramp(self.eq_preamp_sent, target).into();
-            self.eq_ramp = (!steps.is_empty())
-                .then(|| PreampRamp { steps, next_step: tokio::time::Instant::now() });
+            let next_step = match &self.eq_ramp {
+                Some(running) => running.next_step,
+                None => tokio::time::Instant::now(),
+            };
+            self.eq_ramp = (!steps.is_empty()).then_some(PreampRamp { steps, next_step, bands_after: attenuating });
             let sent = self.send_preamp_step().await;
-            if result.is_ok() {
-                result = sent;
-            }
-        }
+            result.and(sent)
+        } else {
+            Ok(())
+        };
         self.persist();
         result
     }
 
     /// A file is starting: rewrite the chain with the current gains and
     /// preamp, which mpv would otherwise rebuild without what `af-command`
-    /// set. A running ramp is moot then: the chain carries its target.
-    /// Disabled: nothing, the chain is already empty.
+    /// set. A running ramp and pending bands are moot then: the chain
+    /// carries their targets. Disabled: nothing, unless the last chain write
+    /// failed — the empty chain is then retried.
     pub async fn reapply_equalizer(&mut self) {
-        if !self.equalizer.enabled {
+        if !self.equalizer.enabled && !self.eq_chain_stale {
             return;
         }
         self.eq_ramp = None;
-        self.eq_preamp_sent = crate::equalizer::effective_preamp_db(&self.equalizer);
-        let chain = crate::equalizer::af_chain(&self.equalizer);
-        if let Err(e) = self.player.set_audio_filters(&chain).await {
+        if let Err(e) = self.write_chain().await {
             tracing::warn!("equalizer at file start: {e}");
         }
+    }
+
+    /// Writes the whole chain of the current setting (empty when disabled)
+    /// and records what mpv then holds. A failure leaves the chain stale.
+    async fn write_chain(&mut self) -> Result<()> {
+        let result = self.player.set_audio_filters(&crate::equalizer::af_chain(&self.equalizer)).await;
+        self.eq_chain_stale = result.is_err();
+        self.eq_preamp_sent = crate::equalizer::effective_preamp_db(&self.equalizer);
+        self.eq_bands_sent = self.equalizer.gains;
+        result
+    }
+
+    /// One `af-command` per band whose gain differs from what mpv holds.
+    /// Every band is tried; the first error is returned.
+    async fn send_bands(&mut self) -> Result<()> {
+        let mut result = Ok(());
+        for band in 0..self.eq_bands_sent.len() {
+            let gain = self.equalizer.gains[band];
+            if self.eq_bands_sent[band] == gain {
+                continue;
+            }
+            match self.player.audio_filter_command(&crate::equalizer::band_command(band, gain)).await {
+                Ok(()) => self.eq_bands_sent[band] = gain,
+                Err(e) => {
+                    if result.is_ok() {
+                        result = Err(e);
+                    }
+                }
+            }
+        }
+        result
     }
 
     /// When `main` must wake the core for the next preamp step.
@@ -101,9 +142,9 @@ impl<P: Player> Core<P> {
         }
     }
 
-    /// Sends the ramp's next step if it is due, and schedules the one after.
-    /// A failed step abandons the ramp: the next file start rewrites the
-    /// whole chain anyway.
+    /// Sends the ramp's next step if it is due, and schedules the one after;
+    /// after the last one, the bands that waited for it. A failed step
+    /// abandons the ramp: the next file start rewrites the whole chain.
     async fn send_preamp_step(&mut self) -> Result<()> {
         let now = tokio::time::Instant::now();
         let Some(ramp) = self.eq_ramp.as_mut() else { return Ok(()) };
@@ -115,19 +156,20 @@ impl<P: Player> Core<P> {
             return Ok(());
         };
         ramp.next_step = now + RAMP_STEP;
-        if ramp.steps.is_empty() {
+        let last = ramp.steps.is_empty();
+        let bands_after = ramp.bands_after;
+        if let Err(e) = self.player.audio_filter_command(&crate::equalizer::preamp_command(db)).await {
             self.eq_ramp = None;
+            return Err(e);
         }
-        match self.player.audio_filter_command(&crate::equalizer::preamp_command(db)).await {
-            Ok(()) => {
-                self.eq_preamp_sent = db;
-                Ok(())
-            }
-            Err(e) => {
-                self.eq_ramp = None;
-                Err(e)
+        self.eq_preamp_sent = db;
+        if last {
+            self.eq_ramp = None;
+            if bands_after {
+                return self.send_bands().await;
             }
         }
+        Ok(())
     }
 }
 
@@ -136,6 +178,7 @@ mod tests {
     use super::*;
     use crate::core::test_support::*;
     use crate::equalizer::{af_chain, effective_preamp_db, preamp_command, EqualizerSettings};
+    use std::sync::atomic::Ordering;
     use std::sync::Mutex;
 
     fn enabled() -> EqualizerSettings {
@@ -158,14 +201,13 @@ mod tests {
         calls.lock().unwrap().clone()
     }
 
+    fn preamp_of(call: &str) -> Option<f64> {
+        call.strip_prefix("af_cmd eqpre volume ")?.strip_suffix("dB volume")?.parse().ok()
+    }
+
     /// The preamp values sent, in order.
     fn preamps(calls: &Mutex<Vec<String>>) -> Vec<f64> {
-        calls
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|c| c.strip_prefix("af_cmd eqpre volume ")?.strip_suffix("dB volume")?.parse().ok())
-            .collect()
+        calls.lock().unwrap().iter().filter_map(|c| preamp_of(c)).collect()
     }
 
     fn band_calls(calls: &Mutex<Vec<String>>) -> Vec<String> {
@@ -176,18 +218,22 @@ mod tests {
         calls.lock().unwrap().iter().filter(|c| c.starts_with("af ")).cloned().collect()
     }
 
+    fn preamp_call(db: f64) -> String {
+        format!("af_cmd eqpre volume {} volume", preamp_command(db).arg)
+    }
+
     /// Runs the ramp to its end, one step per `RAMP_STEP`, checking that a
     /// wake-up before a step is due sends nothing.
     async fn run_ramp(core: &mut Core<FakePlayer>, calls: &Mutex<Vec<String>>) {
         let mut guard = 0;
         while core.eq_ramp_deadline().is_some() {
-            let before = calls.lock().unwrap().len();
+            let before = preamps(calls).len();
             tokio::time::advance(RAMP_STEP - Duration::from_millis(1)).await;
             core.on_eq_ramp_deadline().await;
-            assert_eq!(calls.lock().unwrap().len(), before, "a step before its 20 ms");
+            assert_eq!(preamps(calls).len(), before, "a step before its 20 ms");
             tokio::time::advance(Duration::from_millis(1)).await;
             core.on_eq_ramp_deadline().await;
-            assert_eq!(calls.lock().unwrap().len(), before + 1, "one step per 20 ms");
+            assert_eq!(preamps(calls).len(), before + 1, "one step per 20 ms");
             guard += 1;
             assert!(guard < 100, "the ramp never ends");
         }
@@ -230,7 +276,6 @@ mod tests {
         let (mut core, calls, _sc, _rx, dir) = launched_with(enabled());
         let new = with_band(enabled(), 5, 6);
         core.set_equalizer(new.clone()).await.unwrap();
-        assert_eq!(calls_of(&calls)[0], "af_cmd eq5 g 6 equalizer");
         run_ramp(&mut core, &calls).await;
 
         assert_eq!(band_calls(&calls), vec!["af_cmd eq5 g 6 equalizer".to_string()]);
@@ -239,9 +284,38 @@ mod tests {
         assert!(target < -5.0, "{target}");
         let sent = preamps(&calls);
         assert!(sent.len() >= 6, "{sent:?}");
-        assert_eq!(calls_of(&calls).last().unwrap(), &format!("af_cmd eqpre volume {} volume", preamp_command(target).arg));
+        assert_eq!(*sent.last().unwrap(), preamp_of(&preamp_call(target)).unwrap());
         assert_gentle(0.0, &sent);
         assert_eq!(disk_equalizer(&dir), new);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_boost_waits_for_its_attenuation_and_a_cut_goes_first() {
+        let (mut core, calls, _sc, _rx, _dir) = launched_with(enabled());
+        let boosted = with_band(enabled(), 5, 12);
+        core.set_equalizer(boosted.clone()).await.unwrap();
+        run_ramp(&mut core, &calls).await;
+        let all = calls_of(&calls);
+        let target = effective_preamp_db(&boosted);
+        // The boost only once the whole attenuation is in place.
+        assert_eq!(
+            all[all.len() - 2..],
+            [preamp_call(target), "af_cmd eq5 g 12 equalizer".to_string()],
+            "{all:?}"
+        );
+        assert_eq!(band_calls(&calls).len(), 1, "{all:?}");
+        assert!(preamps(&calls).len() >= 12, "{all:?}");
+
+        // Back down: the cut first, then the preamp climbs.
+        calls.lock().unwrap().clear();
+        core.set_equalizer(enabled()).await.unwrap();
+        run_ramp(&mut core, &calls).await;
+        let all = calls_of(&calls);
+        assert_eq!(all[0], "af_cmd eq5 g 0 equalizer", "{all:?}");
+        assert_eq!(band_calls(&calls).len(), 1, "{all:?}");
+        let sent = preamps(&calls);
+        assert_eq!(*sent.last().unwrap(), 0.0);
+        assert_gentle(preamp_of(&preamp_call(target)).unwrap(), &sent);
     }
 
     #[tokio::test(start_paused = true)]
@@ -261,11 +335,41 @@ mod tests {
 
         let sent = preamps(&calls);
         let target = effective_preamp_db(&second);
-        assert_eq!(calls_of(&calls).last().unwrap(), &format!("af_cmd eqpre volume {} volume", preamp_command(target).arg));
+        assert_eq!(calls_of(&calls).last().unwrap(), &preamp_call(target));
         // The second ramp starts where the first one stood, not where the
         // first was heading.
         assert_gentle(0.0, &sent);
         assert!(sent.iter().all(|v| *v >= -4.5), "the first ramp went on: {sent:?}");
+        // The pending +12 never reached mpv; the new setting's band did.
+        assert_eq!(band_calls(&calls), vec!["af_cmd eq4 g 3 equalizer".to_string()]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn changes_in_quick_succession_keep_steps_20_ms_apart() {
+        let (mut core, calls, _sc, _rx, _dir) = launched_with(enabled());
+        let start = tokio::time::Instant::now();
+        let mut times: Vec<Duration> = Vec::new();
+        let note = |calls: &Mutex<Vec<String>>, times: &mut Vec<Duration>| {
+            for _ in times.len()..preamps(calls).len() {
+                times.push(tokio::time::Instant::now() - start);
+            }
+        };
+        core.set_equalizer(with_band(enabled(), 5, 6)).await.unwrap();
+        note(&calls, &mut times);
+        tokio::time::advance(Duration::from_millis(5)).await;
+        core.set_equalizer(with_band(enabled(), 5, 12)).await.unwrap();
+        note(&calls, &mut times);
+        for _ in 0..500 {
+            tokio::time::advance(Duration::from_millis(1)).await;
+            core.on_eq_ramp_deadline().await;
+            note(&calls, &mut times);
+        }
+        assert_eq!(core.eq_ramp_deadline(), None);
+        assert!(times.len() >= 12, "{times:?}");
+        for pair in times.windows(2) {
+            assert!(pair[1] - pair[0] >= RAMP_STEP, "steps too close: {times:?}");
+        }
+        assert_gentle(0.0, &preamps(&calls));
     }
 
     #[tokio::test(start_paused = true)]
@@ -275,9 +379,27 @@ mod tests {
         core.set_equalizer(new.clone()).await.unwrap();
         tokio::time::advance(Duration::from_secs(1)).await;
         core.on_eq_ramp_deadline().await;
+        core.handle_event(Event::FileStarting).await;
         assert!(calls_of(&calls).is_empty(), "{:?}", calls_of(&calls));
         assert_eq!(core.eq_ramp_deadline(), None);
         assert_eq!(disk_equalizer(&dir), new);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn disabling_mid_ramp_stops_the_ramp() {
+        let (mut core, calls, _sc, _rx, _dir) = launched_with(enabled());
+        core.set_equalizer(with_band(enabled(), 5, 12)).await.unwrap();
+        tokio::time::advance(RAMP_STEP).await;
+        core.on_eq_ramp_deadline().await;
+        assert_eq!(preamps(&calls).len(), 2);
+        core.set_equalizer(EqualizerSettings { enabled: false, ..with_band(enabled(), 5, 12) }).await.unwrap();
+        for _ in 0..50 {
+            tokio::time::advance(RAMP_STEP).await;
+            core.on_eq_ramp_deadline().await;
+        }
+        let all = calls_of(&calls);
+        assert_eq!(all.last().unwrap(), "af ", "{all:?}");
+        assert_eq!(core.eq_ramp_deadline(), None);
     }
 
     #[tokio::test(start_paused = true)]
@@ -297,6 +419,56 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn auto_preamp_on_ramps_down_from_zero() {
+        let manual = EqualizerSettings { auto_preamp: false, ..with_band(enabled(), 5, 6) };
+        let (mut core, calls, _sc, _rx, _dir) = launched_with(manual.clone());
+        let auto = EqualizerSettings { auto_preamp: true, ..manual };
+        core.set_equalizer(auto.clone()).await.unwrap();
+        run_ramp(&mut core, &calls).await;
+
+        assert!(band_calls(&calls).is_empty(), "{:?}", calls_of(&calls));
+        assert!(chain_calls(&calls).is_empty(), "{:?}", calls_of(&calls));
+        let sent = preamps(&calls);
+        assert!(sent.len() >= 6, "{sent:?}");
+        assert_eq!(*sent.last().unwrap(), preamp_of(&preamp_call(effective_preamp_db(&auto))).unwrap());
+        assert_gentle(0.0, &sent);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_player_error_mid_ramp_ends_it_and_keeps_the_setting() {
+        let (mut core, calls, _sc, _rx, dir) = launched_with(enabled());
+        let new = with_band(enabled(), 5, 12);
+        core.set_equalizer(new.clone()).await.unwrap();
+        core.player.af_cmd_fails.store(true, Ordering::SeqCst);
+        tokio::time::advance(RAMP_STEP).await;
+        core.on_eq_ramp_deadline().await;
+        assert_eq!(core.eq_ramp_deadline(), None);
+        let n = calls_of(&calls).len();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        core.on_eq_ramp_deadline().await;
+        assert_eq!(calls_of(&calls).len(), n, "nothing more after the failure");
+        assert_eq!(disk_equalizer(&dir), new);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_disable_is_repaired_at_the_next_file_start() {
+        let (mut core, calls, _sc, _rx, dir) = launched_with(with_band(enabled(), 5, 6));
+        core.player.af_fails.store(true, Ordering::SeqCst);
+        let off = EqualizerSettings { enabled: false, ..with_band(enabled(), 5, 6) };
+        assert!(core.set_equalizer(off.clone()).await.is_err());
+        assert_eq!(disk_equalizer(&dir), off, "saved despite the error");
+
+        core.player.af_fails.store(false, Ordering::SeqCst);
+        calls.lock().unwrap().clear();
+        core.handle_event(Event::FileStarting).await;
+        assert_eq!(calls_of(&calls), vec!["af ".to_string()]);
+        // Repaired: a healthy disabled equalizer costs nothing per file.
+        calls.lock().unwrap().clear();
+        core.handle_event(Event::FileStarting).await;
+        assert!(calls_of(&calls).is_empty(), "{:?}", calls_of(&calls));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn file_start_rewrites_the_chain_with_current_gains() {
         let (mut core, calls, _sc, _rx, _dir) = launched_with(enabled());
         let current = with_band(with_band(enabled(), 5, 6), 0, -3);
@@ -307,12 +479,13 @@ mod tests {
         assert_eq!(core.eq_ramp_deadline(), None, "the chain carries the target preamp");
 
         // A later change ramps from the chain's preamp, not from where the
-        // abandoned ramp stood.
+        // abandoned ramp stood, and sends only the band that moved since.
         calls.lock().unwrap().clear();
         let next = with_band(current.clone(), 0, -2);
         core.set_equalizer(next.clone()).await.unwrap();
         run_ramp(&mut core, &calls).await;
         assert_gentle(effective_preamp_db(&current), &preamps(&calls));
+        assert_eq!(band_calls(&calls), vec!["af_cmd eq0 g -2 equalizer".to_string()]);
 
         let (mut core, calls, _sc, _rx, _dir) = launched_with(EqualizerSettings::default());
         core.handle_event(Event::FileStarting).await;
