@@ -242,6 +242,20 @@ mod tests {
     }
 
     #[test]
+    fn the_list_cache_reads_an_entry_written_with_whole_second_lengths() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = ListCache::new(dir.path());
+        std::fs::create_dir_all(dir.path().join("lists")).unwrap();
+        std::fs::write(
+            dir.path().join("lists/PLx.json"),
+            r#"[{"extractor":"Youtube","id":"a","title":"A","duration":3,"available":true,"thumbnail_jpg":null,"url":null}]"#,
+        )
+        .unwrap();
+        let loaded = cache.load("PLx").expect("an old cache still reads");
+        assert_eq!((loaded[0].id.as_str(), loaded[0].duration_ms), ("a", None));
+    }
+
+    #[test]
     fn a_web_entry_keeps_its_site_and_identity_and_a_youtube_one_writes_neither() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("entries.toml");
@@ -305,7 +319,7 @@ mod tests {
             extractor: "Youtube".into(),
             id: "a".into(),
             title: "A".into(),
-            duration: Some(3),
+            duration_ms: Some(3_000),
             available: true,
             thumbnail_jpg: None,
             url: None,

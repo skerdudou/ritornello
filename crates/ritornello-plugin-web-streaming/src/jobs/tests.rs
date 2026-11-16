@@ -267,7 +267,7 @@ async fn the_view_round_trips_through_json_with_rows_of_every_state() {
                 format: Format::Mp3,
                 cover: CoverMode::Embedded,
                 names: [(1, "Mine".to_string())].into(),
-                trims: [(1, crate::download::Trim { start: Some(83), end: None })].into(),
+                trims: [(1, crate::download::Trim { start_ms: Some(83_500), end_ms: None })].into(),
             },
         }],
     };
@@ -302,6 +302,37 @@ async fn a_job_left_running_by_a_previous_run_is_failed_and_ids_go_on() {
         assert_eq!(view.jobs[0].rows[0].state, VideoState::Failed("interrupted by a restart".into()));
     }
     assert_eq!(jobs.enqueue(vec![1], target()), 42);
+}
+
+#[tokio::test]
+async fn a_jobs_file_written_with_whole_second_cuts_still_loads() {
+    // The shape is a serialised finished job of this version, its cut edited
+    // back to what a device holds from before cuts carried milliseconds.
+    let data = tempfile::tempdir().unwrap();
+    let old = JobsView {
+        jobs: vec![Job {
+            id: 7,
+            presets: vec![1],
+            target: target(),
+            state: JobState::Done,
+            rows: vec![Row { preset: 1, id: "a".into(), title: "A".into(), state: VideoState::Done, percent: Some(100.0), notes: Vec::new() }],
+            options: JobOptions { trims: [(1, crate::download::Trim { start_ms: Some(1), end_ms: Some(2) })].into(), ..JobOptions::default() },
+        }],
+    };
+    let text = serde_json::to_string(&old).unwrap();
+    let old_cut = r#""trims":{"1":{"start":83,"end":300}}"#;
+    let new_cut = r#""trims":{"1":{"start_ms":1,"end_ms":2}}"#;
+    assert!(text.contains(new_cut), "{text}");
+    std::fs::write(data.path().join("jobs.json"), text.replace(new_cut, old_cut)).unwrap();
+    let ctx = Ctx { ytdlp: Arc::new(Ytdlp::new(data.path())), lists: ListCache::new(data.path()), limits: Limits::default() };
+    let refuse: Resolver = Arc::new(|_| Box::pin(async { Err(TargetError::NotMounted) }));
+    let jobs = Jobs::start(data.path(), Arc::new(AsyncRwLock::new(Entries::default())), ctx, refuse);
+    let view = jobs.view();
+    let view = view.lock().unwrap();
+    assert_eq!(view.jobs.len(), 1, "the history is kept");
+    assert_eq!(view.jobs[0].id, 7);
+    assert_eq!(view.jobs[0].state, JobState::Done);
+    assert!(view.jobs[0].options.trims.get(&1).copied().unwrap_or_default().is_whole(), "the old cut reads as none");
 }
 
 #[tokio::test]

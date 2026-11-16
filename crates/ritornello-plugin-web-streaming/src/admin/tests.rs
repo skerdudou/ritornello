@@ -711,11 +711,11 @@ async fn a_cut_is_refused_without_ffmpeg_and_nothing_is_queued() {
     w.until("probed", |d| d["capabilities"]["ffmpeg_hint"] != Value::Null).await;
     w.entries.write().await.entry = vec![entry(1, VIDEO, Kind::Video)];
     let target = json!({ "root": "nas", "path": "" });
-    let cut = json!({ "op": "download", "presets": [1], "target": target, "trims": { "1": { "start": 10, "end": 70 } } });
+    let cut = json!({ "op": "download", "presets": [1], "target": target, "trims": { "1": { "start_ms": 10000, "end_ms": 70000 } } });
     assert_eq!(key_of(w.op(cut).await), "trim_needs_ffmpeg");
     assert!(w.admin.get_data().await["jobs"].as_array().unwrap().is_empty(), "nothing was queued");
     // A "cut" that keeps everything is none, and needs nothing.
-    w.op(json!({ "op": "download", "presets": [1], "target": target, "trims": { "1": { "start": 0 } } })).await.unwrap();
+    w.op(json!({ "op": "download", "presets": [1], "target": target, "trims": { "1": { "start_ms": 0 } } })).await.unwrap();
 }
 
 #[tokio::test]
@@ -724,10 +724,10 @@ async fn a_cut_is_a_single_video_s_and_must_keep_something() {
     w.entries.write().await.entry = vec![entry(1, VIDEO, Kind::Video), entry(2, LIST, Kind::Playlist)];
     let target = json!({ "root": "nas", "path": "" });
     let refused = |trims: Value| json!({ "op": "download", "presets": [1, 2], "target": target, "trims": trims });
-    let r = w.op(refused(json!({ "2": { "end": 60 } }))).await;
+    let r = w.op(refused(json!({ "2": { "end_ms": 60000 } }))).await;
     assert_eq!(key_of(r.clone()), "trim_playlist");
     assert_eq!(r.unwrap_err(), keyed_with("trim_playlist", "preset", 2));
-    for empty in [json!({ "start": 60, "end": 60 }), json!({ "start": 61, "end": 60 }), json!({ "end": 0 })] {
+    for empty in [json!({ "start_ms": 60000, "end_ms": 60000 }), json!({ "start_ms": 61000, "end_ms": 60000 }), json!({ "end_ms": 0 })] {
         assert_eq!(key_of(w.op(refused(json!({ "1": empty }))).await), "trim_empty", "{empty}");
     }
     assert!(w.admin.get_data().await["jobs"].as_array().unwrap().is_empty(), "nothing was queued");
@@ -735,14 +735,24 @@ async fn a_cut_is_a_single_video_s_and_must_keep_something() {
     // dropped (the playlist's included: it is not downloaded here).
     w.op(json!({
         "op": "download", "presets": [1], "target": target,
-        "trims": { "1": { "start": 83, "end": 300 }, "2": { "end": 5 } },
+        "trims": { "1": { "start_ms": 83000, "end_ms": 300000 }, "2": { "end_ms": 5000 } },
     }))
     .await
     .unwrap();
-    w.op(json!({ "op": "download", "presets": [1], "target": target, "trims": { "1": { "start": 0 } } })).await.unwrap();
+    w.op(json!({ "op": "download", "presets": [1], "target": target, "trims": { "1": { "start_ms": 0 } } })).await.unwrap();
     let d = w.until("two jobs", |d| d["jobs"].as_array().unwrap().len() == 2).await;
-    assert_eq!(d["jobs"][0]["options"]["trims"], json!({ "1": { "start": 83, "end": 300 } }));
+    assert_eq!(d["jobs"][0]["options"]["trims"], json!({ "1": { "start_ms": 83000, "end_ms": 300000 } }));
     assert_eq!(d["jobs"][1]["options"].get("trims"), None);
+}
+
+#[tokio::test]
+async fn a_fractional_cut_is_accepted_and_kept_with_the_job() {
+    let (mut w, _sys) = world_with_ffmpeg("exit 1").await;
+    w.entries.write().await.entry = vec![entry(1, VIDEO, Kind::Video)];
+    let target = json!({ "root": "nas", "path": "" });
+    w.op(json!({ "op": "download", "presets": [1], "target": target, "trims": { "1": { "start_ms": 90250, "end_ms": 300000 } } })).await.unwrap();
+    let d = w.until("a job", |d| d["jobs"].as_array().unwrap().len() == 1).await;
+    assert_eq!(d["jobs"][0]["options"]["trims"], json!({ "1": { "start_ms": 90250, "end_ms": 300000 } }));
 }
 
 #[tokio::test]

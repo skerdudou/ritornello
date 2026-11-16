@@ -334,25 +334,37 @@ pub struct Choices {
     pub trim: Option<Trim>,
 }
 
-/// The part of a video to keep, in whole seconds from its start: either
-/// bound may be left out (from the start, to the end).
+/// The part of a video to keep, in milliseconds from its start: either
+/// bound may be left out (from the start, to the end). A `jobs.json` written
+/// when a cut carried whole seconds holds `start`/`end`, which no field reads
+/// any more: such a job loads with no cut (it is history, never run again).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Trim {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub start: Option<u32>,
+    pub start_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub end: Option<u32>,
+    pub end_ms: Option<u64>,
+}
+
+/// ffmpeg's time text for `ms` milliseconds: whole seconds print bare
+/// (`"83"`), otherwise seconds and a fraction without its trailing zeros
+/// (`"90.25"`, `"0.5"`, `"83.005"`).
+fn ffmpeg_time(ms: u64) -> String {
+    if ms.is_multiple_of(1000) {
+        return (ms / 1000).to_string();
+    }
+    format!("{}.{:03}", ms / 1000, ms % 1000).trim_end_matches('0').to_string()
 }
 
 impl Trim {
     /// Keeps everything: no cut to make.
     pub fn is_whole(self) -> bool {
-        self.start.unwrap_or(0) == 0 && self.end.is_none()
+        self.start_ms.unwrap_or(0) == 0 && self.end_ms.is_none()
     }
 
     /// Keeps nothing: an end at or before the start.
     pub fn is_empty(self) -> bool {
-        self.end.is_some_and(|end| end <= self.start.unwrap_or(0))
+        self.end_ms.is_some_and(|end| end <= self.start_ms.unwrap_or(0))
     }
 
     /// ffmpeg's output options for the cut, placed after the input: the
@@ -360,11 +372,11 @@ impl Trim {
     /// whole packets when copied, exact samples when encoded.
     fn args(self) -> Vec<String> {
         let mut args = Vec::new();
-        if let Some(start) = self.start.filter(|s| *s > 0) {
-            args.extend(["-ss".to_string(), start.to_string()]);
+        if let Some(start) = self.start_ms.filter(|s| *s > 0) {
+            args.extend(["-ss".to_string(), ffmpeg_time(start)]);
         }
-        if let Some(end) = self.end {
-            args.extend(["-to".to_string(), end.to_string()]);
+        if let Some(end) = self.end_ms {
+            args.extend(["-to".to_string(), ffmpeg_time(end)]);
         }
         args
     }
@@ -937,7 +949,7 @@ async fn contents(ctx: &Ctx, entry: &Entry) -> Result<Probe, String> {
                 extractor,
                 id: id.clone(),
                 title: entry.title.clone(),
-                duration: None,
+                duration_ms: None,
                 available: true,
                 thumbnail_jpg: None,
                 url: Some(url),
@@ -1104,8 +1116,8 @@ pub async fn download_preset(
         if (ctx.limits.ffmpeg)().is_none() {
             return PresetEnd::Failed(reason::NO_FFMPEG.into());
         }
-        let duration = probe.entries.first().and_then(|v| v.duration);
-        if trim.is_empty() || duration.is_some_and(|d| trim.start.unwrap_or(0) >= d) {
+        let duration_ms = probe.entries.first().and_then(|v| v.duration_ms);
+        if trim.is_empty() || duration_ms.is_some_and(|d| trim.start_ms.unwrap_or(0) >= d) {
             return PresetEnd::Failed(reason::TRIM_OUTSIDE.into());
         }
     }

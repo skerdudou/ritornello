@@ -82,7 +82,10 @@ pub struct Video {
     /// written into an identity string, never into a path or an address.
     pub id: String,
     pub title: String,
-    pub duration: Option<u32>,
+    /// The length in milliseconds, kept to the millisecond so a cut is judged
+    /// against it exactly. `None` when yt-dlp gave none (a cache written
+    /// before this field reads as `None` too).
+    pub duration_ms: Option<u64>,
     /// False for a live stream, for a declared availability other than
     /// public or unlisted, and on YouTube for `[Private video]` and
     /// `[Deleted video]`.
@@ -374,8 +377,8 @@ fn read_video(v: &Value) -> Option<Video> {
     let extractor = extractor_of(v);
     let title = v["title"].as_str().unwrap_or_default().to_string();
     // `duration` is an integer in a playlist entry and may be a float elsewhere.
-    let duration =
-        v["duration"].as_f64().filter(|d| *d >= 0.0 && *d <= f64::from(u32::MAX)).map(|d| d.round() as u32);
+    let duration_ms =
+        v["duration"].as_f64().filter(|d| *d >= 0.0 && *d <= f64::from(u32::MAX)).map(|d| (d * 1000.0).round() as u64);
     // `availability: null` is also what an available entry of a flat playlist
     // carries, so only a declared value other than public/unlisted refuses.
     let declared_ok = matches!(v["availability"].as_str(), None | Some("public") | Some("unlisted"));
@@ -384,7 +387,7 @@ fn read_video(v: &Value) -> Option<Video> {
     // The page's address before a flat entry's `url`: on a full answer `url`
     // is the chosen format's media address.
     let url = v["webpage_url"].as_str().or_else(|| v["url"].as_str()).map(str::to_string);
-    Some(Video { extractor, id, title, duration, available, thumbnail_jpg: largest_jpg(&v["thumbnails"]), url })
+    Some(Video { extractor, id, title, duration_ms, available, thumbnail_jpg: largest_jpg(&v["thumbnails"]), url })
 }
 
 /// The URL of the largest `.jpg` of a `thumbnails` array (the extension is
@@ -437,7 +440,7 @@ mod tests {
         let v = &p.entries[0];
         assert_eq!(v.id, "jNQXAC9IVRw");
         assert_eq!(v.title, "Me at the zoo");
-        assert_eq!(v.duration, Some(19));
+        assert_eq!(v.duration_ms, Some(19_000));
         assert!(v.available);
     }
 
@@ -451,7 +454,7 @@ mod tests {
         assert_eq!(p.entries.len(), 12);
         assert_eq!(p.entries[0].id, "fOT0BUpITw8");
         assert_eq!(p.entries[0].title, "BELLAKEO (Video Oficial) - Peso Pluma, Anitta");
-        assert_eq!(p.entries[0].duration, Some(235));
+        assert_eq!(p.entries[0].duration_ms, Some(235_000));
         assert!(p.entries.iter().all(|e| e.available));
         // Order is the file's, not sorted by anything.
         let raw: Value = serde_json::from_str(&fixture("playlist.json")).unwrap();
@@ -473,7 +476,7 @@ mod tests {
         // And `availability: null`, which yt-dlp also puts on available
         // entries of a flat playlist, is not a refusal.
         assert!(p.entries[0].available && p.entries[2].available && p.entries[4].available);
-        assert_eq!(p.entries[1].duration, None);
+        assert_eq!(p.entries[1].duration_ms, None);
     }
 
     #[test]
@@ -574,7 +577,8 @@ mod tests {
         assert_eq!((p.title.as_str(), p.channel.as_deref()), ("Flickermood", Some("Forss")));
         let v = &p.entries[0];
         assert_eq!(v.identity(), "Soundcloud:293");
-        assert_eq!(v.duration, Some(214));
+        // The capture's `"duration": 213.886` keeps its fraction.
+        assert_eq!(v.duration_ms, Some(213_886));
         assert!(v.available);
         assert_eq!(v.play_url().as_deref(), Some("https://soundcloud.com/forss/flickermood"));
         // On a full answer `url` is the chosen format's media address (removed
@@ -742,7 +746,7 @@ mod tests {
             extractor: YOUTUBE.into(),
             id: "dQw4w9WgXcQ".into(),
             title: String::new(),
-            duration: None,
+            duration_ms: None,
             available: true,
             thumbnail_jpg: None,
             url: Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ".into()),
