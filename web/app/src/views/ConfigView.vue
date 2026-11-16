@@ -5,7 +5,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Switch, toast,
 } from '@ritornello/ui'
 import {
-  DesktopIcon, DiscIcon, GearIcon, InfoCircledIcon, KeyboardIcon, QuestionMarkCircledIcon,
+  DesktopIcon, DiscIcon, GearIcon, InfoCircledIcon, KeyboardIcon, PlayIcon, QuestionMarkCircledIcon,
 } from '@radix-icons/vue'
 import { computed, onMounted, onUnmounted, ref, type Component } from 'vue'
 import { RouterLink } from 'vue-router'
@@ -24,6 +24,7 @@ import { predictedThumbnailBytes } from '../composables/coverWeight'
 import { languageName } from '../composables/languages'
 import { packSourceLabel } from '../composables/packSource'
 import { useCatalog } from '../composables/useCatalog'
+import { usePlayer } from '../composables/usePlayer'
 import { usePlugins } from '../composables/usePlugins'
 import type {
   Alarm, AudioPayload, ContractGap, LanguageBusy, LanguagePackRow, LocalePayload,
@@ -86,6 +87,7 @@ const settings = ref<SettingsPayload>({
   // Not edited on this page; sent back as read, and the core keeps its own
   // value across a PUT anyway.
   sleep_timer_mode: 'fade',
+  lock_sound: 'a',
   alarms: [],
 })
 
@@ -297,6 +299,29 @@ const dateFormatLabel = computed(() => {
   }
 })
 
+const LOCK_SOUNDS = ['a', 'b', 'c', 'd', 'e'] as const
+
+/** `A · Two notes`; `none` is its bare word. Reactive, see the note above. */
+function lockSoundText(v: string | undefined): string {
+  return !v || v === 'none' ? t.value('lock_sound_none') : `${v.toUpperCase()} · ${t.value(`lock_sound_${v}`)}`
+}
+const lockSoundLabel = computed(() => lockSoundText(settings.value.lock_sound))
+
+// The player's state decides whether a chime can be heard at all: the page
+// shows why nothing will sound rather than leaving a dead-looking button.
+const { state: player, ouvre: openPlayer } = usePlayer()
+const lockSoundNote = computed(() => {
+  if (player.value?.muted) return t.value('lock_sound_muted_note')
+  if (player.value?.playback === 'paused') return t.value('lock_sound_paused_note')
+  return null
+})
+
+/** Plays the value on screen on the device, saved or not. */
+async function previewLockSound() {
+  const err = await api.post('/api/lock-sound/preview', { sound: settings.value.lock_sound })
+  if (err) toast.error(err)
+}
+
 const clockHoursLabel = computed(() =>
   settings.value.clock_24h ? t.value('clock_24h') : t.value('clock_12h'),
 )
@@ -329,7 +354,10 @@ async function loadAll() {
   loadedFallback.value = fallback.value
 }
 
-onMounted(loadAll)
+onMounted(() => {
+  openPlayer()
+  return loadAll()
+})
 
 interface PluginRow {
   name: string
@@ -2088,6 +2116,26 @@ function goTo(id: string) {
                 <Input type="number" min="1" max="120" class="w-28" data-seek-step-s
                   v-model="settings.seek_step_s" />
               </label>
+            </div>
+
+            <div class="grid gap-1 border-t border-border pt-4 text-sm">
+              {{ t('lock_sound_label') }}
+              <div class="flex flex-wrap items-center gap-2">
+                <Select v-model="settings.lock_sound">
+                  <SelectTrigger class="min-w-56 max-w-full" data-lock-sound-select
+                    :aria-label="t('lock_sound_label')"><SelectValue>{{ lockSoundLabel }}</SelectValue></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">{{ t('lock_sound_none') }}</SelectItem>
+                    <SelectItem v-for="s in LOCK_SOUNDS" :key="s" :value="s">{{ lockSoundText(s) }}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Button type="button" variant="outline" size="icon" data-lock-sound-preview
+                  :aria-label="t('lock_sound_preview')" :title="t('lock_sound_preview')"
+                  :disabled="settings.lock_sound === 'none'" @click="previewLockSound">
+                  <PlayIcon class="size-4" />
+                </Button>
+              </div>
+              <p v-if="lockSoundNote" data-lock-sound-note class="text-sm text-muted-foreground">{{ lockSoundNote }}</p>
             </div>
 
             <Button data-player-change @click="saveSettings">{{ t('save') }}</Button>
