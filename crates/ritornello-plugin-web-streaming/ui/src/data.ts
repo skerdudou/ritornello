@@ -74,26 +74,31 @@ export interface Choices {
   trims: Record<string, Trim>
 }
 
-/** The part of a video kept, in whole seconds; a bound left out is its start or its end. */
+/** The part of a video kept, in milliseconds; a bound left out is its start or its end. */
 export interface Trim {
-  start?: number
-  end?: number
+  start_ms?: number
+  end_ms?: number
 }
 
 /**
- * A time as typed: seconds (`95`), `m:ss` (`1:35`) or `h:mm:ss`
- * (`1:01:35`). Empty is `null`, no bound; anything else that does not read
- * as a time is `undefined`. Past the first part, minutes and seconds stay
- * under 60: `1:75` is a typo, not 2:15.
+ * A time as typed, in milliseconds: seconds (`95`), `m:ss` (`1:35`) or
+ * `h:mm:ss` (`1:01:35`), the last part with up to three decimals after a
+ * point or a comma (`1:30.25`, `1:30,25`). Empty is `null`, no bound;
+ * anything else that does not read as a time is `undefined`. Past the first
+ * part, minutes and seconds stay under 60: `1:75` is a typo, not 2:15.
  */
-export function parseClock(text: string): number | null | undefined {
+export function parseClockMs(text: string): number | null | undefined {
   const typed = text.trim()
   if (!typed) return null
   const parts = typed.split(':')
-  if (parts.length > 3 || parts.some((p) => !/^\d+$/.test(p))) return undefined
-  const [first, ...rest] = parts.map(Number)
-  if (rest.some((n) => n >= 60)) return undefined
-  return rest.reduce((total, n) => total * 60 + n, first!)
+  if (parts.length > 3) return undefined
+  const last = parts[parts.length - 1]!
+  if (parts.slice(0, -1).some((p) => !/^\d+$/.test(p)) || !/^\d+(?:[.,]\d{1,3})?$/.test(last)) return undefined
+  const [whole = '', fraction = ''] = last.split(/[.,]/)
+  const wholes = [...parts.slice(0, -1), whole].map(Number)
+  if (wholes.slice(1).some((n) => n >= 60)) return undefined
+  const seconds = wholes.reduce((total, n) => total * 60 + n)
+  return seconds * 1000 + Number(fraction.padEnd(3, '0'))
 }
 
 export interface JobRow {

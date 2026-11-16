@@ -57,8 +57,8 @@ function drop(to: number): void {
     <p v-if="!rows.length" class="text-sm text-muted-foreground" data-entries-empty>
       {{ t('entries_empty') }}
     </p>
-    <table v-else class="w-full text-sm">
-      <thead class="text-muted-foreground">
+    <table v-else class="w-full text-sm max-md:block">
+      <thead class="text-muted-foreground max-md:hidden">
         <tr>
           <th class="w-8" />
           <th class="w-12 text-left font-normal">{{ t('col_num') }}</th>
@@ -66,11 +66,11 @@ function drop(to: number): void {
           <th class="w-28" />
         </tr>
       </thead>
-      <tbody>
+      <tbody class="max-md:block">
         <tr
           v-for="(r, i) in rows"
           :key="r.key"
-          class="border-t border-border"
+          class="border-t border-border max-md:flex max-md:flex-wrap max-md:items-center max-md:gap-x-2 max-md:gap-y-1 max-md:py-2 max-md:after:order-2 max-md:after:basis-full max-md:after:content-['']"
           :class="dragging === i ? 'opacity-50' : ''"
           draggable="true"
           data-entry-row
@@ -79,7 +79,7 @@ function drop(to: number): void {
           @drop.prevent="drop(i)"
           @dragend="dragging = null"
         >
-          <td class="py-1 pl-1">
+          <td class="py-1 pl-1 max-md:order-1">
             <input
               type="checkbox"
               class="size-4 cursor-pointer"
@@ -89,11 +89,11 @@ function drop(to: number): void {
               @change="emit('toggle', r.key)"
             />
           </td>
-          <td class="tabular-nums text-muted-foreground">
+          <td class="tabular-nums text-muted-foreground max-md:order-1 max-md:mr-auto">
             <span class="cursor-grab select-none pr-1" :title="t('reorder_hint')">⠿</span>
             <span data-entry-num>{{ i + 1 }}</span>
           </td>
-          <td class="py-1 pr-2">
+          <td class="py-1 pr-2 max-md:order-3 max-md:basis-full max-md:p-0">
             <Input v-model="r.title" data-entry-title />
             <!-- textContent only: titles, channels and sites come from remote data. -->
             <span class="text-xs text-muted-foreground" data-entry-detail>
@@ -103,7 +103,7 @@ function drop(to: number): void {
               <template v-if="r.channel"> · {{ r.channel }}</template>
             </span>
           </td>
-          <td class="whitespace-nowrap">
+          <td class="whitespace-nowrap max-md:order-1">
             <Button
               variant="ghost"
               size="icon"

@@ -411,6 +411,28 @@ describe('InstallablesDialog', () => {
       offer({ name: 'zed', kind: 'third_party', offered: '1.2.0', third_party_repo: 'z/zed', ...overrides })
     const row = (name: string) => document.body.querySelector(`[data-installable-row][data-name="${name}"]`)
 
+    it('a third-party repository address cannot widen the dialog', async () => {
+      // The address has no space to break at: the text column must be allowed
+      // to shrink (`min-w-0`, a grid item) and to break anywhere.
+      mountDialog([fresh({ third_party_repo: 'owner/' + 'x'.repeat(200) })])
+      await flushPromises()
+      const column = row('zed')!.querySelector('[data-installable-repo]')!.parentElement!
+      expect(column.classList).toContain('min-w-0')
+      expect(column.classList).toContain('wrap-anywhere')
+    })
+
+    it('a contested name\'s repository list cannot widen the dialog', async () => {
+      // The conflict sentence is a direct flex child of the row, outside the
+      // text column: it needs its own `min-w-0` and `wrap-anywhere`.
+      mountDialog([
+        offer({ name: 'dup', kind: 'third_party', installable: false, conflict_repos: ['a/' + 'x'.repeat(200), 'b/two'] }),
+      ])
+      await flushPromises()
+      const span = row('dup')!.querySelector('[data-installable-conflict]')!
+      expect(span.classList).toContain('min-w-0')
+      expect(span.classList).toContain('wrap-anywhere')
+    })
+
     // Spec §6: without a catalogue of its own, a stranger's offer is shown
     // by name, source and version — and its Install does not install: it
     // hands the page the name **and the repository** for the second consent.

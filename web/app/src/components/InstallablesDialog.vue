@@ -281,7 +281,7 @@ watch(
             :data-name="row.offer.name"
             class="flex items-start justify-between gap-2"
           >
-            <div class="grid gap-0.5 text-sm">
+            <div class="grid min-w-0 gap-0.5 text-sm wrap-anywhere">
               <span>{{ row.offer.name }}</span>
               <!-- Where a stranger's offer comes from, and which version:
                    with no catalogue of its own, that is all there is to say
@@ -319,7 +319,7 @@ watch(
             <span
               v-if="row.offer.conflict_repos"
               data-installable-conflict
-              class="text-xs text-muted-foreground"
+              class="min-w-0 text-xs text-muted-foreground wrap-anywhere"
             >{{ t('installables_conflict', { repos: row.offer.conflict_repos.join(', ') }) }}</span>
             <!-- The sentence follows why the row is refused: a release that
                  publishes no contracts for it says so whatever the row is

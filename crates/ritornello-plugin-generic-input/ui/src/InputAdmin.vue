@@ -3,8 +3,12 @@ import {
   api, Button, Card, CardContent, CardHeader, CardTitle, createT, Input, type Catalog,
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@ritornello/ui'
+import {
+  CheckIcon, DownloadIcon, EnterIcon, EraserIcon, ReloadIcon, TargetIcon, UploadIcon,
+} from '@radix-icons/vue'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import LearnDialog from './LearnDialog.vue'
+import PhoneIcon from './PhoneIcon.vue'
 import {
   ACTIONS, codesFor, collect, conflicts, parseField, presetToml, rowLabel, sanitiseDeviceName,
   sourceRows, type BindingTable, type Conflict, type Row,
@@ -461,12 +465,16 @@ function export_() {
            accessible name. -->
       <label class="text-sm text-muted-foreground">{{ t('device_label') }}</label>
       <Select v-model="device">
-        <SelectTrigger data-device-select class="min-w-64" :aria-label="t('device_label')"><SelectValue /></SelectTrigger>
+        <SelectTrigger data-device-select class="min-w-64 max-w-full" :aria-label="t('device_label')"><SelectValue /></SelectTrigger>
         <SelectContent>
           <SelectItem v-for="d in data.devices" :key="d" :value="d">{{ d }}</SelectItem>
         </SelectContent>
       </Select>
-      <Button variant="secondary" data-refresh @click="refresh">{{ t('btn_refresh') }}</Button>
+      <!-- Below `md` each text button is an icon named by `aria-label` and
+           `title`; the word stays in the DOM (see PhoneIcon). -->
+      <Button variant="secondary" data-refresh :aria-label="t('btn_refresh')" :title="t('btn_refresh')" @click="refresh">
+        <PhoneIcon :icon="ReloadIcon" :label="t('btn_refresh')" />
+      </Button>
     </div>
 
     <table class="w-full text-sm">
@@ -489,8 +497,12 @@ function export_() {
               {{ conflictText(conflictsByAction[i]!) }}
             </p>
           </td>
-          <td><Button variant="secondary" size="sm" data-learn @click="learn(i)">{{ t('btn_learn') }}</Button></td>
-          <td><Button variant="ghost" size="sm" data-clear @click="codes[i] = ''">{{ t('btn_clear') }}</Button></td>
+          <td><Button variant="secondary" size="sm" data-learn :aria-label="t('btn_learn')" :title="t('btn_learn')" @click="learn(i)">
+              <PhoneIcon :icon="TargetIcon" :label="t('btn_learn')" />
+            </Button></td>
+          <td><Button variant="ghost" size="sm" data-clear :aria-label="t('btn_clear')" :title="t('btn_clear')" @click="codes[i] = ''">
+              <PhoneIcon :icon="EraserIcon" :label="t('btn_clear')" />
+            </Button></td>
         </tr>
       </tbody>
     </table>
@@ -503,16 +515,22 @@ function export_() {
           <SelectItem v-for="p in data.presets" :key="p" :value="p">{{ p }}</SelectItem>
         </SelectContent>
       </Select>
-      <Button variant="secondary" @click="loadPreset">{{ t('btn_load_preset') }}</Button>
-      <label class="cursor-pointer rounded-md border border-border px-3 py-2 text-sm">
-        {{ t('btn_import') }}
+      <Button variant="secondary" data-load-preset :aria-label="t('btn_load_preset')" :title="t('btn_load_preset')" @click="loadPreset">
+        <PhoneIcon :icon="EnterIcon" :label="t('btn_load_preset')" />
+      </Button>
+      <label data-import-label class="cursor-pointer rounded-md border border-border px-3 py-2 text-sm" :title="t('btn_import')">
+        <PhoneIcon :icon="UploadIcon" :label="t('btn_import')" />
         <input type="file" accept=".toml" data-import class="hidden" @change="import_" />
       </label>
-      <Button variant="secondary" @click="export_">{{ t('btn_export') }}</Button>
+      <Button variant="secondary" data-export :aria-label="t('btn_export')" :title="t('btn_export')" @click="export_">
+        <PhoneIcon :icon="DownloadIcon" :label="t('btn_export')" />
+      </Button>
     </div>
 
     <div class="flex flex-wrap items-center gap-2">
-      <Button data-save :disabled="hasConflicts" @click="save">{{ t('btn_save') }}</Button>
+      <Button data-save :aria-label="t('btn_save')" :title="t('btn_save')" :disabled="hasConflicts" @click="save">
+        <PhoneIcon :icon="CheckIcon" :label="t('btn_save')" />
+      </Button>
       <span v-if="hasConflicts" data-save-blocked class="text-sm text-destructive">{{ t('save_conflicts') }}</span>
       <span class="text-sm text-muted-foreground">{{ message }}</span>
     </div>

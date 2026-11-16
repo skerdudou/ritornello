@@ -8,7 +8,7 @@ fn fixture_path(name: &str) -> PathBuf {
 }
 
 fn video(id: &str, title: &str, available: bool) -> Video {
-    Video { extractor: "Youtube".into(), id: id.into(), title: title.into(), duration: Some(1), available, thumbnail_jpg: None, url: None }
+    Video { extractor: "Youtube".into(), id: id.into(), title: title.into(), duration_ms: Some(1_000), available, thumbnail_jpg: None, url: None }
 }
 
 // ---- sanitize --------------------------------------------------------------
@@ -981,27 +981,37 @@ async fn a_conversion_that_runs_out_of_time_is_killed_and_said() {
 
 // ---- cutting ----------------------------------------------------------------
 
-fn cutting(format: Format, start: Option<u32>, end: Option<u32>) -> Choices {
-    Choices { trim: Some(Trim { start, end }), ..choosing(format, CoverMode::Separate) }
+fn cutting(format: Format, start_ms: Option<u64>, end_ms: Option<u64>) -> Choices {
+    Choices { trim: Some(Trim { start_ms, end_ms }), ..choosing(format, CoverMode::Separate) }
 }
 
 #[test]
 fn a_cut_is_two_output_options_and_leaves_out_what_keeps_everything() {
-    let cut = |start, end| Trim { start, end }.args().join(" ");
-    assert_eq!(cut(Some(83), Some(300)), "-ss 83 -to 300");
-    assert_eq!(cut(Some(83), None), "-ss 83");
-    assert_eq!(cut(None, Some(300)), "-to 300");
-    assert_eq!(cut(Some(0), Some(300)), "-to 300");
-    assert!(Trim { start: Some(0), end: None }.is_whole() && Trim::default().is_whole());
-    assert!(!Trim { start: Some(1), end: None }.is_whole() && !Trim { start: None, end: Some(9) }.is_whole());
-    for (start, end, empty) in [(Some(5), Some(5), true), (Some(6), Some(5), true), (None, Some(0), true), (Some(4), Some(5), false), (Some(9), None, false)] {
-        assert_eq!(Trim { start, end }.is_empty(), empty, "{start:?} {end:?}");
+    let cut = |start_ms, end_ms| Trim { start_ms, end_ms }.args().join(" ");
+    assert_eq!(cut(Some(83_000), Some(300_000)), "-ss 83 -to 300");
+    assert_eq!(cut(Some(83_000), None), "-ss 83");
+    assert_eq!(cut(None, Some(300_000)), "-to 300");
+    assert_eq!(cut(Some(0), Some(300_000)), "-to 300");
+    assert!(Trim { start_ms: Some(0), end_ms: None }.is_whole() && Trim::default().is_whole());
+    assert!(!Trim { start_ms: Some(1), end_ms: None }.is_whole() && !Trim { start_ms: None, end_ms: Some(9) }.is_whole());
+    for (start_ms, end_ms, empty) in
+        [(Some(5_000), Some(5_000), true), (Some(6_000), Some(5_000), true), (None, Some(0), true), (Some(4_000), Some(5_000), false), (Some(9_000), None, false), (Some(5_000), Some(5_001), false)]
+    {
+        assert_eq!(Trim { start_ms, end_ms }.is_empty(), empty, "{start_ms:?} {end_ms:?}");
     }
 }
 
 #[test]
+fn ffmpeg_reads_a_cut_to_the_millisecond() {
+    for (ms, text) in [(2_000, "2"), (90_250, "90.25"), (500, "0.5"), (83_005, "83.005"), (3_600_000, "3600")] {
+        assert_eq!(ffmpeg_time(ms), text, "{ms} ms");
+    }
+    assert_eq!(Trim { start_ms: Some(1_500), end_ms: Some(4_250) }.args().join(" "), "-ss 1.5 -to 4.25");
+}
+
+#[test]
 fn a_cut_copies_the_stream_and_a_conversion_takes_it_in_its_one_pass() {
-    let args = trim_args(Path::new("/d/a.webm"), Path::new("/d/.a.webm.trimming"), Trim { start: Some(2), end: Some(5) }, "webm");
+    let args = trim_args(Path::new("/d/a.webm"), Path::new("/d/.a.webm.trimming"), Trim { start_ms: Some(2_000), end_ms: Some(5_000) }, "webm");
     assert_eq!(
         args,
         [
@@ -1009,7 +1019,7 @@ fn a_cut_copies_the_stream_and_a_conversion_takes_it_in_its_one_pass() {
             "-vn", "-map", "0:a:0", "-ss", "2", "-to", "5", "-c", "copy", "-f", "webm", "-n", "file:/d/.a.webm.trimming",
         ]
     );
-    let args = conversion_args(Path::new("/d/a.webm"), Path::new("/d/.a.mp3.converting"), Format::Mp3, Some(Trim { start: Some(2), end: None }));
+    let args = conversion_args(Path::new("/d/a.webm"), Path::new("/d/.a.mp3.converting"), Format::Mp3, Some(Trim { start_ms: Some(2_000), end_ms: None }));
     assert!(args.join(" ").contains("-map 0:a:0 -ss 2 -c:a libmp3lame"), "{args:?}");
 }
 
@@ -1017,7 +1027,7 @@ fn a_cut_copies_the_stream_and_a_conversion_takes_it_in_its_one_pass() {
 async fn a_cut_of_the_site_s_format_copies_the_stream_in_place() {
     for (hook, format, ext, muxer) in [("EXT=webm", Format::Original, "webm", "webm"), ("EXT=m4a", Format::M4a, "m4a", "ipod")] {
         let w = with_ffmpeg(hook, "");
-        let (end, events) = run_choosing(&w.s, &zoo(), &cutting(format, Some(2), Some(5)), &Cancel::new()).await;
+        let (end, events) = run_choosing(&w.s, &zoo(), &cutting(format, Some(2_000), Some(5_000)), &Cancel::new()).await;
         assert_eq!(end, PresetEnd::Finished);
         assert_eq!(ended(&events), [(0, VideoState::Done)]);
         assert!(events.contains(&Event::Converting(0)) && notes(&events).is_empty(), "{events:?}");
@@ -1037,7 +1047,7 @@ async fn a_cut_of_the_site_s_format_copies_the_stream_in_place() {
 #[tokio::test]
 async fn a_cut_with_a_conversion_is_one_ffmpeg_run() {
     let w = with_ffmpeg("EXT=webm", "");
-    let (_, events) = run_choosing(&w.s, &zoo(), &cutting(Format::Mp3, None, Some(5)), &Cancel::new()).await;
+    let (_, events) = run_choosing(&w.s, &zoo(), &cutting(Format::Mp3, None, Some(5_000)), &Cancel::new()).await;
     assert!(notes(&events).is_empty(), "{events:?}");
     assert_eq!(files_in(&w.s.resolved.dir), ["Me at the zoo.jpg", "Me at the zoo.mp3"]);
     let ran = std::fs::read_to_string(&w.log).unwrap();
@@ -1048,7 +1058,7 @@ async fn a_cut_with_a_conversion_is_one_ffmpeg_run() {
 #[tokio::test]
 async fn a_cut_that_fails_keeps_the_whole_file_and_says_why() {
     let w = with_ffmpeg("EXT=webm", "echo 'Invalid duration' >&2; printf half > \"$out\"; exit 1");
-    let (end, events) = run_choosing(&w.s, &zoo(), &cutting(Format::Original, Some(2), None), &Cancel::new()).await;
+    let (end, events) = run_choosing(&w.s, &zoo(), &cutting(Format::Original, Some(2_000), None), &Cancel::new()).await;
     assert_eq!(end, PresetEnd::Finished);
     assert_eq!(ended(&events), [(0, VideoState::Done)]);
     assert_eq!(notes(&events), [Note::TrimFailed("Invalid duration".into())]);
@@ -1056,7 +1066,7 @@ async fn a_cut_that_fails_keeps_the_whole_file_and_says_why() {
     assert_eq!(std::fs::read(w.s.resolved.dir.join("Me at the zoo.webm")).unwrap(), b"audio", "the whole kept");
     // A failed conversion still leaves the cut to try, on the original.
     let w = with_ffmpeg("EXT=webm", "echo 'Unknown encoder libmp3lame' >&2; exit 1");
-    let (_, events) = run_choosing(&w.s, &zoo(), &cutting(Format::Mp3, Some(2), None), &Cancel::new()).await;
+    let (_, events) = run_choosing(&w.s, &zoo(), &cutting(Format::Mp3, Some(2_000), None), &Cancel::new()).await;
     assert_eq!(
         notes(&events),
         [Note::ConversionFailed("Unknown encoder libmp3lame".into()), Note::TrimFailed("Unknown encoder libmp3lame".into())]
@@ -1067,7 +1077,7 @@ async fn a_cut_that_fails_keeps_the_whole_file_and_says_why() {
 #[tokio::test]
 async fn a_container_never_measured_is_not_cut_and_said() {
     let w = with_ffmpeg("EXT=flac", "");
-    let (_, events) = run_choosing(&w.s, &zoo(), &cutting(Format::Original, Some(2), None), &Cancel::new()).await;
+    let (_, events) = run_choosing(&w.s, &zoo(), &cutting(Format::Original, Some(2_000), None), &Cancel::new()).await;
     assert_eq!(notes(&events), [Note::TrimFailed("a .flac file is not cut here".into())]);
     assert!(!w.log.exists(), "ffmpeg was not run");
     assert_eq!(std::fs::read(w.s.resolved.dir.join("Me at the zoo.flac")).unwrap(), b"audio");
@@ -1083,11 +1093,11 @@ async fn a_cut_that_cannot_be_made_fails_the_preset_before_any_download() {
     list.ctx.limits.ffmpeg = w.s.ctx.limits.ffmpeg.clone();
     let s = setup(&fixture_path("video.json"), "", None);
     let cases: [(&Setup, Entry, Choices, &str); 5] = [
-        (&list, playlist_entry(), cutting(Format::Original, Some(2), None), reason::TRIM_PLAYLIST),
-        (&s, zoo(), cutting(Format::Original, Some(2), None), reason::NO_FFMPEG),
-        (&w.s, zoo(), cutting(Format::Original, Some(19), None), reason::TRIM_OUTSIDE),
-        (&w.s, zoo(), cutting(Format::Original, Some(25), Some(30)), reason::TRIM_OUTSIDE),
-        (&w.s, zoo(), cutting(Format::Original, Some(5), Some(5)), reason::TRIM_OUTSIDE),
+        (&list, playlist_entry(), cutting(Format::Original, Some(2_000), None), reason::TRIM_PLAYLIST),
+        (&s, zoo(), cutting(Format::Original, Some(2_000), None), reason::NO_FFMPEG),
+        (&w.s, zoo(), cutting(Format::Original, Some(19_000), None), reason::TRIM_OUTSIDE),
+        (&w.s, zoo(), cutting(Format::Original, Some(25_000), Some(30_000)), reason::TRIM_OUTSIDE),
+        (&w.s, zoo(), cutting(Format::Original, Some(5_000), Some(5_000)), reason::TRIM_OUTSIDE),
     ];
     for (setup, entry, choices, why) in cases {
         let (end, events) = run_choosing(setup, &entry, &choices, &Cancel::new()).await;
@@ -1098,7 +1108,28 @@ async fn a_cut_that_cannot_be_made_fails_the_preset_before_any_download() {
         assert!(!setup.log.exists(), "nothing downloaded");
     }
     // Just inside the video, it goes through.
-    let (end, _) = run_choosing(&w.s, &zoo(), &cutting(Format::Original, Some(18), None), &Cancel::new()).await;
+    let (end, _) = run_choosing(&w.s, &zoo(), &cutting(Format::Original, Some(18_000), None), &Cancel::new()).await;
+    assert_eq!(end, PresetEnd::Finished);
+}
+
+#[tokio::test]
+async fn a_cut_starting_past_the_exact_length_is_refused_to_the_millisecond() {
+    // A probe of a 19.6 s video (the zoo capture with a fractional length,
+    // the way soundcloud's and bandcamp's captures carry one).
+    let mut probe: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(fixture_path("video.json")).unwrap()).unwrap();
+    probe["duration"] = serde_json::json!(19.6);
+    let dir = tempfile::tempdir().unwrap();
+    let probe_path = dir.path().join("video-19-6.json");
+    std::fs::write(&probe_path, probe.to_string()).unwrap();
+    let w = with_ffmpeg("EXT=webm", "");
+    let mut s = setup(&probe_path, "EXT=webm", Some(JPEG.to_vec()));
+    s.ctx.limits.ffmpeg = w.s.ctx.limits.ffmpeg.clone();
+    let past = cutting(Format::Original, Some(19_700), None);
+    let (end, events) = run_choosing(&s, &zoo(), &past, &Cancel::new()).await;
+    assert_eq!(end, PresetEnd::Failed(reason::TRIM_OUTSIDE.into()));
+    assert!(events.is_empty() && !s.log.exists(), "nothing downloaded: {events:?}");
+    let inside = cutting(Format::Original, Some(19_500), None);
+    let (end, _) = run_choosing(&s, &zoo(), &inside, &Cancel::new()).await;
     assert_eq!(end, PresetEnd::Finished);
 }
 
@@ -1116,7 +1147,7 @@ async fn a_cancel_during_a_cut_keeps_the_whole_file() {
     let pidfile = tmp.path().join("grandchild");
     let w = with_ffmpeg("EXT=webm", &format!("sleep 30 &\necho $! > '{}'\nwait", pidfile.display()));
     let cancel = Cancel::new();
-    let (entry, choices) = (zoo(), cutting(Format::Original, Some(2), None));
+    let (entry, choices) = (zoo(), cutting(Format::Original, Some(2_000), None));
     let ((end, _), ()) = tokio::join!(run_choosing(&w.s, &entry, &choices, &cancel), async {
         wait_for_file(&pidfile).await;
         cancel.cancel();
@@ -1186,7 +1217,7 @@ async fn a_real_cut_keeps_the_part_asked_copied_or_converted() {
         let mut s = setup(&fixture_path("video.json"), &format!("EXT={ext}; SRC='{}'", source.display()), None);
         let bin = ffmpeg.clone();
         s.ctx.limits.ffmpeg = Arc::new(move || Some(bin.clone()));
-        let (end, events) = run_choosing(&s, &zoo(), &cutting(format, Some(2), Some(5)), &Cancel::new()).await;
+        let (end, events) = run_choosing(&s, &zoo(), &cutting(format, Some(2_000), Some(5_000)), &Cancel::new()).await;
         assert_eq!(end, PresetEnd::Finished);
         assert!(notes(&events).is_empty(), "{ext}: {events:?}");
         let file = format!("Me at the zoo.{kept}");

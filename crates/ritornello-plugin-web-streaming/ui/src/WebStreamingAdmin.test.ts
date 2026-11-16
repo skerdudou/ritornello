@@ -409,7 +409,7 @@ describe('WebStreamingAdmin', () => {
     // Video 3 is left whole: a start of 0 alone is no cut.
     await typeDialog('[data-trim-start="3"]', '0:00')
     await clickDialog('[data-download-here]')
-    expect(s.putsOf('download')[0]!.trims).toEqual({ 1: { start: 83, end: 300 } })
+    expect(s.putsOf('download')[0]!.trims).toEqual({ 1: { start_ms: 83_000, end_ms: 300_000 } })
   })
 
   it('sends one bound alone, the start or the end', async () => {
@@ -417,7 +417,40 @@ describe('WebStreamingAdmin', () => {
     await typeDialog('[data-trim-start="1"]', '90')
     await typeDialog('[data-trim-end="2"]', '1:00:00')
     await clickDialog('[data-download-here]')
-    expect(s.putsOf('download')[0]!.trims).toEqual({ 1: { start: 90 }, 2: { end: 3600 } })
+    expect(s.putsOf('download')[0]!.trims).toEqual({ 1: { start_ms: 90_000 }, 2: { end_ms: 3_600_000 } })
+  })
+
+  it('sends a fraction of a second, with a point or a comma, in milliseconds', async () => {
+    const { s } = await optionsFor({ entries: [video(1)] })
+    await typeDialog('[data-trim-start="1"]', '1:30,25')
+    await typeDialog('[data-trim-end="1"]', '2:00.5')
+    await clickDialog('[data-download-here]')
+    expect(s.putsOf('download')[0]!.trims).toEqual({ 1: { start_ms: 90_250, end_ms: 120_500 } })
+  })
+
+  it('the cut fields open the standard keyboard', async () => {
+    await optionsFor({ entries: [video(1)] })
+    expect(inDialog('[data-trim-start="1"]')!.hasAttribute('inputmode')).toBe(false)
+    expect(inDialog('[data-trim-end="1"]')!.hasAttribute('inputmode')).toBe(false)
+  })
+
+  it('a long format or cover label wraps inside its button', async () => {
+    await optionsFor({ entries: [video(1)] })
+    const buttons = [...document.querySelectorAll('[data-format], [data-cover]')]
+    expect(buttons.length).toBeGreaterThan(0)
+    for (const b of buttons) {
+      expect(b.classList.contains('max-md:whitespace-normal'), b.outerHTML).toBe(true)
+      // Unprefixed, h-auto would replace the kit's h-8 and grow the desktop buttons.
+      expect(b.classList.contains('h-auto'), b.outerHTML).toBe(false)
+      expect(b.classList.contains('whitespace-normal'), b.outerHTML).toBe(false)
+    }
+  })
+
+  it('the cut fields keep their desktop width', async () => {
+    await optionsFor({ entries: [video(1)] })
+    for (const sel of ['[data-trim-start="1"]', '[data-trim-end="1"]']) {
+      expect(inDialog(sel)!.classList.contains('w-24'), sel).toBe(true)
+    }
   })
 
   it('says what is wrong with a time and does not download until it is right', async () => {
@@ -912,6 +945,45 @@ describe('WebStreamingAdmin', () => {
   })
 
   // ---- loading --------------------------------------------------------------
+
+  it('an entry takes two lines on a phone, the title alone on the second', async () => {
+    const { w } = await mountAdmin({ entries: [video(1)] })
+    const row = w.find('[data-entry-row]')
+    expect(row.classes()).toContain('max-md:flex')
+    expect(row.classes()).toContain('max-md:flex-wrap')
+    const cell = w.find('[data-entry-title]').element.closest('td')!
+    expect(cell.classList.contains('max-md:order-3'), cell.outerHTML).toBe(true)
+    expect(cell.classList.contains('max-md:basis-full'), cell.outerHTML).toBe(true)
+    expect(w.find('thead').classes()).toContain('max-md:hidden')
+  })
+
+  it('a probed description or a job\'s detail wraps instead of widening the row', async () => {
+    const found = { url: OTHER_URL, kind: 'video' as const, title: 'Me at the zoo', channel: 'jawed', count: null, site: 'Youtube', identity: null }
+    const job: Job = {
+      id: 7,
+      presets: [1],
+      target: { root: 'nas', path: '' },
+      state: 'running',
+      rows: [
+        { preset: 1, id: 'b', title: 'Broken', state: 'failed', detail: { code: 'failed', detail: 'ERROR: Video unavailable' }, notes: [{ code: 'no_ffmpeg' }] },
+      ],
+    }
+    const { w } = await mountAdmin({
+      entries: [video(1)],
+      probe: { running: false, results: [{ line: OTHER_URL, state: 'found', choices: [found] }] },
+      jobs: [job],
+    })
+    const description = w.find('[data-add]').element.previousElementSibling!
+    expect(description.classList.contains('min-w-0'), description.outerHTML).toBe(true)
+    expect(description.classList.contains('wrap-anywhere'), description.outerHTML).toBe(true)
+    const note = w.find('[data-job-row-note]').element
+    expect(note.classList.contains('wrap-anywhere'), note.outerHTML).toBe(true)
+    const detail = [...w.find('[data-job-row]').element.querySelectorAll('span')].find((s) =>
+      s.textContent!.includes('ERROR: Video unavailable'),
+    )!
+    expect(detail.classList.contains('min-w-0'), detail.outerHTML).toBe(true)
+    expect(detail.classList.contains('wrap-anywhere'), detail.outerHTML).toBe(true)
+  })
 
   it('is inert when the first load failed: nothing can overwrite what it could not read', async () => {
     const s = server()

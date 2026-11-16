@@ -768,3 +768,31 @@ describe('InputAdmin', () => {
     expect(w.find('[data-save]').attributes('disabled')).toBeUndefined()
   })
 })
+
+describe('phone layout', () => {
+  it('every text button keeps its word on a computer and shows an icon named by that word on a phone', async () => {
+    const { w } = await mountLoaded()
+    for (const [sel, key] of [
+      ['[data-refresh]', 'btn_refresh'], ['[data-learn]', 'btn_learn'], ['[data-clear]', 'btn_clear'],
+      ['[data-load-preset]', 'btn_load_preset'], ['[data-export]', 'btn_export'], ['[data-save]', 'btn_save'],
+    ] as const) {
+      const b = w.find(sel)
+      expect(b.attributes('aria-label')).toBe(CATALOG[key])
+      expect(b.attributes('title')).toBe(CATALOG[key])
+      expect(b.find('[data-phone-icon]').classes()).toContain('md:hidden')
+      expect(b.find('[data-phone-icon] svg').exists()).toBe(true)
+      expect(b.find('[data-label]').classes()).toContain('max-md:sr-only')
+      expect(b.find('[data-label]').text()).toBe(CATALOG[key])
+    }
+    // Import is a <label> around a hidden file input: title + icon + label, no aria-label (its text names it).
+    const imp = w.find('[data-import-label]')
+    expect(imp.attributes('title')).toBe(CATALOG.btn_import)
+    expect(imp.find('[data-phone-icon] svg').exists()).toBe(true)
+    expect(imp.find('[data-label]').classes()).toContain('max-md:sr-only')
+  })
+
+  it('the device select never outgrows a phone', async () => {
+    const { w } = await mountLoaded()
+    expect(w.find('[data-device-select]').classes()).toContain('max-w-full')
+  })
+})

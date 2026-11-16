@@ -343,7 +343,7 @@ function confirm() {
             :aria-label="row.label"
             @update:model-value="(v: boolean) => setChecked(row.offer.name, v)"
           />
-          <div class="grid gap-0.5 text-sm">
+          <div class="grid min-w-0 gap-0.5 text-sm wrap-anywhere">
             <span data-update-row-name>{{ row.label }}</span>
             <span v-if="row.warning" data-update-row-warning class="text-xs text-muted-foreground">
               {{ row.warning }}

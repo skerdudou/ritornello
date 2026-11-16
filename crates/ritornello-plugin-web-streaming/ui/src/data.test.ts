@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
-  emptyData, faultText, parseClock, playFailureText, runtimeErrorText, stateText, targetText, updateErrorText,
+  emptyData, faultText, parseClockMs, playFailureText, runtimeErrorText, stateText, targetText, updateErrorText,
   videoCount, workInProgress,
 } from './data'
 import { CATALOG, state } from './harness'
@@ -36,20 +36,21 @@ describe('faultText', () => {
   })
 })
 
-describe('parseClock', () => {
-  it('reads seconds, m:ss and h:mm:ss, and empty as no bound', () => {
-    expect(parseClock('')).toBeNull()
-    expect(parseClock('  ')).toBeNull()
-    expect(parseClock('95')).toBe(95)
-    expect(parseClock('1:35')).toBe(95)
-    expect(parseClock(' 01:35 ')).toBe(95)
-    expect(parseClock('1:01:35')).toBe(3695)
-    expect(parseClock('0:00')).toBe(0)
+describe('parseClockMs', () => {
+  it('reads seconds, m:ss and h:mm:ss, a fraction on the last part, and empty as no bound', () => {
+    expect(parseClockMs('')).toBeNull(); expect(parseClockMs('  ')).toBeNull()
+    expect(parseClockMs('95')).toBe(95_000); expect(parseClockMs('1:35')).toBe(95_000)
+    expect(parseClockMs(' 01:35 ')).toBe(95_000); expect(parseClockMs('1:01:35')).toBe(3_695_000)
+    expect(parseClockMs('0:00')).toBe(0); expect(parseClockMs('1:30.25')).toBe(90_250)
+    expect(parseClockMs('1:30,25')).toBe(90_250); expect(parseClockMs('95.5')).toBe(95_500)
+    expect(parseClockMs('1.5')).toBe(1_500); expect(parseClockMs('0:00.005')).toBe(5)
+    expect(parseClockMs('1:01:35.123')).toBe(3_695_123); expect(parseClockMs('1:59.999')).toBe(119_999)
   })
 
   it('refuses what is not a time rather than guessing', () => {
-    for (const typo of ['1:75', '1:60:00', '1:2:3:4', '1.5', '-3', 'abc', '1:', ':30', '1::30']) {
-      expect(parseClock(typo), typo).toBeUndefined()
+    for (const typo of ['1:75', '1:60:00', '1:2:3:4', '-3', 'abc', '1:', ':30', '1::30',
+      '1:30.', '1:30.1234', '1:59.9999', '1.5:30', '.5', '1:30.2.5', '1:60.5', '1:30.-1', '1:30 .5']) {
+      expect(parseClockMs(typo), typo).toBeUndefined()
     }
   })
 })

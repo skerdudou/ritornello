@@ -29,7 +29,7 @@ fn list_entry(preset: u8) -> Entry {
 }
 
 fn vid(id: &str, title: &str, available: bool) -> Video {
-    Video { extractor: "Youtube".into(), id: id.into(), title: title.into(), duration: None, available, thumbnail_jpg: None, url: None }
+    Video { extractor: "Youtube".into(), id: id.into(), title: title.into(), duration_ms: None, available, thumbnail_jpg: None, url: None }
 }
 
 struct Fixture {

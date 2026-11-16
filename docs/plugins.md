@@ -1969,6 +1969,9 @@ this plugin but never written by it, hence installed system-wide rather
 than kept in its own data directory; see [Where a plugin keeps its
 data](#where-a-plugin-keeps-its-data) above).
 
+On a phone its text buttons (Refresh, Learn, Clear, Load, Import, Export, Save)
+become icons, each still named by `aria-label` and `title`.
+
 Devices are found at startup and then **every five seconds** by the plugin
 itself: each tick lists `/dev/input` and opens any `eventN` node not already
 open, exactly what the page's "Refresh" button does (the button still
@@ -2854,8 +2857,11 @@ a folder of a share, in the format chosen in the dialog:
   plugin if asked), and an m4a asked of a site without one keeps the site's
   format, which the job's row says. The choice is remembered with the folder.
 - **Part to keep.** A single video (never a playlist) may be cut: a start
-  and an end typed as `h:mm:ss`, `m:ss` or seconds, either left empty for
-  the start or the end. The whole video is downloaded (yt-dlp cuts only
+  and an end typed as `h:mm:ss`, `m:ss` or seconds, the seconds with up to
+  three decimals (`.` or `,`: `1:30.25`), either left empty for the start or
+  the end. The page sends milliseconds (`start_ms`, `end_ms`); ffmpeg
+  receives seconds with that fraction (`-ss 90.25`), and the length check
+  compares milliseconds. The whole video is downloaded (yt-dlp cuts only
   with the ffmpeg it is denied), then the plugin's ffmpeg keeps the part:
   in the site's format by **copying the stream**
   (`-ss <start> -to <end> -c copy`, as output options, into a hidden

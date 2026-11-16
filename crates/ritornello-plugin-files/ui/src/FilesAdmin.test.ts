@@ -211,6 +211,24 @@ describe('FilesAdmin, the page', () => {
     expect(pre.element.textContent).toBe(output)
   })
 
+  it("a mount failure's output breaks long tokens", async () => {
+    const { w, s } = await mountAdmin({
+      roots: [{ name: 'nas', kind: 'smb', host: 'h', share: 's', mounted: false }],
+      mount_error: 'x',
+      scan: {
+        running: false,
+        found: 0,
+        dir: '',
+        error: { kind: 'Keyed', data: { key: 'too_many_tracks', params: { cap: '10000' } } },
+      },
+    })
+    s.refusal = 'x'
+    await w.find('[data-retry-mount]').trigger('click')
+    await flushPromises()
+    expect(w.get('[data-message]').classes()).toContain('wrap-anywhere')
+    expect(w.get('[data-scan-error]').classes()).toContain('wrap-anywhere')
+  })
+
   it('probes during a scan and stops as soon as it finishes', async () => {
     // The admin protocol pushes **nothing**: neither an event channel nor a
     // websocket behind the admin socket. Without this probe, an `add_dir` —

@@ -372,21 +372,21 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
       <div class="flex min-w-0 flex-1 flex-col items-center gap-1 text-center md:items-start md:text-left">
         <!-- The preset as an overline: `P1 · FIP`. Absent when the source
              declares none (cd without a disc, aux input). -->
-        <p v-if="state?.preset != null" class="text-[11px] font-semibold uppercase tracking-wider text-primary">
+        <p v-if="state?.preset != null" class="text-[11px] font-semibold uppercase tracking-wider text-primary wrap-anywhere">
           P<span data-player-preset>{{ state.preset }}</span>
           <template v-if="state.preset_name"> · <span data-player-preset-name>{{ state.preset_name }}</span></template>
         </p>
         <!-- The source's status ("PAS DE DISQUE"), hidden in standby: the
              STANDBY badge already carries the word. -->
-        <p v-if="state?.status && !state.standby" class="text-sm text-muted-foreground" data-player-status>
+        <p v-if="state?.status && !state.standby" class="text-sm text-muted-foreground wrap-anywhere" data-player-status>
           {{ state.status }}
         </p>
         <div v-if="!nothingToShow(state) || state?.location || lyricsOpen" class="flex min-w-0 flex-col items-center gap-0.5 md:items-start" data-now-playing>
-          <p v-if="state?.title" class="text-xl font-semibold leading-tight text-foreground" data-title>{{ state.title }}</p>
-          <p v-if="state?.artist" class="text-sm text-foreground" data-artist>{{ state.artist }}</p>
+          <p v-if="state?.title" class="text-xl font-semibold leading-tight text-foreground wrap-anywhere" data-title>{{ state.title }}</p>
+          <p v-if="state?.artist" class="text-sm text-foreground wrap-anywhere" data-artist>{{ state.artist }}</p>
           <!-- The year sits next to the album, where a year is read. It also
                stands alone: a stream may know it without knowing the album. -->
-          <p v-if="state?.album || state?.year" class="text-sm text-muted-foreground">
+          <p v-if="state?.album || state?.year" class="text-sm text-muted-foreground wrap-anywhere">
             <span v-if="state?.album" data-album>{{ state.album }}</span>
             <span v-if="state?.album && state?.year"> · </span>
             <span v-if="state?.year" :title="t('release_year')" data-year>{{ state.year }}</span>

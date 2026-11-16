@@ -1191,7 +1191,7 @@ async function pollUntilBack(before: number | null, maxMs: number, successKey: s
     <Card data-logs-card>
       <CardHeader><CardTitle>{{ t('recent_errors') }}</CardTitle></CardHeader>
       <CardContent class="space-y-2">
-        <ul class="space-y-1 font-mono text-xs text-muted-foreground">
+        <ul class="space-y-1 font-mono text-xs text-muted-foreground wrap-anywhere">
           <li v-for="(l, i) in cardLogs" :key="i" data-log-line>{{ l }}</li>
         </ul>
         <!-- Offered from the first error on, and not only once the card
@@ -1262,7 +1262,7 @@ async function pollUntilBack(before: number | null, maxMs: number, successKey: s
              more than the last few lines, so let it show as many as it
              can. -->
         <ul
-          class="max-h-[70vh] space-y-1 overflow-y-auto font-mono text-xs whitespace-pre-wrap text-muted-foreground"
+          class="max-h-[70vh] space-y-1 overflow-y-auto font-mono text-xs whitespace-pre-wrap text-muted-foreground wrap-anywhere"
         >
           <li v-for="(l, i) in filteredLogs" :key="i" data-logs-dialog-line>{{ l }}</li>
         </ul>

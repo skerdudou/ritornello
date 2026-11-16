@@ -299,8 +299,13 @@ function label(s: FoundStation): string {
     <!-- Everything below appears at once, or not at all: see `loaded`. The
          directory card follows the same rule. -->
     <template v-else-if="loaded">
-    <table class="w-full text-sm">
-      <thead class="text-muted-foreground">
+    <!-- Below `md` the table reflows like the plugins table of ConfigView
+         (see the comment there): no header, and each row becomes a wrapping
+         flex line — number and name on the first, a forced break (the row's
+         `::after`, full width), then the address and the arrows on the second.
+         From `md` up nothing changes. -->
+    <table class="w-full text-sm max-md:block">
+      <thead class="text-muted-foreground max-md:hidden">
         <tr>
           <th class="w-16 text-left font-normal">{{ t('col_num') }}</th>
           <th class="text-left font-normal">{{ t('col_name') }}</th>
@@ -308,7 +313,7 @@ function label(s: FoundStation): string {
           <th class="w-24" />
         </tr>
       </thead>
-      <tbody>
+      <tbody class="max-md:block">
         <!--
           Draggable rows: since the preset is the position, dragging a
           station changes its number. `dragover.prevent` is essential —
@@ -317,7 +322,7 @@ function label(s: FoundStation): string {
         <tr
           v-for="(s, i) in stations"
           :key="s.key"
-          class="border-t border-border"
+          class="border-t border-border max-md:flex max-md:flex-wrap max-md:items-center max-md:gap-x-2 max-md:gap-y-1 max-md:py-2 max-md:after:order-2 max-md:after:basis-full max-md:after:content-['']"
           :class="dragging === i ? 'opacity-50' : ''"
           draggable="true"
           data-station-row
@@ -326,13 +331,13 @@ function label(s: FoundStation): string {
           @drop.prevent="drop(i)"
           @dragend="dragging = null"
         >
-          <td class="tabular-nums text-muted-foreground">
+          <td class="tabular-nums text-muted-foreground max-md:order-1">
             <span class="cursor-grab select-none pr-1" :title="t('reorder_hint')" data-drag-handle>⠿</span>
             <span data-station-num>{{ i + 1 }}</span>
           </td>
-          <td class="py-1 pr-2"><Input v-model="s.name" data-station-name /></td>
-          <td class="py-1 pr-2"><Input v-model="s.url" data-station-url /></td>
-          <td class="whitespace-nowrap">
+          <td class="py-1 pr-2 max-md:order-1 max-md:min-w-0 max-md:flex-1 max-md:p-0"><Input v-model="s.name" data-station-name /></td>
+          <td class="py-1 pr-2 max-md:order-3 max-md:min-w-0 max-md:flex-1 max-md:p-0"><Input v-model="s.url" data-station-url /></td>
+          <td class="whitespace-nowrap max-md:order-3">
             <!-- Alternative to drag-and-drop: neither the keyboard nor a
                  touchscreen fares well with it. -->
             <Button
@@ -421,10 +426,10 @@ function label(s: FoundStation): string {
       </div>
       <ul v-if="results" class="space-y-1 text-sm">
         <li v-if="!results.length" class="text-muted-foreground">{{ t('no_results') }}</li>
-        <li v-for="(s, i) in results" :key="i" class="flex items-center gap-2">
+        <li v-for="(s, i) in results" :key="i" class="flex flex-wrap items-center gap-2">
           <!-- textContent via interpolation, never v-html: the name comes
                from a public directory. -->
-          <span class="flex-1">{{ label(s) }}</span>
+          <span class="min-w-0 flex-1 wrap-anywhere">{{ label(s) }}</span>
           <Button
             variant="secondary"
             size="sm"

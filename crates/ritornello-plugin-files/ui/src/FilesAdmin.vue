@@ -325,7 +325,7 @@ const scan = computed(
     <pre
       v-if="message && !popoverOpen"
       data-message
-      class="whitespace-pre-wrap rounded-md border border-border bg-muted/40 p-2 font-mono text-sm"
+      class="whitespace-pre-wrap wrap-anywhere rounded-md border border-border bg-muted/40 p-2 font-mono text-sm"
       >{{ message }}</pre
     >
 
@@ -345,7 +345,7 @@ const scan = computed(
     <pre
       v-if="scan.error"
       data-scan-error
-      class="whitespace-pre-wrap rounded-md border border-destructive p-2 font-mono text-sm"
+      class="whitespace-pre-wrap wrap-anywhere rounded-md border border-destructive p-2 font-mono text-sm"
       >{{ resolveStoredText(t, scan.error) }}</pre
     >
 

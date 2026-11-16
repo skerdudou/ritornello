@@ -53,8 +53,8 @@ function describe(t: T, f: Found): string {
         <p v-else-if="r.state === 'pending'" class="text-muted-foreground">
           <span class="break-all">{{ r.line }}</span> …
         </p>
-        <div v-else-if="r.choices.length === 1" class="flex items-center gap-2">
-          <span class="flex-1">{{ describe(t, r.choices[0]!) }}</span>
+        <div v-else-if="r.choices.length === 1" class="flex flex-wrap items-center gap-2">
+          <span class="min-w-0 flex-1 wrap-anywhere">{{ describe(t, r.choices[0]!) }}</span>
           <Button
             variant="secondary"
             size="sm"
@@ -67,8 +67,8 @@ function describe(t: T, f: Found): string {
         </div>
         <div v-else class="space-y-1">
           <p class="text-muted-foreground">{{ t('choose_one') }}</p>
-          <div v-for="c in r.choices" :key="c.url" class="flex items-center gap-2">
-            <span class="flex-1">{{ describe(t, c) }}</span>
+          <div v-for="c in r.choices" :key="c.url" class="flex flex-wrap items-center gap-2">
+            <span class="min-w-0 flex-1 wrap-anywhere">{{ describe(t, c) }}</span>
             <Button
               variant="secondary"
               size="sm"
