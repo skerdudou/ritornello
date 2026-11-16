@@ -22,7 +22,11 @@ pub struct UserPreset {
     pub gains: [i8; 10],
 }
 
+/// `serde(default)` at the container, as `Settings` has it: a block written
+/// without some field (hand-edited, or by an older core) keeps the fields it
+/// does say. It still has to pass `validate` to be believed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct EqualizerSettings {
     pub enabled: bool,
     pub auto_preamp: bool,
