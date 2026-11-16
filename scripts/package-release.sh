@@ -212,6 +212,46 @@ pack_version() { # <language>
   echo "$v"
 }
 
+# --- the manifest block's marker ------------------------------------------
+# Every plugin binary carries one manifest block, which the core reads to
+# learn a switched-off plugin's version without running it (see
+# crates/ritornello-plugin-sdk/src/embedded.rs). The core finds it by its
+# magic and reads a file with zero or two occurrences as "version unknown".
+# The SDK keeps the magic out of the code it compiles, but that rests on the
+# optimiser: a release build once folded it back into a constant beside the
+# block, kept from forming a second marker only by the linker's layout of
+# the day. A second marker would make EVERY switched-off plugin read
+# "unknown" on a device, in silence; debug builds, which every test runs,
+# never show it. So the binaries actually shipped are counted here: exactly
+# one marker in each plugin, none in the core, which links the SDK to scan
+# and must not carry what it scans for.
+#
+# Written plainly: this is a script, and no packaged binary carries it.
+BLOCK_MAGIC='RITORNELLO-PLUGIN-BLOCK:'
+
+# Prints how many times the magic occurs in a file. Not `grep -c`, which
+# counts LINES: two markers on one line would count as one. `-o` prints each
+# match on a line of its own; the magic holds no newline and cannot overlap
+# itself, so the lines printed are the occurrences. `-a` reads a binary as
+# text instead of answering "Binary file matches"; `LC_ALL=C` makes every
+# byte a character whatever the locale. grep exits 1 for "no match", which
+# is a count of 0 and not a failure; any other status is.
+marker_count() { # <file>
+  [ -f "$1" ] || { echo "no file $1 to count markers in" >&2; return 1; }
+  local n
+  n=$({ LC_ALL=C grep -a -o -F -e "$BLOCK_MAGIC" -- "$1" || [ $? -eq 1 ]; } | wc -l) || return 1
+  echo $((n))
+}
+
+require_markers() { # <file> <expected count> <what it is>
+  local n
+  n=$(marker_count "$1") || return 1
+  if [ "$n" -ne "$2" ]; then
+    echo "$3 ($1) carries $n manifest block marker(s), expected $2: a switched-off plugin would read \"version unknown\" (see crates/ritornello-plugin-sdk/src/embedded.rs)" >&2
+    return 1
+  fi
+}
+
 if [ -n "$SELF_TEST" ]; then
   fails=0
   expect() { # <product> <component> <ok|refused> <why>
@@ -280,8 +320,53 @@ if [ -n "$SELF_TEST" ]; then
   expect_companion 0.3.0 garbage "a companion that is not a version" refused
   expect_companion 0.3.0 1.0 "a companion with two numbers" refused
   expect_companion 0.3.0 1.0.0- "a companion with an empty suffix" refused
+  # The marker guard, on files written here: the very functions the
+  # packaging below calls, over 0, 1 and 2 markers, with the shapes a count
+  # by line, or a search that stops at the first match, would get wrong.
+  MARKS=$(mktemp -d)
+  trap "rm -rf '$MARKS'" EXIT
+  M="$BLOCK_MAGIC"
+  printf '\177ELF\0\0junk\nmore\0junk' > "$MARKS/none"
+  printf 'RITORNELLO-PLUGI\0\0\0N-BLOCK:\0' > "$MARKS/halves"
+  printf 'RITORNELLO-PLUGIN\n-BLOCK:\0' > "$MARKS/split"
+  printf '\0\1\nhead\0%s\1\110\0version=0.3.0\n\0\0tail' "$M" > "$MARKS/one"
+  printf '\0%s\1\0\0%s\1\0' "$M" "$M" > "$MARKS/two-on-a-line"
+  printf '%s%s' "$M" "$M" > "$MARKS/two-adjacent"
+  printf '%s\n\0\n%s' "$M" "$M" > "$MARKS/two-on-two-lines"
+  expect_markers() { # <file> <expected count> <why>
+    local got
+    got=$(marker_count "$MARKS/$1" 2>/dev/null) || got=failed
+    if [ "$got" != "$2" ]; then
+      echo "self-test: markers in $1 -> $got, expected $2 ($3)" >&2
+      fails=$((fails + 1))
+    fi
+  }
+  expect_markers none 0 "no marker"
+  expect_markers halves 0 "the magic's two halves apart, as a folded constant left them"
+  expect_markers split 0 "a newline inside the magic"
+  expect_markers one 1 "one block amid binary bytes"
+  expect_markers two-on-a-line 2 "two markers on one line, which grep -c counts once"
+  expect_markers two-adjacent 2 "two markers touching"
+  expect_markers two-on-two-lines 2 "two markers on two lines"
+  expect_markers missing failed "a binary that is not there"
+  expect_required() { # <file> <expected count> <ok|refused> <why>
+    local got=ok
+    require_markers "$MARKS/$1" "$2" "self-test" >/dev/null 2>&1 || got=refused
+    if [ "$got" != "$3" ]; then
+      echo "self-test: require $2 marker(s) in $1 -> $got, expected $3 ($4)" >&2
+      fails=$((fails + 1))
+    fi
+  }
+  expect_required one 1 ok "a plugin with its block"
+  expect_required none 0 ok "a core without a marker"
+  expect_required none 1 refused "a plugin without a block"
+  expect_required two-on-a-line 1 refused "a plugin with a second marker"
+  expect_required one 0 refused "a core carrying the marker"
+  expect_required missing 0 refused "a binary that is not there"
+  rm -rf "$MARKS"
+  trap - EXIT
   [ "$fails" -eq 0 ] || { echo "self-test: $fails case(s) wrong" >&2; exit 1; }
-  echo "self-test: version guards ok"
+  echo "self-test: version and marker guards ok"
   exit 0
 fi
 
@@ -460,6 +545,7 @@ mapfile -t PLUGINS < <(sed -n 's/^name = "\(.*\)"/\1/p' deploy/plugins.example.t
 [ "${#PLUGINS[@]}" -gt 0 ] || { echo "no plugin found in plugins.example.toml" >&2; exit 1; }
 
 # --- the core -------------------------------------------------------------
+require_markers "$BIN/ritornello-core" 0 "the core" || exit 1
 CORE=$(mktemp -d)
 mkdir -p "$CORE/usr/local/bin"
 cp "$BIN/ritornello-core" "$CORE/usr/local/bin/"
@@ -472,6 +558,7 @@ pack "$CORE" "ritornello-core" "$(crate_version ritornello-core)"
 
 # --- one archive per plugin ----------------------------------------------
 for p in "${PLUGINS[@]}"; do
+  require_markers "$BIN/ritornello-plugin-$p" 1 "plugin $p" || exit 1
   D=$(mktemp -d)
   stage_plugin "$p" "$D"
   pack "$D" "ritornello-plugin-$p" "$(crate_version "ritornello-plugin-$p")"

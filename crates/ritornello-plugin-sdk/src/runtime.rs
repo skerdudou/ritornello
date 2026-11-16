@@ -134,7 +134,21 @@ impl Runtime {
         register: PathBuf,
         prefix: PathBuf,
     ) -> Result<Self> {
-        let Some(embedded) = crate::embedded::decode(block) else {
+        // Copied out through volatile reads before it is decoded. The block is
+        // a `static` whose bytes the optimiser knows; read plainly, a
+        // link-time-optimised build inlined `decode` here and copied the
+        // magic's first 16 and last 8 bytes into constant pools to compare
+        // against — pieces of a second marker, beside the block, one linker
+        // layout away from making the block unreadable (see
+        // `crate::embedded`). A volatile read must be performed as written,
+        // so the copy's contents are unknown to the optimiser.
+        let block: Vec<u8> = block
+            .iter()
+            // SAFETY: an aligned, in-bounds read of an initialised `u8`
+            // behind a shared reference.
+            .map(|b| unsafe { std::ptr::read_volatile(b) })
+            .collect();
+        let Some(embedded) = crate::embedded::decode(&block) else {
             // Unreachable for a block `declare_runtime!` built: `encode`
             // refuses at compile time whatever `decode` refuses.
             anyhow::bail!("this binary's manifest block does not decode");

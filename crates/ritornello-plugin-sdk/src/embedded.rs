@@ -20,22 +20,39 @@
 //! ignored, so a later field is a compatible addition. Bytes after the
 //! payload (the encoder pads with zeros) are ignored.
 //!
-//! The magic never appears as a literal in this crate's code: it is stored
-//! masked ([`MAGIC_MASKED`]) and unmasked at const-evaluation time or at run
-//! time. The only place the magic exists in a plugin binary is the block
-//! itself, and the core (which links this crate) carries none. A file with
-//! zero or two markers is "unknown", never "the first one wins".
+//! A file with zero or two markers is "unknown", never "the first one wins",
+//! so a plugin binary must carry the magic exactly once — in its block — and
+//! the core, which links this crate to scan, must carry it nowhere. Two
+//! things hold that, and neither alone is enough:
+//!
+//! - The magic is never a literal in this crate. It is stored masked (each
+//!   byte XOR `0x5A`): [`encode`] unmasks it at const-evaluation time, so only
+//!   the block holds it, and the scanner unmasks it at run time from the
+//!   [`MAGIC_MASKED`] `static` through volatile reads ([`magic`]), which the
+//!   optimiser may not replace with the values it knows. Unmasked with plain
+//!   reads, an optimised build folded the magic back into a constant: it
+//!   then lay in the binary beside the block, kept from forming a second
+//!   marker only by how the linker happened to lay out 16-byte constants.
+//! - `scripts/package-release.sh` counts the markers in every release binary
+//!   it packages — exactly one in each plugin, none in the core — and
+//!   refuses to package otherwise, so a compiler, linker or LTO change that
+//!   brings the magic back is caught at release time instead of making
+//!   every switched-off plugin read "unknown" on a device.
 
 use std::io::{Read, Seek, SeekFrom};
 
 pub const MAGIC_LEN: usize = 24;
 const MASK: u8 = 0x5A;
-/// `b"RITORNELLO-PLUGIN-BLOCK:"`, each byte XOR [`MASK`].
-#[doc(hidden)]
-pub const MAGIC_MASKED: [u8; MAGIC_LEN] = [
+/// `b"RITORNELLO-PLUGIN-BLOCK:"`, each byte XOR [`MASK`]. A `const` for
+/// [`encode`], which runs at const-evaluation time.
+const MAGIC_MASKED_CONST: [u8; MAGIC_LEN] = [
     0x08, 0x13, 0x0E, 0x15, 0x08, 0x14, 0x1F, 0x16, 0x16, 0x15, 0x77, 0x0A, 0x16, 0x0F, 0x1D, 0x13,
     0x14, 0x77, 0x18, 0x16, 0x15, 0x19, 0x11, 0x60,
 ];
+/// The same masked bytes, as a `static` so that they have one address the
+/// run-time unmasking ([`magic`]) reads through, volatilely.
+#[doc(hidden)]
+pub static MAGIC_MASKED: [u8; MAGIC_LEN] = MAGIC_MASKED_CONST;
 pub const FORMAT: u8 = 1;
 pub const PAYLOAD_MAX: usize = 512;
 pub const BLOCK_LEN: usize = MAGIC_LEN + 3 + PAYLOAD_MAX;
@@ -50,13 +67,20 @@ pub struct Embedded {
     pub repository: Option<String>,
 }
 
-/// The magic, unmasked.
+/// The magic, unmasked at run time.
+///
+/// Each masked byte is read with `read_volatile`, which the optimiser must
+/// perform as written: it cannot substitute the value it knows the `static`
+/// holds, so it cannot fold this function into the magic as a constant —
+/// which is what plain reads produced in release builds (see the module
+/// documentation). `black_box` would only be a hint; this is a guarantee.
 pub fn magic() -> [u8; MAGIC_LEN] {
     let mut out = [0u8; MAGIC_LEN];
-    let mut i = 0;
-    while i < MAGIC_LEN {
-        out[i] = MAGIC_MASKED[i] ^ MASK;
-        i += 1;
+    for (i, byte) in out.iter_mut().enumerate() {
+        // SAFETY: an aligned, in-bounds read of an initialised `u8` in an
+        // immutable `static`; nothing writes to it.
+        let masked = unsafe { std::ptr::read_volatile(&MAGIC_MASKED[i]) };
+        *byte = masked ^ MASK;
     }
     out
 }
@@ -112,7 +136,7 @@ pub const fn encode(version: &str, repository: Option<&str>) -> [u8; BLOCK_LEN] 
     let mut at = 0;
     let mut k = 0;
     while k < MAGIC_LEN {
-        out[at] = MAGIC_MASKED[k] ^ MASK;
+        out[at] = MAGIC_MASKED_CONST[k] ^ MASK;
         at += 1;
         k += 1;
     }
@@ -299,7 +323,8 @@ mod tests {
     }
 
     #[test]
-    fn the_masked_constant_does_not_contain_the_magic() {
+    fn the_masked_bytes_do_not_contain_the_magic() {
+        assert_eq!(MAGIC_MASKED, MAGIC_MASKED_CONST);
         assert!(!MAGIC_MASKED.windows(MAGIC_LEN).any(|w| w == magic()));
         assert_eq!(magic(), *LITERAL);
     }

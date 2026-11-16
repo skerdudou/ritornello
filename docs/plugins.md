@@ -554,7 +554,13 @@ URL. Any other key is ignored. Anything else makes the block unreadable. Bytes
 after the payload are ignored.
 
 - **Embed it exactly once.** Two blocks in one binary are read as unknown,
-  never "the first one wins".
+  never "the first one wins". The magic counts wherever it appears: if your
+  own code needs it (to read your block back), never write it as a literal,
+  and keep the optimiser from folding it into one. The SDK stores it masked
+  and unmasks it through volatile reads for that reason, and our release
+  packaging counts the markers in every binary it ships; check yours the
+  same way (`LC_ALL=C grep -a -o -F 'RITORNELLO-PLUGIN-BLOCK:' <binary> | wc -l`
+  must print `1`) on the optimised build you publish.
 - **Keep the linker from discarding it:** in Rust a `#[used] static`, in C
   `__attribute__((used))`.
 
