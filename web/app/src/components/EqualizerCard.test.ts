@@ -146,7 +146,10 @@ describe('EqualizerCard', () => {
     const thumbs = w.findAll('[data-slot="slider-thumb"]')
     expect(thumbs.map((e) => e.attributes('aria-label')))
       .toEqual(BANDS.map((hz) => `${hz} Hz`))
-    for (const s of sliders(w)) expect(s.props('orientation')).toBe('vertical')
+    for (const s of sliders(w)) {
+      expect(s.props('orientation')).toBe('vertical')
+      expect([s.props('min'), s.props('max'), s.props('step')]).toEqual([-12, 12, 1])
+    }
     // Builtins first, in the order received, then the user's.
     expect(presetSelect(w).findAllComponents(SelectItem).map((i) => i.props('value')))
       .toEqual(['builtin:flat', 'builtin:pop', 'builtin:rock', 'user:Evening'])
@@ -425,6 +428,151 @@ describe('EqualizerCard', () => {
     await flushPromises()
     expect(puts).toHaveLength(1)
     expect((puts[0] as EqualizerSettings).gains[3]).toBe(-6)
+  })
+
+  describe('another device writing meanwhile', () => {
+    // Every write carries the whole settings, `user_presets` included: a
+    // page left open on a phone, then used again, must not write back the
+    // preset list it loaded hours ago over one saved from the PC since.
+    let visibility: DocumentVisibilityState = 'visible'
+    beforeEach(() => {
+      visibility = 'visible'
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility })
+    })
+    afterEach(() => {
+      delete (document as { visibilityState?: unknown }).visibilityState
+    })
+
+    const NIGHT = { name: 'Night', gains: [...ROCK] }
+    const withNight = () => payload(settings({ user_presets: [{ name: 'Evening', gains: [...EVENING] }, NIGHT] }))
+
+    async function becomeVisible() {
+      visibility = 'visible'
+      document.dispatchEvent(new Event('visibilitychange'))
+      await flushPromises()
+    }
+
+    it('coming back to the page reloads, so a later change keeps a preset saved elsewhere', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      let current = payload()
+      serve(() => structuredClone(current))
+      const w = await mountCard()
+      expect(gets).toBe(1)
+      current = withNight()
+      // Hidden: nothing.
+      visibility = 'hidden'
+      document.dispatchEvent(new Event('visibilitychange'))
+      await flushPromises()
+      expect(gets).toBe(1)
+      await becomeVisible()
+      expect(gets).toBe(2)
+      expect(presetSelect(w).findAllComponents(SelectItem).map((i) => i.props('value'))).toContain('user:Night')
+      await moveSlider(w, 0, 3)
+      vi.advanceTimersByTime(300)
+      await flushPromises()
+      expect((puts[0] as EqualizerSettings).user_presets).toEqual(withNight().settings.user_presets)
+    })
+
+    it('the window regaining focus reloads too', async () => {
+      const w = await mountCard()
+      expect(gets).toBe(1)
+      window.dispatchEvent(new Event('focus'))
+      await flushPromises()
+      expect(gets).toBe(2)
+      expect(w.exists()).toBe(true)
+    })
+
+    it('no reload while a change waits, is being written, or a dialog is open', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      let release!: () => void
+      serve(() => payload(), () => new Promise<Response>((resolve) => {
+        release = () => resolve(new Response(null, { status: 204 }))
+      }))
+      const w = await mountCard()
+      // A change waiting for its timer.
+      await moveSlider(w, 0, 4)
+      window.dispatchEvent(new Event('focus'))
+      await becomeVisible()
+      expect(gets).toBe(1)
+      // The change being written.
+      vi.advanceTimersByTime(300)
+      await flushPromises()
+      expect(puts).toHaveLength(1)
+      window.dispatchEvent(new Event('focus'))
+      await flushPromises()
+      expect(gets).toBe(1)
+      // Written: the card may reload again (and the change is the core's now).
+      release()
+      await flushPromises()
+      window.dispatchEvent(new Event('focus'))
+      await flushPromises()
+      expect(gets).toBe(2)
+      // A dialog open: whatever it judged stays in place.
+      await w.get('[data-eq-save]').trigger('click')
+      await flushPromises()
+      expect(gets).toBe(3)
+      expect(inBody('[data-eq-name-dialog]')).not.toBeNull()
+      window.dispatchEvent(new Event('focus'))
+      await becomeVisible()
+      expect(gets).toBe(3)
+    })
+
+    it('a reload that crosses a local change does not undo it', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      const w = await mountCard()
+      getDelayMs = 1000
+      window.dispatchEvent(new Event('focus'))
+      await flushPromises()
+      expect(gets).toBe(2)
+      await moveSlider(w, 0, 5)
+      vi.advanceTimersByTime(1000)
+      await flushPromises()
+      expect((sliders(w)[0]!.props('modelValue') as number[])[0]).toBe(5)
+      expect((puts.at(-1) as EqualizerSettings).gains[0]).toBe(5)
+    })
+
+    it('saving judges the name against the presets the core holds now', async () => {
+      let current = payload()
+      serve(() => structuredClone(current))
+      const w = await mountCard()
+      current = withNight()
+      await w.get('[data-eq-save]').trigger('click')
+      await flushPromises()
+      const input = inBody<HTMLInputElement>('[data-eq-name]')!
+      input.value = 'night'
+      input.dispatchEvent(new Event('input'))
+      await flushPromises()
+      await click('[data-eq-name-submit]')
+      expect(puts).toEqual([])
+      expect(inBody('[data-eq-overwrite]')).not.toBeNull()
+      await click('[data-eq-overwrite-confirm]')
+      expect((puts[0] as EqualizerSettings).user_presets.map((p) => p.name)).toEqual(['Evening', 'night'])
+    })
+
+    it('deleting a preset already deleted elsewhere opens nothing', async () => {
+      let current = payload(settings({ gains: [...EVENING], preset: 'user:Evening' }))
+      serve(() => structuredClone(current))
+      const w = await mountCard()
+      expect(presetLabel(w)).toBe('Evening')
+      current = payload(settings({ gains: [...EVENING], preset: null, user_presets: [] }))
+      await w.get('[data-eq-delete]').trigger('click')
+      await flushPromises()
+      expect(gets).toBe(2)
+      expect(inBody('[data-eq-delete-dialog]')).toBeNull()
+      expect(presetLabel(w)).toBe('eq_custom')
+      expect(puts).toEqual([])
+    })
+
+    it('a change waiting to be written opens the dialog without a reload', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      const w = await mountCard()
+      await moveSlider(w, 0, 2)
+      await w.get('[data-eq-save]').trigger('click')
+      await flushPromises()
+      expect(gets).toBe(1)
+      expect(inBody('[data-eq-name-dialog]')).not.toBeNull()
+      expect((sliders(w)[0]!.props('modelValue') as number[])[0]).toBe(2)
+    })
   })
 
   it('the ten bands share the card width on a phone, scrolling only as a fallback', async () => {

@@ -16,6 +16,16 @@
  * that state again on top of the reload (a timer may well fire before a slow
  * `GET` answers).
  *
+ * **Another device may write meanwhile**, and every write carries the whole
+ * preset list: a phone left open on this page would otherwise write back,
+ * hours later, the list it loaded over a preset saved from the PC since. So
+ * the card reloads when the page becomes visible again or the window regains
+ * focus, and right before the Save and Delete dialogs open (a name clash is
+ * judged on what the core holds now) — but never while a change of this page
+ * waits for its timer, is being written, or a dialog is open: what is on
+ * screen is then newer than the core's, or under the user's eyes. A reload
+ * that crosses a change made meanwhile is dropped (`edits`).
+ *
  * "Custom" is not stored: it is shown when no preset is selected **or** when
  * the gains no longer match the selected preset's. `preset` itself is left as
  * it is when a slider moves, so moving it back names the preset again.
@@ -47,18 +57,53 @@ const state = ref<EqualizerSettings | null>(null)
 const bandsHz = ref<number[]>([])
 const builtins = ref<EqualizerBuiltin[]>([])
 
+function apply(p: EqualizerPayload) {
+  state.value = p.settings
+  bandsHz.value = p.bands_hz
+  builtins.value = p.builtins
+}
+
 async function load() {
   try {
-    const p = await api.get<EqualizerPayload>('/api/equalizer')
-    state.value = p.settings
-    bandsHz.value = p.bands_hz
-    builtins.value = p.builtins
+    apply(await api.get<EqualizerPayload>('/api/equalizer'))
   } catch {
     // The card stays empty: the rest of the page must not depend on it.
   }
 }
 
-onMounted(load)
+/** Bumped by every change made here: a reload that crossed one is dropped. */
+let edits = 0
+let refreshing: Promise<void> | null = null
+
+/** What the screen shows is newer than the core's, or under the user's eyes. */
+const busy = () => timer !== null || inFlight || pending || naming.value || deleting.value
+
+/** Reloads what the core holds, unless `busy` (see the header). */
+function refresh(): Promise<void> {
+  if (busy()) return Promise.resolve()
+  refreshing ??= (async () => {
+    const at = edits
+    try {
+      const p = await api.get<EqualizerPayload>('/api/equalizer')
+      if (at === edits) apply(p)
+    } catch {
+      // Keep what is shown; the next write still goes through.
+    } finally {
+      refreshing = null
+    }
+  })()
+  return refreshing
+}
+
+function onShown() {
+  if (document.visibilityState === 'visible') void refresh()
+}
+
+onMounted(() => {
+  void load()
+  document.addEventListener('visibilitychange', onShown)
+  window.addEventListener('focus', onShown)
+})
 
 // --- Writing -----------------------------------------------------------
 
@@ -76,6 +121,7 @@ function cancelTimer() {
 
 /** A change was made: write it once the changes stop for `COALESCE_MS`. */
 function schedule() {
+  edits += 1
   cancelTimer()
   timer = setTimeout(() => {
     timer = null
@@ -85,6 +131,7 @@ function schedule() {
 
 /** Writes the latest state now (or right after the write in flight). */
 async function flush() {
+  edits += 1
   cancelTimer()
   if (!state.value) return
   if (inFlight) {
@@ -112,6 +159,8 @@ async function flush() {
 
 // Leaving the page within the coalescing window must not lose the change.
 onBeforeUnmount(() => {
+  document.removeEventListener('visibilitychange', onShown)
+  window.removeEventListener('focus', onShown)
   if (timer !== null) void flush()
 })
 
@@ -202,7 +251,8 @@ const name = ref('')
 const overwriting = ref<string | null>(null)
 const trimmedName = computed(() => name.value.trim())
 
-function openSave() {
+async function openSave() {
+  await refresh()
   name.value = ''
   overwriting.value = null
   naming.value = true
@@ -248,7 +298,9 @@ const deleting = ref(false)
  */
 const deleteName = ref('')
 
-function openDelete() {
+async function openDelete() {
+  await refresh()
+  // Deleted elsewhere, or no longer selected: nothing to confirm.
   const key = currentPreset.value
   if (!key?.startsWith('user:')) return
   deleteName.value = key.slice('user:'.length)
@@ -327,7 +379,7 @@ function confirmDelete() {
             <Slider
               class="h-36 data-[orientation=vertical]:px-[9px] sm:data-[orientation=vertical]:px-[19px]"
               orientation="vertical"
-              :min="-12" :max="12" :step="1"
+              :min="GAIN_MIN" :max="GAIN_MAX" :step="1"
               :disabled="!state.enabled"
               :model-value="[state.gains[i] ?? 0]"
               :aria-label="`${hz} Hz`"
