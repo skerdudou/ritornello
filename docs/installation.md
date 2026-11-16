@@ -2226,6 +2226,16 @@ there. In particular:
   downloaded track, and that `files` shows a track's own `<name>.jpg` on the
   device, have not been seen.
 
+**The remote lock has never been tried with the real receiver.** Its long
+press (the key that toggles the lock, while the plugins ignore the other keys)
+was built and tested with injected key events, never with the MCE remote on
+the Pi. Whether that remote's key reports a hold the way the 2-second long
+press assumes is unobserved: a press, then the kernel's autorepeat, then a
+release. A receiver that repeats presses instead would restart the hold, and
+could toggle again after it has fired. The console's LOCKED and UNLOCKED
+displays have not been seen on the device either. No preset binds a lock key;
+the owner binds one with Learn on the generic-input page ("Lock (long press)").
+
 Not something left unverified, but worth recording here for whoever meets
 its traces in the history: `plugin_action_refusal`, the scaffold that made
 every not-yet-wired plugin gesture refuse honestly instead of silently
