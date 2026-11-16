@@ -203,10 +203,7 @@ impl<P: Player> Core<P> {
             last_alarm_minute: self.last_alarm_minute,
             last_alarm_local: self.last_alarm_local,
             sleep_timer: self.persisted_sleep(),
-            // The core does not hold the equalizer yet: the task that gives
-            // it a field replaces this, and until then a save writes the
-            // default block.
-            equalizer: Default::default(),
+            equalizer: self.equalizer.clone(),
         };
         if let Err(e) = state::save(&self.state_path, &st) {
             tracing::warn!("persistence failed: {e}");

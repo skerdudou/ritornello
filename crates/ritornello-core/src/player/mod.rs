@@ -70,11 +70,9 @@ pub trait Player: Send + Sync + 'static {
     /// chain removes every filter. It rebuilds the chain, which clicks if sent
     /// mid-playback: reserved for moments when mpv rebuilds it anyway
     /// (`start-file`) and for enabling or disabling the equalizer.
-    #[allow(dead_code)] // Called by the core's equalizer handling (task 5).
     async fn set_audio_filters(&self, chain: &str) -> Result<()>;
     /// Changes one parameter of one labelled filter of the running chain
     /// (`af-command`), without a click. The change is lost at the next file
     /// load, which rebuilds the chain from the recorded `af`.
-    #[allow(dead_code)] // Called by the core's equalizer handling (task 5).
     async fn audio_filter_command(&self, cmd: &crate::equalizer::AfCommand) -> Result<()>;
 }

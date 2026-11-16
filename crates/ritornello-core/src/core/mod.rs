@@ -39,6 +39,7 @@ use tokio::sync::{mpsc, watch, RwLock};
 mod alarms;
 mod commands;
 mod deadlines;
+mod equalizer;
 mod play_request;
 mod playback;
 mod track_metadata;
@@ -539,6 +540,15 @@ pub struct Core<P: Player> {
     /// publication: reading the local time costs a `tzset`, and the state is
     /// published several times a second during playback.
     next_alarm: Option<ritornello_proto::NextAlarm>,
+    /// The equalizer setting, persisted. See `equalizer.rs` for how a change
+    /// reaches mpv.
+    equalizer: crate::equalizer::EqualizerSettings,
+    /// The preamp mpv's chain holds now: the last ramp step sent, or the
+    /// value the chain carried when it was last written whole (`--af` at
+    /// launch, a toggle, a file start). A new ramp starts from it.
+    eq_preamp_sent: f64,
+    /// The preamp ramp still to send, if any (see `equalizer.rs`).
+    eq_ramp: Option<equalizer::PreampRamp>,
 }
 
 /// What the detached read of an armed file (`Core::arm`) found: its tags
@@ -696,6 +706,11 @@ impl<P: Player> Core<P> {
             last_alarm_minute: persisted.last_alarm_minute,
             last_alarm_local: persisted.last_alarm_local,
             next_alarm: None,
+            // mpv was launched with this chain (`--af`), so its preamp is
+            // the one in place.
+            eq_preamp_sent: crate::equalizer::effective_preamp_db(&persisted.equalizer),
+            equalizer: persisted.equalizer.clone(),
+            eq_ramp: None,
         };
         // The sources wired at startup are already known: without this
         // publication, the channel would keep its blank

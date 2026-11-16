@@ -2619,6 +2619,15 @@ async fn main() -> Result<()> {
                 None => std::future::pending().await,
             }
         };
+        // Equalizer preamp ramp: one step every 20 ms while it runs.
+        // Absolute, and read before the `select!` like `sleep_at`.
+        let eq_ramp_at = core.eq_ramp_deadline().map(tokio::time::Instant::from);
+        let eq_ramp_sleep = async {
+            match eq_ramp_at {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
         // Position tick: one second, armed only when there is a position to
         // publish (see `Core::tick_position`).
         //
@@ -3177,6 +3186,9 @@ async fn main() -> Result<()> {
             }
             _ = sleep_timer_sleep => {
                 core.on_sleep_deadline().await;
+            }
+            _ = eq_ramp_sleep => {
+                core.on_eq_ramp_deadline().await;
             }
             _ = tokio::time::sleep_until(alarm_at) => {
                 core.check_alarms(update::now_unix_s() as i64).await;

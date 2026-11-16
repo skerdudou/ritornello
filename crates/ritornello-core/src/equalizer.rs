@@ -2,8 +2,9 @@
 //! preamp and the mpv audio-filter strings. No I/O here — persistence, the
 //! mpv primitives and the HTTP route build on this module.
 
-// The later tasks (persistence, mpv primitives, core logic, HTTP route) are
-// the consumers; until they land nothing outside the tests uses this.
+// The HTTP route is the last consumer (`validate`, the presets, the error
+// texts); until it calls `Core::set_equalizer`, everything reached only
+// through it looks unused outside the tests.
 #![allow(dead_code)]
 
 use ritornello_i18n::Chain;
