@@ -35,7 +35,7 @@ save_error = "Error: {cause}"
 load_error = "Loading error: {cause}"
 no_device = "No input device detected"
 
-# the 23 actions
+# the 26 actions
 act_select_1 = "Preset 1"
 act_select_2 = "Preset 2"
 act_select_3 = "Preset 3"
@@ -69,6 +69,7 @@ act_source_cycle = "Change source"
 act_toggle_random = "Shuffle"
 act_cycle_repeat = "Repeat"
 act_power = "Standby"
+act_input_lock = "Lock (long press)"
 
 # source shortcut rows, appended at the end of the table (one per source the
 # core announces via `/api/presets`, plus one for a source still bound but

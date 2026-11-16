@@ -4,7 +4,7 @@ export interface DeviceBindings { name: string; bindings: Binding[] }
 export interface BindingTable { devices: DeviceBindings[] }
 
 /**
- * One row of the bindings table. Either it names a catalogue key (the 25
+ * One row of the bindings table. Either it names a catalogue key (the 26
  * fixed actions) or it carries an already-resolved label (a source
  * shortcut, whose label is the source's own name and which no catalogue
  * knows). Never both, and never neither.
@@ -16,7 +16,7 @@ export function rowLabel(row: Row, t: (k: string) => string): string {
   return row.key ? t(row.key) : (row.label ?? '')
 }
 
-// The 25 actions, in the old page's order (minus the two "next/previous
+// The 26 actions, in the old page's order (minus the two "next/previous
 // preset" entries, merged into `act_next`/`act_prev`: same protocol
 // command, interpreted by the active source - preset for radio, track for
 // cd). The label is translated by the plugin's catalog (`key`), the
@@ -48,6 +48,10 @@ export const ACTIONS: Row[] = [
   { key: 'act_toggle_random', cmd: { cmd: 'ToggleRandom' } },
   { key: 'act_cycle_repeat', cmd: { cmd: 'CycleRepeat' } },
   { key: 'act_power', cmd: { cmd: 'Power' } },
+  // The toggle, not `SetInputLock`: a physical key does not know whether the
+  // remote is locked. The plugin reads this binding as a 2 s hold, and the
+  // core's lock state does the rest.
+  { key: 'act_input_lock', cmd: { cmd: 'ToggleInputLock' } },
 ]
 
 /**

@@ -66,6 +66,7 @@ act_source_cycle = "Changement de source"
 act_toggle_random = "Aléatoire"
 act_cycle_repeat = "Répétition"
 act_power = "Veille"
+act_input_lock = "Verrou (appui long)"
 
 # source shortcut rows, appended at the end of the table (one per source the
 # core announces via `/api/presets`, plus one for a source still bound but
