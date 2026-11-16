@@ -58,6 +58,7 @@ export function useCoverZoom(
   onPointermove(e: PointerEvent): void
   onPointerup(e: PointerEvent): void
   onPointercancel(e: PointerEvent): void
+  onLostpointercapture(e: PointerEvent): void
   onWheel(e: WheelEvent): void
   shouldClose(): boolean
   reset(): void
@@ -91,7 +92,18 @@ export function useCoverZoom(
   }
 
   function onPointerdown(e: PointerEvent) {
-    if (pointers.has(e.pointerId)) return
+    // Only the primary mouse button gestures. A right press may open a
+    // context menu that swallows its release, leaving a pointer that never
+    // comes up.
+    if (e.pointerType === 'mouse' && e.button !== 0) return
+    // A down on an id still tracked means its up was lost (a mouse always has
+    // the same id). Forget the stale pointer and start afresh, rather than
+    // ignoring this press and letting its up end the stale gesture.
+    if (pointers.has(e.pointerId)) {
+      pointers.delete(e.pointerId)
+      downAt.delete(e.pointerId)
+      if (pointers.size === 0) gesture = null
+    }
     try {
       ;(e.currentTarget as Element | null)?.setPointerCapture?.(e.pointerId)
     } catch {
@@ -188,6 +200,14 @@ export function useCoverZoom(
     release(e, true)
   }
 
+  // Browsers fire `lostpointercapture` after every captured `pointerup`; by
+  // then the pointer is no longer tracked and this does nothing. Arriving
+  // while the pointer is still tracked (the element re-rendered, capture was
+  // taken away), it means no up will come: end the pointer as a cancel.
+  function onLostpointercapture(e: PointerEvent) {
+    release(e, true)
+  }
+
   function onWheel(e: WheelEvent) {
     e.preventDefault()
     const m = measure()
@@ -222,6 +242,7 @@ export function useCoverZoom(
     onPointermove,
     onPointerup,
     onPointercancel,
+    onLostpointercapture,
     onWheel,
     shouldClose,
     reset,

@@ -14,8 +14,8 @@ const measure = (): ZoomMeasure => ({
 let t = 0
 let zoom: ReturnType<typeof useCoverZoom>
 
-function pe(type: string, id: number, x: number, y: number, pointerType = 'touch'): PointerEvent {
-  return new PointerEvent(type, { pointerId: id, clientX: x, clientY: y, pointerType })
+function pe(type: string, id: number, x: number, y: number, pointerType = 'touch', button = 0): PointerEvent {
+  return new PointerEvent(type, { pointerId: id, clientX: x, clientY: y, pointerType, button })
 }
 
 function down(id: number, x: number, y = 400) {
@@ -127,6 +127,45 @@ describe('useCoverZoom', () => {
     zoom.onPointermove(pe('pointermove', 7, 400, 400, 'mouse'))
     expect(zoom.view.value).toEqual({ scale: 2, x: 0, y: 0 })
     expect(zoom.gesturing.value).toBe(false)
+  })
+
+  it('a right mouse press is not a gesture, so hover after it does not pan', () => {
+    zoomTo2()
+    // A context menu opened on press swallows the release: no pointerup.
+    zoom.onPointerdown(pe('pointerdown', 1, 200, 400, 'mouse', 2))
+    expect(zoom.gesturing.value).toBe(false)
+    zoom.onPointermove(pe('pointermove', 1, 300, 400, 'mouse'))
+    expect(zoom.view.value).toEqual({ scale: 2, x: 0, y: 0 })
+  })
+
+  it('a press on an id whose release was lost starts afresh', () => {
+    // Mouse press at original size whose pointerup never arrives.
+    zoom.onPointerdown(pe('pointerdown', 1, 200, 400, 'mouse'))
+    t += 5000
+    // The next click on the same id is a quick tap at ×1: it closes.
+    zoom.onPointerdown(pe('pointerdown', 1, 200, 400, 'mouse'))
+    t += 50
+    zoom.onPointerup(pe('pointerup', 1, 200, 400, 'mouse'))
+    expect(zoom.gesturing.value).toBe(false)
+    expect(zoom.shouldClose()).toBe(true)
+  })
+
+  it('a lost capture ends the pointer, and hover after it does not pan', () => {
+    zoomTo2()
+    zoom.onPointerdown(pe('pointerdown', 1, 200, 400, 'mouse'))
+    zoom.onLostpointercapture(pe('lostpointercapture', 1, 200, 400, 'mouse'))
+    expect(zoom.gesturing.value).toBe(false)
+    expect(zoom.shouldClose()).toBe(false)
+    zoom.onPointermove(pe('pointermove', 1, 300, 400, 'mouse'))
+    expect(zoom.view.value).toEqual({ scale: 2, x: 0, y: 0 })
+  })
+
+  it('the lost capture that follows every captured release changes nothing', () => {
+    down(1, 200)
+    t += 50
+    up(1, 200)
+    zoom.onLostpointercapture(pe('lostpointercapture', 1, 200, 400))
+    expect(zoom.shouldClose()).toBe(true)
   })
 
   it('a slow press does not count as a tap', () => {
