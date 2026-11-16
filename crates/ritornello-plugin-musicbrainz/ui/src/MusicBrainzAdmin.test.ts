@@ -152,6 +152,27 @@ describe('MusicBrainzAdmin', () => {
     expect(w.find('[data-unsplit-state]').exists()).toBe(false)
   })
 
+  it("on a phone a station's address takes its own line and every value carries its column's name", async () => {
+    const { w } = await mountView()
+    const row = w.get('[data-station-row]')
+
+    const wrapper = w.get('table').element.parentElement as HTMLElement
+    expect(wrapper.classList.contains('md:overflow-x-auto')).toBe(true)
+    expect(wrapper.classList.contains('overflow-x-auto')).toBe(false)
+    expect(w.get('thead').classes()).toContain('max-md:hidden')
+
+    const cells = row.findAll('td')
+    for (const c of ['max-md:basis-full', 'max-md:whitespace-normal', 'max-md:break-all']) {
+      expect(cells[0]!.classes()).toContain(c)
+    }
+    const labels = [CATALOG.col_pattern, CATALOG.col_origin, CATALOG.col_last_used, CATALOG.col_split_count]
+    labels.forEach((label, i) => {
+      const span = cells[i + 1]!.find('span.md\\:hidden')
+      expect(span.exists()).toBe(true)
+      expect(span.text()).toBe(label)
+    })
+  })
+
   it('shows them when the filter is unchecked', async () => {
     const { w } = await mountView()
 

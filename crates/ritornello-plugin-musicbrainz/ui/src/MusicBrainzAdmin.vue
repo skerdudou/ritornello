@@ -334,9 +334,9 @@ async function clear(): Promise<void> {
 
       <!-- Scroll container specific to the table: a stream URL is long, and
            this page must not scroll the whole page to accommodate it. -->
-      <div v-if="loaded && !nothingProbed && !filterHidesAll" class="overflow-x-auto">
-        <table class="w-full text-sm">
-          <thead class="text-muted-foreground">
+      <div v-if="loaded && !nothingProbed && !filterHidesAll" class="md:overflow-x-auto">
+        <table class="w-full text-sm max-md:block">
+          <thead class="text-muted-foreground max-md:hidden">
             <tr>
               <th class="text-left font-normal">{{ t('col_station') }}</th>
               <th class="text-left font-normal">{{ t('col_pattern') }}</th>
@@ -346,14 +346,20 @@ async function clear(): Promise<void> {
               <th class="text-left font-normal">{{ t('col_actions') }}</th>
             </tr>
           </thead>
-          <tbody>
-            <tr v-for="s in shownStations" :key="s.url" data-station-row class="border-t border-border align-top">
+          <tbody class="max-md:block">
+            <tr v-for="s in shownStations" :key="s.url" data-station-row
+              class="border-t border-border align-top max-md:flex max-md:flex-wrap max-md:gap-x-3 max-md:gap-y-1 max-md:py-2"
+            >
               <!-- `max-w-0` forces the column to respect the width of the
                    `<table>` rather than stretching to the length of the URL:
                    that is what lets `truncate` apply. -->
-              <td class="max-w-0 truncate py-2 pr-2" :title="s.url">{{ s.url }}</td>
+              <td
+                class="max-w-0 truncate py-2 pr-2 max-md:max-w-none max-md:basis-full max-md:overflow-visible max-md:whitespace-normal max-md:break-all max-md:p-0"
+                :title="s.url"
+              >{{ s.url }}</td>
 
-              <td class="py-2 pr-2">
+              <td class="py-2 pr-2 max-md:p-0">
+                <span class="text-muted-foreground md:hidden mr-1">{{ t('col_pattern') }}</span>
                 <template v-if="rowBeingEdited === s.url">
                   <div class="flex flex-col gap-1">
                     <Label class="text-xs font-normal text-muted-foreground">{{ t('field_separator') }}</Label>
@@ -388,11 +394,11 @@ async function clear(): Promise<void> {
                 </template>
               </td>
 
-              <td class="py-2 pr-2">{{ originText(s.origin) }}</td>
-              <td class="py-2 pr-2">{{ s.last_used ?? '—' }}</td>
-              <td class="py-2 pr-2">{{ s.split_titles }}</td>
+              <td class="py-2 pr-2 max-md:p-0"><span class="text-muted-foreground md:hidden mr-1">{{ t('col_origin') }}</span>{{ originText(s.origin) }}</td>
+              <td class="py-2 pr-2 max-md:p-0"><span class="text-muted-foreground md:hidden mr-1">{{ t('col_last_used') }}</span>{{ s.last_used ?? '—' }}</td>
+              <td class="py-2 pr-2 max-md:p-0"><span class="text-muted-foreground md:hidden mr-1">{{ t('col_split_count') }}</span>{{ s.split_titles }}</td>
 
-              <td class="py-2">
+              <td class="py-2 max-md:basis-full max-md:p-0">
                 <template v-if="rowBeingEdited === s.url">
                   <div class="flex flex-wrap gap-1">
                     <Button size="sm" data-save-edit :disabled="!!separatorError" @click="saveEdit">
