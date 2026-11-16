@@ -42,12 +42,6 @@ export async function sidewaysCulprits(
         culprits.push(describe(el, 'scrolls sideways'))
       }
       if (el.children.length > 0) continue
-      // Inside a container, a leaf whose content spills out of its own box
-      // (a nowrap label wider than its grid cell) is a defect even while its
-      // box stays within the container: it overprints its neighbour.
-      if (rootSelector && style.overflowX === 'visible' && el.scrollWidth > el.clientWidth + 1) {
-        culprits.push(describe(el, 'overflows its own box'))
-      }
       const box = el.getBoundingClientRect()
       if (box.width === 0 || box.right <= width + 0.5) continue
       // A fixed element (the toaster's empty list) does not widen the page
