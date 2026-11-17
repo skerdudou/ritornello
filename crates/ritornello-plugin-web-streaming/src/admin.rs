@@ -9,8 +9,10 @@
 //!
 //! | op | does, in the call | spawns |
 //! |---|---|---|
-//! | `probe` | parses the lines (pure) | one task: yt-dlp, a line at a time |
-//! | `save` | validates, writes `entries.toml` and the playlist caches | nothing |
+//! | `probe` | parses the lines (pure) and queues them | one worker unless one runs: yt-dlp, a line at a time; adds what names one thing through `Store::change` |
+//! | `choose` | adds a choice of a `found` line through `Store::change`, drops the line | nothing |
+//! | `dismiss` | drops a line, whatever its state | nothing |
+//! | `remove`, `move`, `rename` | one change of the table through `Store::change`: validates, writes `entries.toml` and the playlist caches | nothing |
 //! | `list_targets` | nothing | read the share roots and `/proc/mounts` (also spawned by `get_data` when the cache is stale) |
 //! | `list_dirs`, `create_dir` | nothing | the share's I/O, each under a deadline |
 //! | `download` | checks ffmpeg for mp3 (the last probe, in memory), queues the job (no I/O on this thread) | settings write |
@@ -19,25 +21,26 @@
 //! | `set_channel` | nothing | settings write, then an update request |
 //! | `reprobe` | nothing | the machine probe |
 //!
-//! The one thing `save` does synchronously is local file writes of a few
+//! The one thing a table change does synchronously is local file writes of a few
 //! kilobytes, each under its own deadline.
 
 mod explore;
 mod probe;
+mod store;
 #[cfg(test)]
 mod tests;
 
 use explore::Explore;
 use probe::ProbeState;
+use store::Store;
 use ritornello_plugin_web_streaming::reason;
 use ritornello_files_mount::mounts::read_proc_mounts;
 use ritornello_plugin_sdk::AdminPlugin;
-use ritornello_plugin_web_streaming::entries::{Entries, Entry, ListCache};
+use ritornello_plugin_web_streaming::entries::{Entries, Entry};
 use ritornello_plugin_web_streaming::download::{CoverMode, Format, Trim, default_name};
 use ritornello_plugin_web_streaming::jobs::{JobOptions, Jobs};
-use ritornello_plugin_web_streaming::link::parse_link;
 use ritornello_plugin_web_streaming::settings::Channel;
-use ritornello_plugin_web_streaming::targets::{self, files_roots_path, Target};
+use ritornello_plugin_web_streaming::targets::{files_roots_path, Target};
 use ritornello_plugin_web_streaming::playfail::PlaybackFailure;
 use ritornello_plugin_web_streaming::tool::Tool;
 use ritornello_plugin_web_streaming::ytdlp::{Kind, Ytdlp};
@@ -50,10 +53,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::RwLock as AsyncRwLock;
 
-/// How long `save` waits for its local file writes: under the 5 s ceiling of
-/// `GetData`, which queues behind a `SetData` (it is exclusive). A blocking
-/// write cannot be cancelled: after a timeout it may still complete, leaving
-/// the disk ahead of the memory (and of the page) until the next load.
+/// How long a table change may take, its wait for the store's edit lock and
+/// its local file writes together: under the 5 s ceiling of `GetData`, which
+/// queues behind a `SetData` (it is exclusive). The probe worker changes the
+/// table in the background, so a page's change may find the lock taken: it
+/// then fails with `save_failed` rather than wait and write for two
+/// deadlines. A blocking write cannot be cancelled: after a timeout it may
+/// still complete, leaving the disk ahead of the memory (and of the page)
+/// until the next change or load; it keeps the edit lock until it ends, so no
+/// later change is overwritten by it.
 const SAVE_DEADLINE: Duration = Duration::from_secs(4);
 /// How many links one `probe` takes: they are probed one after the other.
 pub const MAX_LINKS: usize = 20;
@@ -63,19 +71,39 @@ const LAST_TARGET: &str = "last_target";
 const LAST_FORMAT: &str = "last_format";
 const LAST_COVER: &str = "last_cover";
 
+/// A preset as the page drew it: its number and its address.
+#[derive(Debug, Deserialize)]
+struct Pick {
+    preset: u8,
+    url: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum Op {
-    /// Reads the links, one per line; the answers arrive through `get_data`.
+    /// Reads the links, one per line, queued behind those already being
+    /// read; the answers arrive through `get_data`.
     Probe { text: String },
-    /// Saves the whole table.
-    Save { entries: Vec<Entry> },
+    /// Adds the choice `url` of the `found` line `line`, which then goes
+    /// (`stale` when the line or the choice is not there).
+    Choose { line: u64, url: String },
+    /// Drops a line, whatever its state (none of it is added afterwards).
+    Dismiss { line: u64 },
+    /// Drops a preset; those after it move up. `preset` and `url` name the row
+    /// as the page drew it (`stale` when the table moved meanwhile).
+    Remove { preset: u8, url: String },
+    /// Puts a preset at the 1-based position `to`.
+    Move { preset: u8, url: String, to: u8 },
+    /// Retitles a preset (trimmed, never blank).
+    Rename { preset: u8, url: String, title: String },
     /// Re-reads where a download may go.
     ListTargets,
     ListDirs { target: Target },
     CreateDir { target: Target, name: String },
+    /// Downloads the presets `items` name by number and address (`stale`
+    /// when the table moved since the page drew them).
     Download {
-        presets: Vec<u8>,
+        items: Vec<Pick>,
         target: Target,
         #[serde(default)]
         format: Format,
@@ -160,9 +188,8 @@ pub struct WebStreamingAdmin {
     ytdlp: Arc<Ytdlp>,
     tool: Tool,
     jobs: Jobs,
-    /// Ticks after each successful save: the source half announces the new
-    /// table to the core.
-    saved: tokio::sync::watch::Sender<()>,
+    /// Every change of the table; shared with the probe task.
+    store: Arc<Store>,
     env: Arc<Environment>,
     shared: Arc<Shared>,
 }
@@ -196,11 +223,11 @@ impl WebStreamingAdmin {
     ) -> Self {
         Self {
             ytdlp: Arc::new(Ytdlp::new(&data)),
+            store: Arc::new(Store::new(data.clone(), entries.clone(), saved)),
             data,
             entries,
             tool,
             jobs,
-            saved,
             env: Arc::new(env),
             shared: Arc::new(Shared::default()),
         }
@@ -242,70 +269,23 @@ impl WebStreamingAdmin {
         targets.contains(&target.root).then_some(target)
     }
 
-    async fn save(&self, entries: Vec<Entry>) -> Result<(), Text> {
-        let table = Entries { entry: entries };
-        table.validate().map_err(|e| match e {
-            // Past 99 it is one preset too many; 0 is a number that does not exist.
-            ritornello_plugin_web_streaming::entries::ValidationError::PresetOutOfRange { preset, .. } if preset > 99 => {
-                keyed("too_many_entries")
-            }
-            ritornello_plugin_web_streaming::entries::ValidationError::PresetOutOfRange { preset, .. } => {
-                keyed_with("preset_out_of_range", "preset", preset)
-            }
-            ritornello_plugin_web_streaming::entries::ValidationError::DuplicatePreset { preset } => {
-                keyed_with("duplicate_preset", "preset", preset)
-            }
-        })?;
-        for e in &table.entry {
-            // A YouTube link must name what the preset says; another site's
-            // link names whatever its probe found, so it fits either kind.
-            let fits = parse_link(&e.url).ok().is_some_and(|l| match e.kind {
-                Kind::Video => l.watch_url().is_some(),
-                Kind::Playlist => l.cache_key().is_some(),
-            });
-            if !fits {
-                return Err(keyed("bad_entry"));
-            }
-        }
-        // The playlists the operator just probed are cached by this very
-        // save: the first `select` of a new playlist never meets an empty
-        // cache (which would refuse it, and refresh in the background).
-        let probed = self.shared.probe.lock().unwrap_or_else(|p| p.into_inner()).lists_for(&table);
-        let (data, path) = (self.data.clone(), self.data.join("entries.toml"));
-        let to_write = table.clone();
-        let written = targets::blocking(SAVE_DEADLINE, move || {
-            let cache = ListCache::new(&data);
-            for (key, videos) in &probed {
-                if let Err(e) = cache.store(key, videos) {
-                    // The select then refreshes the cache by itself.
-                    tracing::warn!("playlist {key} not cached: {e:#}");
-                }
-            }
-            to_write.save(&path).map_err(|e| std::io::Error::other(format!("{e:#}")))
-        })
-        .await;
-        if let Err(e) = written {
-            // The path and the cause stay in the log, not on the page.
-            tracing::warn!("entries not saved: {e}");
-            return Err(keyed("save_failed"));
-        }
-        // Stored now: their copy in memory is not needed any more.
-        self.shared.probe.lock().unwrap_or_else(|p| p.into_inner()).forget_lists_of(&table);
-        *self.entries.write().await = table;
-        // On every successful save, as the radio does: the core's own merge
-        // drops what did not change.
-        self.saved.send_replace(());
-        Ok(())
-    }
-
-    fn download(&self, presets: Vec<u8>, target: Target, mut options: JobOptions, playlists: &[u8]) -> Result<(), Text> {
-        if presets.is_empty() {
+    /// `table` is the presets as read once: the picks are judged against it
+    /// and the job keeps the picked rows from it.
+    fn download(&self, items: Vec<Pick>, target: Target, mut options: JobOptions, table: &[Entry]) -> Result<(), Text> {
+        if items.is_empty() {
             return Err(keyed("nothing_selected"));
         }
         let mut seen = std::collections::HashSet::new();
-        if let Some(twice) = presets.iter().find(|p| !seen.insert(**p)) {
-            return Err(keyed_with("duplicate_preset", "preset", twice));
+        if let Some(twice) = items.iter().find(|p| !seen.insert(p.preset)) {
+            return Err(keyed_with("duplicate_preset", "preset", twice.preset));
         }
+        let mut picked = Vec::with_capacity(items.len());
+        for item in &items {
+            let row = table.iter().find(|e| e.preset == item.preset && e.url == item.url).ok_or_else(|| keyed("stale"))?;
+            picked.push(row.clone());
+        }
+        let presets: Vec<u8> = picked.iter().map(|e| e.preset).collect();
+        let playlists: Vec<u8> = table.iter().filter(|e| e.kind == Kind::Playlist).map(|e| e.preset).collect();
         // mp3 is only ever a conversion by ffmpeg: not offered without it,
         // and refused here whatever the page sent. (m4a goes through: the
         // site's own m4a needs no ffmpeg, and the row says when the original
@@ -328,7 +308,7 @@ impl WebStreamingAdmin {
             return Err(keyed("trim_needs_ffmpeg"));
         }
         let (format, cover) = (options.format, options.cover);
-        self.jobs.enqueue_with(presets, target.clone(), options);
+        self.jobs.enqueue_with(picked, target.clone(), options);
         // Remembered for the next time; the write is off this thread.
         let tool = self.tool.clone();
         tokio::task::spawn_blocking(move || {
@@ -369,6 +349,10 @@ fn jobs_for_page(jobs: &[ritornello_plugin_web_streaming::jobs::Job]) -> serde_j
         }
     };
     for job in value.as_array_mut().into_iter().flatten() {
+        // The snapshot is the job's own, not the page's.
+        if let Some(fields) = job.as_object_mut() {
+            fields.remove("entries");
+        }
         code_the_detail(job);
         for row in job["rows"].as_array_mut().into_iter().flatten() {
             code_the_detail(row);
@@ -403,6 +387,10 @@ impl AdminPlugin for WebStreamingAdmin {
     }
 
     async fn get_data(&self) -> serde_json::Value {
+        // The lines before the table: a line that becomes a preset in between
+        // then shows as both (the next read drops the line), never as neither
+        // with `running` false, which would stop the page's polling.
+        let probe = self.shared.probe.lock().unwrap_or_else(|p| p.into_inner()).view();
         let mut entries = self.entries.read().await.entry.clone();
         entries.sort_by_key(|e| e.preset);
         // The names a download would give, shown and editable in the dialog:
@@ -420,7 +408,6 @@ impl AdminPlugin for WebStreamingAdmin {
         if stale {
             self.refresh_targets();
         }
-        let probe = self.shared.probe.lock().unwrap_or_else(|p| p.into_inner()).view();
         let explore = self.shared.explore.lock().unwrap_or_else(|p| p.into_inner()).view();
         let jobs = jobs_for_page(&self.jobs.view().lock().unwrap_or_else(|p| p.into_inner()).jobs);
         let caps = self.tool.capabilities();
@@ -454,8 +441,52 @@ impl AdminPlugin for WebStreamingAdmin {
         let op: Op =
             serde_json::from_value(data).map_err(|e| keyed_with("bad_request", "detail", e.to_string()))?;
         match op {
-            Op::Probe { text } => probe::start(&self.shared, &self.ytdlp, &text),
-            Op::Save { entries } => self.save(entries).await,
+            Op::Probe { text } => probe::start(&self.shared, &self.ytdlp, &self.store, &text),
+            Op::Choose { line, url } => {
+                let found = self.shared.probe.lock().unwrap_or_else(|p| p.into_inner()).choice(line, &url);
+                let found = found.ok_or_else(|| keyed("stale"))?;
+                probe::add(&self.shared.probe, &self.store, line, found).await
+            }
+            Op::Dismiss { line } => {
+                self.shared.probe.lock().unwrap_or_else(|p| p.into_inner()).dismiss(line);
+                Ok(())
+            }
+            Op::Remove { preset, url } => {
+                self.store
+                    .change(&self.shared.probe, |rows| {
+                        let at = store::find(rows, preset, &url)?;
+                        rows.remove(at);
+                        Ok(())
+                    })
+                    .await
+            }
+            Op::Move { preset, url, to } => {
+                self.store
+                    .change(&self.shared.probe, |rows| {
+                        let at = store::find(rows, preset, &url)?;
+                        let to = usize::from(to);
+                        if !(1..=rows.len()).contains(&to) {
+                            return Err(keyed_with("bad_request", "detail", format!("position {to} is outside 1 to {}", rows.len())));
+                        }
+                        let row = rows.remove(at);
+                        rows.insert(to - 1, row);
+                        Ok(())
+                    })
+                    .await
+            }
+            Op::Rename { preset, url, title } => {
+                self.store
+                    .change(&self.shared.probe, |rows| {
+                        let at = store::find(rows, preset, &url)?;
+                        let title = title.trim();
+                        if title.is_empty() {
+                            return Err(keyed("empty_title"));
+                        }
+                        rows[at].title = title.to_string();
+                        Ok(())
+                    })
+                    .await
+            }
             Op::ListTargets => {
                 self.refresh_targets();
                 Ok(())
@@ -468,15 +499,13 @@ impl AdminPlugin for WebStreamingAdmin {
                 explore::create_dir(&self.shared, &self.env, target, name);
                 Ok(())
             }
-            Op::Download { presets, target, format, cover, names, trims } => {
+            Op::Download { items, target, format, cover, names, trims } => {
                 let names = by_preset(names)?;
                 let trims = by_preset(trims)?;
-                // What each preset is, as saved: a cut is a single video's.
-                let playlists: Vec<u8> = {
-                    let entries = self.entries.read().await;
-                    entries.entry.iter().filter(|e| e.kind == Kind::Playlist).map(|e| e.preset).collect()
-                };
-                self.download(presets, target, JobOptions { format, cover, names, trims }, &playlists)
+                // The table read once: the picks are judged against it, the
+                // job keeps its rows, and a cut is a single video's by its kinds.
+                let table = self.entries.read().await.entry.clone();
+                self.download(items, target, JobOptions { format, cover, names, trims }, &table)
             }
             Op::Cancel { job } => {
                 // A job that ended a moment ago is not an error.

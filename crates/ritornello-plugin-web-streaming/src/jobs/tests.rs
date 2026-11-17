@@ -20,6 +20,15 @@ fn target() -> Target {
     Target { root: "nas".into(), path: String::new() }
 }
 
+/// The presets 1 and 2 as the table held them when a download was asked for.
+fn picked(presets: &[u8]) -> Vec<Entry> {
+    let table = [
+        Entry { preset: 1, url: VIDEO_URL.into(), kind: Kind::Video, title: "Me at the zoo".into(), channel: None, count: None, site: None, identity: None },
+        Entry { preset: 2, url: "https://www.youtube.com/playlist?list=PLfail".into(), kind: Kind::Playlist, title: "A list".into(), channel: None, count: None, site: None, identity: None },
+    ];
+    presets.iter().filter_map(|p| table.iter().find(|e| e.preset == *p).cloned()).collect()
+}
+
 fn no_cover() -> CoverFetch {
     Arc::new(|_| Box::pin(async { None }))
 }
@@ -64,18 +73,12 @@ printf 'audio' > "$file"
             Box::pin(async move { Ok(r) })
         })
     });
-    let entries = Entries {
-        entry: vec![
-            Entry { preset: 1, url: VIDEO_URL.into(), kind: Kind::Video, title: "Me at the zoo".into(), channel: None, count: None, site: None, identity: None },
-            Entry { preset: 2, url: "https://www.youtube.com/playlist?list=PLfail".into(), kind: Kind::Playlist, title: "A list".into(), channel: None, count: None, site: None, identity: None },
-        ],
-    };
     let ctx = Ctx {
         ytdlp: Arc::new(ytdlp),
         lists: ListCache::new(data.path()),
         limits: Limits { fetch_cover: no_cover(), ..Limits::default() },
     };
-    let jobs = Jobs::start(data.path(), Arc::new(AsyncRwLock::new(entries)), ctx, resolver);
+    let jobs = Jobs::start(data.path(), ctx, resolver);
     World { data, out, _out_guard: out_guard, jobs, log }
 }
 
@@ -106,7 +109,7 @@ async fn finished(w: &World, id: JobId) -> Job {
 #[tokio::test]
 async fn a_job_downloads_its_presets_and_records_each_video() {
     let w = world("");
-    let id = w.jobs.enqueue(vec![1], target());
+    let id = w.jobs.enqueue(picked(&[1]), target());
     let j = finished(&w, id).await;
     assert_eq!(j.state, JobState::Done);
     assert_eq!(j.rows.len(), 1);
@@ -120,7 +123,8 @@ async fn a_job_downloads_its_presets_and_records_each_video() {
 #[tokio::test]
 async fn a_preset_that_does_not_exist_is_a_failed_row_and_the_job_goes_on() {
     let w = world("");
-    let id = w.jobs.enqueue(vec![7, 1], target());
+    // A preset the snapshot lacks (a job that names one it did not keep).
+    let id = w.jobs.enqueue_job(vec![7, 1], picked(&[1]), target(), JobOptions::default());
     let j = finished(&w, id).await;
     assert_eq!(j.state, JobState::Done);
     assert_eq!(j.rows[0].state, VideoState::Failed("no such preset".into()));
@@ -131,7 +135,7 @@ async fn a_preset_that_does_not_exist_is_a_failed_row_and_the_job_goes_on() {
 async fn a_refused_target_fails_the_job_without_running_anything() {
     let refuse: Resolver = Arc::new(|_| Box::pin(async { Err(TargetError::NotWritable) }));
     let w = world_with("", Some(refuse));
-    let id = w.jobs.enqueue(vec![1], target());
+    let id = w.jobs.enqueue(picked(&[1]), target());
     let j = finished(&w, id).await;
     assert_eq!(j.state, JobState::Failed("the root is not writable".into()));
     assert!(!w.log.exists(), "the tool was never run");
@@ -140,9 +144,9 @@ async fn a_refused_target_fails_the_job_without_running_anything() {
 #[tokio::test]
 async fn jobs_run_one_at_a_time_in_order() {
     let w = world("sleep 0.3");
-    let a = w.jobs.enqueue(vec![1], target());
-    let b = w.jobs.enqueue(vec![1], target());
-    let c = w.jobs.enqueue(vec![1], target());
+    let a = w.jobs.enqueue(picked(&[1]), target());
+    let b = w.jobs.enqueue(picked(&[1]), target());
+    let c = w.jobs.enqueue(picked(&[1]), target());
     let started = Instant::now();
     let mut max_running = 0;
     loop {
@@ -166,8 +170,8 @@ async fn cancelling_the_running_job_kills_its_group_and_the_next_one_still_runs(
     let pidfile = tmp.path().join("grandchild");
     let hook = format!("if [ ! -e '{p}' ]; then sleep 30 &\necho $! > '{p}'\nwait\nfi", p = pidfile.display());
     let w = world(&hook);
-    let a = w.jobs.enqueue(vec![1], target());
-    let b = w.jobs.enqueue(vec![1], target());
+    let a = w.jobs.enqueue(picked(&[1]), target());
+    let b = w.jobs.enqueue(picked(&[1]), target());
     let pid = {
         let started = Instant::now();
         loop {
@@ -196,8 +200,8 @@ async fn cancelling_the_running_job_kills_its_group_and_the_next_one_still_runs(
 #[tokio::test]
 async fn a_queued_job_that_is_cancelled_never_starts() {
     let w = world("sleep 0.5");
-    let a = w.jobs.enqueue(vec![1], target());
-    let b = w.jobs.enqueue(vec![1], target());
+    let a = w.jobs.enqueue(picked(&[1]), target());
+    let b = w.jobs.enqueue(picked(&[1]), target());
     assert!(w.jobs.cancel(b));
     assert_eq!(finished(&w, b).await.state, JobState::Cancelled);
     assert_eq!(finished(&w, a).await.state, JobState::Done);
@@ -212,7 +216,7 @@ async fn a_queued_job_that_is_cancelled_never_starts() {
 async fn cancelling_an_unknown_or_finished_job_says_so() {
     let w = world("");
     assert!(!w.jobs.cancel(99));
-    let a = w.jobs.enqueue(vec![1], target());
+    let a = w.jobs.enqueue(picked(&[1]), target());
     finished(&w, a).await;
     // The worker forgets a job's token only after writing its end state.
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -223,7 +227,7 @@ async fn cancelling_an_unknown_or_finished_job_says_so() {
 async fn jobs_json_keeps_the_last_twenty() {
     let refuse: Resolver = Arc::new(|_| Box::pin(async { Err(TargetError::NotMounted) }));
     let w = world_with("", Some(refuse));
-    let ids: Vec<JobId> = (0..25).map(|_| w.jobs.enqueue(vec![1], target())).collect();
+    let ids: Vec<JobId> = (0..25).map(|_| w.jobs.enqueue(picked(&[1]), target())).collect();
     finished(&w, *ids.last().unwrap()).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     let on_disk: JobsView = serde_json::from_str(&std::fs::read_to_string(w.data.path().join("jobs.json")).unwrap()).unwrap();
@@ -244,6 +248,7 @@ async fn the_view_round_trips_through_json_with_rows_of_every_state() {
         jobs: vec![Job {
             id: 3,
             presets: vec![1, 2],
+            entries: picked(&[1, 2]),
             target: Target { root: "nas".into(), path: "a/b".into() },
             state: JobState::Failed("why".into()),
             rows: vec![
@@ -282,6 +287,7 @@ async fn a_job_left_running_by_a_previous_run_is_failed_and_ids_go_on() {
         jobs: vec![Job {
             id: 41,
             presets: vec![1],
+            entries: picked(&[1]),
             target: target(),
             state: JobState::Running,
             rows: vec![
@@ -294,14 +300,14 @@ async fn a_job_left_running_by_a_previous_run_is_failed_and_ids_go_on() {
     std::fs::write(data.path().join("jobs.json"), serde_json::to_string(&old).unwrap()).unwrap();
     let ctx = Ctx { ytdlp: Arc::new(Ytdlp::new(data.path())), lists: ListCache::new(data.path()), limits: Limits::default() };
     let refuse: Resolver = Arc::new(|_| Box::pin(async { Err(TargetError::NotMounted) }));
-    let jobs = Jobs::start(data.path(), Arc::new(AsyncRwLock::new(Entries::default())), ctx, refuse);
+    let jobs = Jobs::start(data.path(), ctx, refuse);
     {
         let view = jobs.view();
         let view = view.lock().unwrap();
         assert_eq!(view.jobs[0].state, JobState::Failed("interrupted by a restart".into()));
         assert_eq!(view.jobs[0].rows[0].state, VideoState::Failed("interrupted by a restart".into()));
     }
-    assert_eq!(jobs.enqueue(vec![1], target()), 42);
+    assert_eq!(jobs.enqueue(picked(&[1]), target()), 42);
 }
 
 #[tokio::test]
@@ -313,6 +319,7 @@ async fn a_jobs_file_written_with_whole_second_cuts_still_loads() {
         jobs: vec![Job {
             id: 7,
             presets: vec![1],
+            entries: picked(&[1]),
             target: target(),
             state: JobState::Done,
             rows: vec![Row { preset: 1, id: "a".into(), title: "A".into(), state: VideoState::Done, percent: Some(100.0), notes: Vec::new() }],
@@ -326,7 +333,7 @@ async fn a_jobs_file_written_with_whole_second_cuts_still_loads() {
     std::fs::write(data.path().join("jobs.json"), text.replace(new_cut, old_cut)).unwrap();
     let ctx = Ctx { ytdlp: Arc::new(Ytdlp::new(data.path())), lists: ListCache::new(data.path()), limits: Limits::default() };
     let refuse: Resolver = Arc::new(|_| Box::pin(async { Err(TargetError::NotMounted) }));
-    let jobs = Jobs::start(data.path(), Arc::new(AsyncRwLock::new(Entries::default())), ctx, refuse);
+    let jobs = Jobs::start(data.path(), ctx, refuse);
     let view = jobs.view();
     let view = view.lock().unwrap();
     assert_eq!(view.jobs.len(), 1, "the history is kept");
@@ -366,7 +373,7 @@ async fn clearing_forgets_the_jobs_that_are_over_and_never_one_queued_or_running
         })
     });
     let w = world_with("", Some(resolver));
-    let ids: Vec<JobId> = (0..4).map(|_| w.jobs.enqueue(vec![1], target())).collect();
+    let ids: Vec<JobId> = (0..4).map(|_| w.jobs.enqueue(picked(&[1]), target())).collect();
     finished(&w, ids[1]).await;
     until(&w, ids[2], "started", |j| j.state == JobState::Running).await;
 
@@ -395,7 +402,7 @@ async fn an_unfinished_job_is_never_dropped_however_long_the_queue() {
         })
     });
     let w = world_with("", Some(resolver));
-    let ids: Vec<JobId> = (0..25).map(|_| w.jobs.enqueue(vec![1], target())).collect();
+    let ids: Vec<JobId> = (0..25).map(|_| w.jobs.enqueue(picked(&[1]), target())).collect();
     let started = Instant::now();
     loop {
         if on_disk(&w).is_some_and(|v| v.jobs.len() == 25) {
@@ -418,7 +425,7 @@ async fn cancelling_leaves_no_row_pending() {
     let pidfile = tmp.path().join("grandchild");
     let hook = format!("sleep 30 &\necho $! > '{}'\nwait", pidfile.display());
     let w = world_full(&hook, None, "playlist.json", false);
-    let id = w.jobs.enqueue(vec![1], target());
+    let id = w.jobs.enqueue(picked(&[1]), target());
     let started = Instant::now();
     while !std::fs::read_to_string(&pidfile).is_ok_and(|t| !t.trim().is_empty()) {
         assert!(started.elapsed() < Duration::from_secs(20));
@@ -447,7 +454,7 @@ async fn a_preset_that_fails_after_planning_leaves_no_row_pending_and_no_duplica
     let real = w.out.join("real$dir");
     std::fs::create_dir(&real).unwrap();
     std::os::unix::fs::symlink(&real, w.out.join("Popular Music Videos")).unwrap();
-    let id = w.jobs.enqueue(vec![1], target());
+    let id = w.jobs.enqueue(picked(&[1]), target());
     let j = finished(&w, id).await;
     assert_settled(&j);
     assert_eq!(j.rows.len(), 12, "one row per video, no summary row beside them");
@@ -465,7 +472,7 @@ async fn a_preset_that_fails_after_planning_leaves_no_row_pending_and_no_duplica
 #[tokio::test]
 async fn a_tool_that_fails_without_a_word_has_its_own_reason() {
     let w = world_with("exit 1", None);
-    let id = w.jobs.enqueue(vec![1], target());
+    let id = w.jobs.enqueue(picked(&[1]), target());
     let j = finished(&w, id).await;
     let VideoState::Failed(message) = &j.rows[0].state else { panic!("{:?}", j.rows[0].state) };
     let c = crate::reason::coded(message);
@@ -477,7 +484,7 @@ async fn a_share_that_refuses_a_write_says_so_with_the_share_error_code() {
     let w = world_full("", None, "playlist.json", false);
     // The playlist's folder cannot be made: a file already has its name.
     std::fs::write(w.out.join("Popular Music Videos"), "in the way").unwrap();
-    let id = w.jobs.enqueue(vec![1], target());
+    let id = w.jobs.enqueue(picked(&[1]), target());
     let j = finished(&w, id).await;
     assert!(!j.rows.is_empty());
     for row in &j.rows {
@@ -493,7 +500,7 @@ async fn a_target_that_cannot_be_resolved_for_an_io_reason_fails_the_job_as_the_
     let refuse: Resolver =
         Arc::new(|_| Box::pin(async { Err(TargetError::Io("Permission denied (os error 13)".into())) }));
     let w = world_with("", Some(refuse));
-    let id = w.jobs.enqueue(vec![1], target());
+    let id = w.jobs.enqueue(picked(&[1]), target());
     let j = finished(&w, id).await;
     let JobState::Failed(message) = &j.state else { panic!("{:?}", j.state) };
     assert_eq!(crate::reason::coded(message).code, "io");
@@ -504,7 +511,7 @@ async fn a_failed_preset_is_on_disk_when_it_happens_not_only_at_the_end() {
     // Preset 2 (a playlist with nothing cached) fails at once; preset 1's
     // probe then takes a second, during which nothing else is persisted.
     let w = world_full("sleep 1", None, "MISSING", true);
-    let id = w.jobs.enqueue(vec![2, 1], target());
+    let id = w.jobs.enqueue(picked(&[2, 1]), target());
     let started = Instant::now();
     let seen = loop {
         if let Some(v) = on_disk(&w)
@@ -525,13 +532,13 @@ async fn a_failed_preset_is_on_disk_when_it_happens_not_only_at_the_end() {
 async fn a_running_job_holds_the_tool_gate_and_a_waiting_update_holds_the_next_job() {
     let w = world("sleep 0.5");
     let gate = w.jobs.tool_gate();
-    let a = w.jobs.enqueue(vec![1], target());
+    let a = w.jobs.enqueue(picked(&[1]), target());
     until(&w, a, "started", |j| j.state == JobState::Running).await;
     assert!(gate.try_write().is_err(), "an update could swap yt-dlp under the running job");
     finished(&w, a).await;
     // An update holding the gate: the next job waits for it.
     let update = gate.clone().write_owned().await;
-    let b = w.jobs.enqueue(vec![1], target());
+    let b = w.jobs.enqueue(picked(&[1]), target());
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(job(&w, b).state, JobState::Queued, "a job started under an update");
     drop(update);
@@ -560,7 +567,7 @@ fn share_goes_after(ok: usize) -> (tempfile::TempDir, Resolver) {
 async fn a_share_that_goes_away_fails_the_job_at_the_first_failed_video() {
     let (_out, resolver) = share_goes_after(1);
     let w = world_full("exit 1", Some(resolver), "playlist.json", false);
-    let id = w.jobs.enqueue(vec![1, 2], target());
+    let id = w.jobs.enqueue(picked(&[1, 2]), target());
     let j = finished(&w, id).await;
     let gone = TargetError::NotMounted.to_string();
     assert_eq!(j.state, JobState::Failed(gone.clone()));
@@ -576,7 +583,7 @@ async fn a_share_that_goes_away_fails_the_job_at_the_first_failed_video() {
 async fn the_share_is_not_asked_about_after_a_video_that_went_through() {
     let (_out, resolver) = share_goes_after(1);
     let w = world_full("", Some(resolver), "playlist.json", false);
-    let id = w.jobs.enqueue(vec![1], target());
+    let id = w.jobs.enqueue(picked(&[1]), target());
     let j = finished(&w, id).await;
     assert_eq!(j.state, JobState::Done);
     assert!(j.rows.len() > 2 && j.rows.iter().all(|r| r.state == VideoState::Done), "{j:?}");
@@ -588,7 +595,7 @@ async fn the_share_is_not_asked_about_after_a_video_that_went_through() {
 async fn a_failed_video_on_a_share_that_holds_does_not_stop_the_job() {
     let (_out, resolver) = share_goes_after(usize::MAX);
     let w = world_full("exit 1", Some(resolver), "playlist.json", false);
-    let id = w.jobs.enqueue(vec![1], target());
+    let id = w.jobs.enqueue(picked(&[1]), target());
     let j = finished(&w, id).await;
     assert_eq!(j.state, JobState::Done);
     assert!(j.rows.len() > 2 && j.rows.iter().all(|r| matches!(r.state, VideoState::Failed(_))), "{j:?}");

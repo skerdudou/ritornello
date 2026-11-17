@@ -17,10 +17,10 @@ use std::sync::{Arc, Mutex};
 use ritornello_files_mount::mounts::read_proc_mounts;
 use ritornello_files_mount::roots::Roots;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{RwLock as AsyncRwLock, mpsc};
+use tokio::sync::mpsc;
 
 use crate::download::{Action, Cancel, Choices, CoverMode, Ctx, Event, Format, Note, PresetEnd, Trim, VideoState, download_preset};
-use crate::entries::{Entries, write_atomically};
+use crate::entries::{Entry, write_atomically};
 use crate::reason;
 use crate::targets::{Resolved, Target, TargetError, resolve_parts};
 use crate::tool::ToolGate;
@@ -91,6 +91,12 @@ impl JobOptions {
 pub struct Job {
     pub id: JobId,
     pub presets: Vec<u8>,
+    /// The presets as they were when the download was asked for: the table
+    /// moves meanwhile (a removal renumbers every preset after it), and a
+    /// number looked up later would name another video. A job written without
+    /// the snapshot has none, and each of its presets fails as missing.
+    #[serde(default)]
+    pub entries: Vec<Entry>,
     pub target: Target,
     #[serde(flatten)]
     pub state: JobState,
@@ -186,7 +192,6 @@ impl Jobs {
     /// a previous run are marked failed: nothing is resumed.
     pub fn start(
         data_dir: &std::path::Path,
-        entries: Arc<AsyncRwLock<Entries>>,
         ctx: Ctx,
         resolver: Resolver,
     ) -> Self {
@@ -214,7 +219,7 @@ impl Jobs {
             tx,
             gate: ToolGate::default(),
         });
-        tokio::spawn(worker(inner.clone(), rx, Arc::new(ctx), entries, resolver));
+        tokio::spawn(worker(inner.clone(), rx, Arc::new(ctx), resolver));
         Self { inner }
     }
 
@@ -229,17 +234,24 @@ impl Jobs {
         self.inner.view.clone()
     }
 
-    pub fn enqueue(&self, presets: Vec<u8>, target: Target) -> JobId {
-        self.enqueue_with(presets, target, JobOptions::default())
+    pub fn enqueue(&self, entries: Vec<Entry>, target: Target) -> JobId {
+        self.enqueue_with(entries, target, JobOptions::default())
     }
 
-    pub fn enqueue_with(&self, presets: Vec<u8>, target: Target, options: JobOptions) -> JobId {
+    /// Queues a download of `entries`, the presets as they are now: the job
+    /// keeps them, and never looks the table up again.
+    pub fn enqueue_with(&self, entries: Vec<Entry>, target: Target, options: JobOptions) -> JobId {
+        let presets = entries.iter().map(|e| e.preset).collect();
+        self.enqueue_job(presets, entries, target, options)
+    }
+
+    fn enqueue_job(&self, presets: Vec<u8>, entries: Vec<Entry>, target: Target, options: JobOptions) -> JobId {
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
         let cancel = Cancel::new();
         self.inner.cancels.lock().unwrap_or_else(|p| p.into_inner()).insert(id, cancel.clone());
         {
             let mut view = self.inner.view.lock().unwrap_or_else(|p| p.into_inner());
-            view.jobs.push(Job { id, presets, target, state: JobState::Queued, rows: Vec::new(), options });
+            view.jobs.push(Job { id, presets, entries, target, state: JobState::Queued, rows: Vec::new(), options });
         }
         // Off the caller's thread: it is an admin route's, and none may block.
         let inner = self.inner.clone();
@@ -276,13 +288,12 @@ async fn worker(
     inner: Arc<Inner>,
     mut rx: mpsc::UnboundedReceiver<Queued>,
     ctx: Arc<Ctx>,
-    entries: Arc<AsyncRwLock<Entries>>,
     resolver: Resolver,
 ) {
     while let Some(queued) = rx.recv().await {
         let state = {
             let _tool_stays = inner.gate.read().await;
-            run_job(&inner, &queued, &ctx, &entries, &resolver).await
+            run_job(&inner, &queued, &ctx, &resolver).await
         };
         inner.with_job(queued.id, |j| {
             if state == JobState::Cancelled {
@@ -302,15 +313,14 @@ async fn run_job(
     inner: &Arc<Inner>,
     queued: &Queued,
     ctx: &Ctx,
-    entries: &Arc<AsyncRwLock<Entries>>,
     resolver: &Resolver,
 ) -> JobState {
     if queued.cancel.is_cancelled() {
         return JobState::Cancelled;
     }
-    let Some((presets, target, options)) = inner.with_job(queued.id, |j| {
+    let Some((presets, snapshot, target, options)) = inner.with_job(queued.id, |j| {
         j.state = JobState::Running;
-        (j.presets.clone(), j.target.clone(), j.options.clone())
+        (j.presets.clone(), j.entries.clone(), j.target.clone(), j.options.clone())
     }) else {
         return JobState::Failed(reason::JOB_LOST.into());
     };
@@ -327,7 +337,7 @@ async fn run_job(
         Err(e) => return JobState::Failed(reason::target_error(&e)),
     };
     for preset in presets {
-        let entry = entries.read().await.by_preset(preset).cloned();
+        let entry = snapshot.iter().find(|e| e.preset == preset).cloned();
         let Some(entry) = entry else {
             let row = Row { preset, id: String::new(), title: String::new(), state: VideoState::Failed(reason::NO_SUCH_PRESET.into()), percent: None, notes: Vec::new() };
             inner.with_job(queued.id, |j| j.rows.push(row));

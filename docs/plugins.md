@@ -2611,15 +2611,32 @@ Presets work like the radio's: numbered **by position** (1 to 99),
 reordered by dragging a row by its ⠿ handle, with a finger or a mouse (or with
 the ▲▼ arrows, the keyboard path), announced to the core as
 `preset_count`, listed by name for `list_presets`. They are kept in
-`entries.toml`. As on the radio, a save that moves or renames the preset
+`entries.toml`. A change that moves or renames the preset
 that plays (or is armed) corrects its number and name on the card and in
 `state.json`, found again by its link; one deleted while it plays keeps
 playing with no number.
 
-Links are added in a text area, **one link per line**. The plugin asks
-yt-dlp about each of them in the background (title, channel, the videos of
-a playlist) and the page follows the progress; nothing is written until
-"Save" is clicked. A link is either a **video** or a **playlist**:
+**There is no Save button: every add, removal, move or rename is written at
+once.** The page names a preset by its number *and* its link when it asks for
+a change, so a page that has gone stale (another browser changed the list)
+is refused with a "the list changed meanwhile" message and shown the current
+list instead of acting on the wrong row. A rename to an empty title is
+refused; a 100th preset, or a link already in the list, is refused with its
+own message.
+
+Links are pasted in the **Add** dialog, opened from the Presets card's
+header, **one link per line**. The dialog closes at once; each link then
+appears at the end of the list as a line of its own, with its state: waiting,
+being read, failed (with the reason), or, for a `watch?v=…&list=…` link, a
+choice between keeping the video and keeping the playlist. A line can be
+dismissed. The plugin asks yt-dlp about the links in the background, one
+queue for all of them (title, channel, the videos of a playlist), and the
+page follows the progress. A link the plugin recognises for what it is is
+**added by the plugin itself** and becomes a numbered preset; only the
+choice of a video or a playlist waits for the operator. These lines live
+only in the plugin's memory: a restart of the plugin forgets them (a link
+still waiting or a choice not made is lost; the presets already added are
+on disk). A link is either a **video** or a **playlist**:
 
 - a YouTube link is recognised for what it is (`watch?v=`, `playlist?list=`,
   `shorts/`, `embed/`, `youtu.be/`; any other shape or host of the YouTube
@@ -2638,8 +2655,8 @@ Hosts apart from YouTube are known by `extractor:id` (yt-dlp's own fields);
 a YouTube entry keeps its 11-character id and its rebuilt `watch` address. A
 playlist's videos are cached in `lists/` and refreshed in the background
 when it is played; playback starts from the cache without waiting, and a
-failed refresh keeps the old list. Saving a playlist writes its freshly
-probed videos to that cache in the same save. Shuffle and repeat are not
+failed refresh keeps the old list. Adding a playlist writes its freshly
+probed videos to that cache when it is added. Shuffle and repeat are not
 supported by this source yet (the order of `files` is private to its
 binary).
 
@@ -2919,8 +2936,7 @@ mpv would be routed for each load.
 ### Downloads
 
 Presets are ticked in the list, and the one "Download…" button under it
-(greyed out while no share is offered, nothing is ticked
-or changes are unsaved) writes the
+(greyed out while no share is offered or nothing is ticked) writes the
 audio of one stream (whatever audio stream the site offers, opus in webm or
 m4a on YouTube) into
 a folder of a share, in the format chosen in the dialog:
@@ -2992,7 +3008,7 @@ a folder of a share, in the format chosen in the dialog:
   playlist goes into a sub-folder of its name, tracks numbered
   (`01 - Title.ext`; three digits above 99). The dialog shows, for each
   preset, the name it will get (a video's file, without its extension; a
-  playlist's folder), computed by the plugin from the saved preset (its
+  playlist's folder), computed by the plugin from the preset (its
   title, else its id; no network), and the operator may change it: what is
   typed goes through the same cleaning, and one that cleans to nothing
   leaves the default. The extension is the format's, never typed. **Nothing
@@ -3047,6 +3063,10 @@ a folder of a share, in the format chosen in the dialog:
   share's message, rather than resolving every remaining video only to fail
   its write. A share never blocks the plugin (every filesystem call on a
   share has a deadline).
+  A job names each preset by its number **and its link**, and keeps its own
+  copy of those entries: moving, renaming or removing a preset while the job
+  runs changes neither what it downloads nor the names it chose. A pair that
+  no longer matches the list when the job is asked for is refused as stale.
   Nothing is left to do afterwards: `files` sees the new files by browsing.
 
 Downloading may be against a site's terms of service (YouTube's, notably);
@@ -3055,7 +3075,8 @@ this is the owner's decision, for private use.
 ### The page
 
 Served by the core like the other plugins' pages. It holds: the preset list
-(add, preview of the probed lines, reorder, save); right under it the list
+(an Add button that opens the dialog, the lines of links being read, reorder,
+rename and remove, all saved at once); right under it the list
 of jobs, where a download started from the presets is followed; the
 **capabilities** panel and the yt-dlp panel (version, channel, "Check for an
 update", "Install anyway", the last failure); and the download dialog, in

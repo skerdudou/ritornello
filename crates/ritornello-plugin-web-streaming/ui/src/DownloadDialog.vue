@@ -11,6 +11,8 @@ import {
 /** A preset about to be downloaded, as the dialog names it. */
 export interface Item {
   preset: number
+  /** With its number, what the plugin checks the preset by. */
+  url: string
   title: string
   kind: Kind
 }
