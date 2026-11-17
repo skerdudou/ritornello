@@ -139,7 +139,10 @@ pub trait Player: Send + Sync + 'static {
     /// step is tried even when one fails, so the plain chain is written
     /// whatever happens; the first error is returned. The restore seek's
     /// `PlaybackRestarted`, which mpv sends only once the user resumes,
-    /// never reaches the core either, unless a new file starts first.
+    /// never reaches the core either, unless a new file starts first; and
+    /// when the file was put back, `progress` stays at the pause's until the
+    /// user's next transport call (pause toggle, seek, next, prev, chapter,
+    /// stop, a load) or a file start.
     #[cfg_attr(not(test), expect(dead_code, reason = "the core plays the paused chime in the next task"))]
     async fn end_sound_while_paused(&self, chain: &str, resume_at: Option<f64>) -> Result<()>;
 }
