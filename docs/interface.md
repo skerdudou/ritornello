@@ -794,11 +794,15 @@ displays with a LOCKED / UNLOCKED message (the console's included), and on the w
 remote lock" above). A key refused while locked is not met with silence
 either: its press shows LOCKED again (the plugin sends `InputLockRefused`, at
 most once every 3 seconds, whatever the device, so a remote drummed on does
-not keep the message up), in standby too, without the lock sound and without
+not re-arm the message or bother the core on every key: LOCKED stays up while
+keys keep coming, and goes the overlay duration after the last refusal sent),
+in standby too, without the lock sound and without
 changing anything; its autorepeats and its release say nothing. The lock is forgotten when the core restarts, except for the
 restart an update provokes, which keeps it (the core writes it to `state.json`
 on every change and reads it back only then, as it does for the sleep timer);
-a power cut or a manual restart unlocks.
+a power cut or a manual restart unlocks. While the remote is locked, this page
+shows a "Remote locked" banner at its top saying how to unlock it, so keys
+tested there and ignored are not taken for a broken remote.
 
 **A row per installed source, appended at the end of the table.** Below
 the fixed actions, the page lists every source the core currently
@@ -1045,10 +1049,13 @@ installer's marker or the rollback's report, still fresh):
   minute the restart ends in, but **never more than 15 minutes back** — a
   minute counts only if it starts inside that window — so an update stuck
   for an hour does not ring an alarm an hour late. Several due: the latest
-  rings, alone. The alarm wins over "the device stays as it was".
+  rings, alone. The alarm wins over "the device stays as it was";
+- the remote lock, written to `state.json` on every change, comes back as it
+  was, so a remote locked against a child is not unlocked by a 3 a.m. update
+  (see "Locking the remote" under the physical remote).
 
 Every other start — a power cut, a crash, a manual restart outside that
-window — drops the timer and catches nothing up.
+window — drops the timer and the lock, and catches nothing up.
 
 ### On the console display
 
@@ -1310,9 +1317,9 @@ after either file was written falls back to reading the Startup setting as
 normal. A device asleep at 3 a.m. that updates itself at 3 a.m. is still
 asleep afterwards, whether the update took or was reverted.
 
-The same restart, and only it, also keeps a running sleep timer and rings
-an alarm the update made the device miss: see [Across an update
-restart](#across-an-update-restart).
+The same restart, and only it, also keeps a running sleep timer and the
+remote lock, and rings an alarm the update made the device miss: see [Across
+an update restart](#across-an-update-restart).
 
 **A plugin gesture arms nothing.** The rollback net is for the core, whose
 install and whose crash-loop are the same event; a plugin runs in a process

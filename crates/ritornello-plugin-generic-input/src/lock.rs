@@ -62,9 +62,12 @@ impl LockKeyPress {
 }
 
 /// The shortest time between two `InputLockRefused` sent to the core. A
-/// child drumming on a locked remote must not keep the displays on LOCKED
-/// for good, nor flood the core; one answer every few seconds is enough to
-/// say why nothing happens.
+/// child drumming on a locked remote must not re-arm the displays' overlay
+/// nor bother the core on every key; one answer every few seconds is enough
+/// to say why nothing happens. It does not take LOCKED off the screen: with
+/// the default `overlay_ms` (5 s, longer than this interval) the message
+/// stays up while keys keep coming, and goes `overlay_ms` after the last
+/// refusal sent.
 pub const REFUSAL_INTERVAL: Duration = Duration::from_secs(3);
 
 /// When a refused key last made the plugin say so, shared by every device:

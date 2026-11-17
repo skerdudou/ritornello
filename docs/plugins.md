@@ -1981,6 +1981,11 @@ data](#where-a-plugin-keeps-its-data) above).
 On a phone its text buttons (Refresh, Learn, Clear, Load, Import, Export, Save)
 become icons, each still named by `aria-label` and `title`.
 
+While the remote is locked, the page shows a "Remote locked" banner at its
+top saying how to unlock it (the long press, or the padlock on the Listen
+page), following the core's `input_locked` live: someone testing keys there would otherwise
+take the ignored keys for a broken remote or broken bindings.
+
 Devices are found at startup and then **every five seconds** by the plugin
 itself: each tick lists `/dev/input` and opens any `eventN` node not already
 open, exactly what the page's "Refresh" button does (the button still
@@ -2048,8 +2053,8 @@ alarms](interface.md#sleep-timer-and-alarms)).
 a key: the core shows the LOCKED message on the displays (standby included) and
 does nothing else — no lock change, no lock sound — and only while the lock is
 on, so a refusal crossing an unlock says nothing. Throttling it is the sender's
-business. A core older than 1.2 logs it as an unknown command and skips it. A plugin that honours the
-lock overrides `InputPlugin::input_lock`, returning the sender of a `watch`
+business. A core older than 1.2 logs it as an unknown command and skips it.
+A plugin that honours the lock overrides `InputPlugin::input_lock`, returning the sender of a `watch`
 channel it reads; the SDK announces that as `input_lock` (omitted from the
 announcement when false). Only such a plugin ever receives anything from the
 core on its input socket, and the only frame the core writes back is
@@ -2079,8 +2084,10 @@ autorepeats; the core applies whatever it receives, so this is the only place
 that stays silent. Silent toward the music, not toward the owner: the press of
 an ignored key sends `InputLockRefused`, so the displays say LOCKED, at most
 once every 3 seconds counted from the last one sent and shared by every device
-(a remote drummed on does not keep the message up); autorepeats, releases and
-the lock key itself never send it. Learning is unaffected: a key being learned is captured, not
+(a remote drummed on does not re-arm the message or bother the core on every
+key: LOCKED stays up while keys keep coming, and goes `overlay_ms` after the
+last refusal sent); autorepeats, releases and the lock key itself never send
+it. Learning is unaffected: a key being learned is captured, not
 interpreted, locked or not. The state belongs to the core: the plugin only
 mirrors the `lock` frames the SDK feeds its `watch`, so a restarted plugin
 comes back locked if the core still is (it is told at connection), and a core
