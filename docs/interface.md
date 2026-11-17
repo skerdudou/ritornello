@@ -775,7 +775,10 @@ picks the key with "Learn" like any other. While locked, the plugin ignores
 every other key; only this long press still gets through, so the remote can
 always be unlocked from where it is held. The device answers on the
 displays with a LOCKED / UNLOCKED message (the console's included), and on the web page with the padlock (see "The
-remote lock" above). The lock is forgotten when the core restarts.
+remote lock" above). The lock is forgotten when the core restarts, except for the
+restart an update provokes, which keeps it (the core writes it to `state.json`
+on every change and reads it back only then, as it does for the sleep timer);
+a power cut or a manual restart unlocks.
 
 **A row per installed source, appended at the end of the table.** Below
 the fixed actions, the page lists every source the core currently

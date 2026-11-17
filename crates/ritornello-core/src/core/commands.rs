@@ -47,13 +47,15 @@ impl<P: Player> Core<P> {
     /// repeated is harmless. The lock is only state and feedback here: the
     /// input plugins that opted in read it from the published state and
     /// refuse their own keys; the core keeps applying every command it
-    /// receives. Not persisted — see the field. The overlay is shown even
+    /// receives. Persisted on every change, read back only after an update
+    /// restart — see the field. The overlay is shown even
     /// when the value did not change, so that pressing the unlock key on an
     /// unlocked device still answers — and so is the lock sound, for the
     /// same reason: a device asleep has no screen, and the chime is then the
     /// key's only answer (`lock_sound.rs`; it never fails the lock).
     pub(super) async fn set_input_lock(&mut self, locked: bool) {
         self.input_locked = locked;
+        self.persist();
         tracing::info!("remote lock: {}", if locked { "on" } else { "off" });
         let key = if locked { "overlay_input_locked" } else { "overlay_input_unlocked" };
         let text = self.catalog.read().await.get(key).to_string();
@@ -184,6 +186,15 @@ impl<P: Player> Core<P> {
                 (in_standby, None)
             }
         };
+        // The remote lock follows the same rule as the timer: kept by the
+        // restart an update provokes, dropped by every other. Restored
+        // silently (nothing was toggled: no overlay, no chime) and published,
+        // so that the relay writes it to the input plugins at connection.
+        // Set before the writes below, which is also what drops a lock left
+        // on disk by a start that does not keep it.
+        let locked = std::mem::take(&mut self.persisted_input_locked);
+        self.input_locked = locked && matches!(over, crate::update::StartupOverride::Previous { .. });
+        self.publish_state();
         // Both branches persist, which is also what drops a timer left on
         // disk by a start that does not keep it.
         let outcome = if in_standby {
@@ -1845,16 +1856,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_lock_is_not_persisted() {
+    async fn the_lock_survives_the_restart_an_update_provokes() {
         let (mut core, _pc, _sc, _rx, d) = setup();
         core.handle_command(Command::SetInputLock(true)).await.unwrap();
-        // A volume step writes `state.json`; the lock was on when it did.
-        core.handle_command(Command::VolumeUp).await.unwrap();
         let path = d.path().join("state.json");
-        let text = std::fs::read_to_string(&path).expect("the volume step persisted");
-        assert!(!text.contains("input_lock") && !text.contains("locked"), "no lock field in the persisted state: {text}");
-        let (reborn, _pc, _sc, _rx, _d2) = setup_persisted(crate::state::load(&path));
-        assert!(!reborn.player_state().input_locked, "a restart unlocks");
+        assert!(crate::state::load(&path).input_locked, "written on the change itself");
+        let now = crate::update::now_unix_s();
+        let (mut reborn, _pc, _sc, rx, d2) = setup_persisted(crate::state::load(&path));
+        reborn
+            .startup(crate::update::StartupOverride::Previous { since_unix_s: now - 5 }, now)
+            .await
+            .unwrap();
+        assert!(reborn.player_state().input_locked, "an update restart keeps the lock");
+        assert!(rx.borrow().input_locked, "and publishes it, for the relay to tell the input plugins");
+        assert_eq!(overlay_text(&reborn), None, "restored silently: nothing was toggled");
+        assert!(crate::state::load(&d2.path().join("state.json")).input_locked, "and still on disk");
+    }
+
+    #[tokio::test]
+    async fn the_lock_is_forgotten_by_any_other_restart_and_the_file_with_it() {
+        let (mut core, _pc, _sc, _rx, d) = setup();
+        core.handle_command(Command::SetInputLock(true)).await.unwrap();
+        let path = d.path().join("state.json");
+        let now = crate::update::now_unix_s();
+        let (mut reborn, _pc, _sc, rx, d2) = setup_persisted(crate::state::load(&path));
+        reborn.startup(crate::update::StartupOverride::AsConfigured, now).await.unwrap();
+        assert!(!reborn.player_state().input_locked, "a power cut or a manual restart unlocks");
+        assert!(!rx.borrow().input_locked);
+        // A later update restart must not resurrect the old lock.
+        let left = crate::state::load(&d2.path().join("state.json"));
+        assert!(!left.input_locked, "the file no longer holds the lock");
+        let (mut again, _pc, _sc, _rx, _d3) = setup_persisted(left);
+        again
+            .startup(crate::update::StartupOverride::Previous { since_unix_s: now - 5 }, now)
+            .await
+            .unwrap();
+        assert!(!again.player_state().input_locked);
     }
 
     #[tokio::test]

@@ -868,7 +868,7 @@ pub struct PlayerState {
     pub next_alarm: Option<NextAlarm>,
     /// The remote lock is on: an input plugin that honours it is swallowing
     /// its keys. This is the core's own state (`Core::input_locked`, set by
-    /// `ToggleInputLock` and `SetInputLock`, forgotten on restart), published
+    /// `ToggleInputLock` and `SetInputLock`, forgotten on restart except the one an update provokes), published
     /// so the SPA shows the padlock. (The SDK derives `Announcement::input_lock`
     /// from `InputPlugin::input_lock`, not this field.) Absent when off, so no
     /// existing frame changes shape.

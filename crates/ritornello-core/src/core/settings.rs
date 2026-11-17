@@ -204,6 +204,7 @@ impl<P: Player> Core<P> {
             last_alarm_minute: self.last_alarm_minute,
             last_alarm_local: self.last_alarm_local,
             sleep_timer: self.persisted_sleep(),
+            input_locked: self.input_locked,
             equalizer: self.equalizer.clone(),
         };
         if let Err(e) = state::save(&self.state_path, &st) {
@@ -243,6 +244,7 @@ mod tests {
             last_alarm_minute: None,
             last_alarm_local: None,
             sleep_timer: None,
+            input_locked: false,
             equalizer: Default::default(),
         };
         let root = dir.path().to_path_buf();

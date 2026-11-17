@@ -1800,7 +1800,8 @@ what made that migration verifiable.
 
   From `display` contract 1.4 it also carries `input_locked` — `true` while
   the core's remote lock is on (see the `input` contract 1.2 lock below),
-  **absent** when it is off; the core forgets the lock on restart.
+  **absent** when it is off; the core forgets the lock on restart, except the restart an update
+  provokes.
 - `{"frame":"catalog","data":{…}}` — the declared sources, in
   `SourceCycle` order, and for each one that can enumerate them its named
   presets (see [`ListPresets`](#ritornello-plugin-radio--internet-radio) in
@@ -2074,7 +2075,8 @@ that stays silent. Learning is unaffected: a key being learned is captured, not
 interpreted, locked or not. The state belongs to the core: the plugin only
 mirrors the `lock` frames the SDK feeds its `watch`, so a restarted plugin
 comes back locked if the core still is (it is told at connection), and a core
-restart unlocks.
+restart unlocks, except the one an update provokes (the core keeps the lock
+through it, as it keeps the sleep timer).
 
 **Updating an existing installation** (old hard-coded-keyboard
 `ritornello-plugin-mce`): the old `deploy.sh` removed the
