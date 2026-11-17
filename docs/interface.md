@@ -11,7 +11,7 @@ and a single set of components; the difference between the phone and the
 desktop arrangement is Tailwind breakpoints, not two separate views (see
 "Layout" below).
 
-The page embeds buttons for 11 of the protocol's 26 commands: standby,
+The page embeds buttons for 11 of the protocol's 27 commands: standby,
 source switch, mute, previous/next, play/pause, stop, eject, the two
 play modes, random and repeat (see "Transport" below), and the remote
 lock's padlock (see "The remote lock" below). Three more
@@ -19,7 +19,7 @@ commands are sent by controls that are not buttons — the preset tiles send
 `Select`, the progress bar sends `SeekTo`, the volume slider sends
 `SetVolume`. Three are the sleep timer's menu — `SetSleepTimer`,
 `ExtendSleepTimer`, `CancelSleepTimer` (see [Sleep timer and
-alarms](#sleep-timer-and-alarms)). The remaining nine belong elsewhere: `VolumeUp`/`VolumeDown`
+alarms](#sleep-timer-and-alarms)). The remaining ten belong elsewhere: `VolumeUp`/`VolumeDown`
 and `SeekForward`/`SeekBackward` are the physical remote's hold-to-repeat
 and step keys (see "Physical remote" below) — the web page dropped its own
 ±5%-volume and ±`seek_step_s`-seek buttons in this refonte, in favour of
@@ -35,7 +35,8 @@ web page's absolute `SetRandom`/`SetRepeat` because a physical key does
 not know the current value of the mode it moves — see "Physical remote";
 and `ToggleInputLock` is the same story for the remote lock, sent by a
 physical key's long press where the page's padlock sends the absolute
-`SetInputLock`.
+`SetInputLock`; and `InputLockRefused` is the physical remote's answer to a
+key it refuses while locked (see "Locking the remote" below).
 
 `Next`/`Prev` are interpreted by the active source: preset for the radio,
 track for the CD player — these are not two distinct command pairs, only a
@@ -301,11 +302,26 @@ the remote moves the padlock too.
 What the lock does is ignore the keys of the input plugins that **honour**
 it: `generic-input` does (the infrared or keyboard device), `mpd` does not
 (a client of the network protocol is not a hand on the remote), and the page
-is never locked — otherwise nobody could unlock it. The padlock is therefore
-never greyed: both lock commands pass the core's standby gate, so a locked
-remote can be unlocked whatever the device is doing. The lock is held in
-memory only: **a core restart forgets it**, and the device comes back
-unlocked.
+is never locked — otherwise nobody could unlock it. A key `generic-input`
+refuses still gets an answer: its press shows LOCKED on the displays, at most
+once every 3 seconds and without the lock sound (see "Locking the remote"
+below). Standby never greys the padlock: both lock commands pass the core's
+standby gate, so a locked remote can be unlocked whatever the device is
+doing.
+
+The padlock is greyed in one case only: **unlocked, with no connected input
+plugin honouring the lock** — `generic-input` switched off, or not yet
+reconnected after a restart — since locking would then lock nothing while
+the page said locked and the device chimed. Its label says so ("No connected
+remote plugin honours the lock"). The core counts the input relays whose
+plugin announced `input_lock`, each one leaving the count when its connection
+ends whatever the cause, and publishes `input_lock_available` on the same
+stream (**omitted** while none is connected). A locked padlock is never
+greyed, available or not: a lock must always be removable from the page.
+
+The lock is forgotten when the core restarts, except for the restart an
+update provokes, which keeps it (see "Locking the remote" below); a power
+cut or a manual restart unlocks.
 
 Every lock change also plays a short **lock sound** on the device, chosen in
 the Player card (below): the chosen sound, with its locking or its unlocking
@@ -775,7 +791,18 @@ picks the key with "Learn" like any other. While locked, the plugin ignores
 every other key; only this long press still gets through, so the remote can
 always be unlocked from where it is held. The device answers on the
 displays with a LOCKED / UNLOCKED message (the console's included), and on the web page with the padlock (see "The
-remote lock" above). The lock is forgotten when the core restarts.
+remote lock" above). A key refused while locked is not met with silence
+either: its press shows LOCKED again (the plugin sends `InputLockRefused`, at
+most once every 3 seconds, whatever the device, so a remote drummed on does
+not re-arm the message or bother the core on every key: LOCKED stays up while
+keys keep coming, and goes the overlay duration after the last refusal sent),
+in standby too, without the lock sound and without
+changing anything; its autorepeats and its release say nothing. The lock is forgotten when the core restarts, except for the
+restart an update provokes, which keeps it (the core writes it to `state.json`
+on every change and reads it back only then, as it does for the sleep timer);
+a power cut or a manual restart unlocks. While the remote is locked, this page
+shows a "Remote locked" banner at its top saying how to unlock it, so keys
+tested there and ignored are not taken for a broken remote.
 
 **A row per installed source, appended at the end of the table.** Below
 the fixed actions, the page lists every source the core currently
@@ -1022,10 +1049,13 @@ installer's marker or the rollback's report, still fresh):
   minute the restart ends in, but **never more than 15 minutes back** — a
   minute counts only if it starts inside that window — so an update stuck
   for an hour does not ring an alarm an hour late. Several due: the latest
-  rings, alone. The alarm wins over "the device stays as it was".
+  rings, alone. The alarm wins over "the device stays as it was";
+- the remote lock, written to `state.json` on every change, comes back as it
+  was, so a remote locked against a child is not unlocked by a 3 a.m. update
+  (see "Locking the remote" under the physical remote).
 
 Every other start — a power cut, a crash, a manual restart outside that
-window — drops the timer and catches nothing up.
+window — drops the timer and the lock, and catches nothing up.
 
 ### On the console display
 
@@ -1287,9 +1317,9 @@ after either file was written falls back to reading the Startup setting as
 normal. A device asleep at 3 a.m. that updates itself at 3 a.m. is still
 asleep afterwards, whether the update took or was reverted.
 
-The same restart, and only it, also keeps a running sleep timer and rings
-an alarm the update made the device miss: see [Across an update
-restart](#across-an-update-restart).
+The same restart, and only it, also keeps a running sleep timer and the
+remote lock, and rings an alarm the update made the device miss: see [Across
+an update restart](#across-an-update-restart).
 
 **A plugin gesture arms nothing.** The rollback net is for the core, whose
 install and whose crash-loop are the same event; a plugin runs in a process
@@ -1638,7 +1668,9 @@ nothing will be heard."), read from the same player stream as the Home page.
 The button posts `POST /api/lock-sound/preview` with `{"sound": "<value>"}`:
 `204` when the preview is queued (also for `none`, where nothing is), `422`
 with `{"error": …}` for an unknown value, `429` when a preview is already
-queued.
+queued; the page treats that `429` as a quiet no-op (no toast). `PUT
+/api/settings` refuses an unknown `lock_sound` with the same `422`, rather than
+storing the default.
 
 ### Seek step card
 

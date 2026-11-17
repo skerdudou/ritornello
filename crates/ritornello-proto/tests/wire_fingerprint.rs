@@ -93,6 +93,7 @@ fn command_label(c: &Command) -> &'static str {
         Command::CancelSleepTimer => "CancelSleepTimer",
         Command::ToggleInputLock => "ToggleInputLock",
         Command::SetInputLock(_) => "SetInputLock",
+        Command::InputLockRefused => "InputLockRefused",
     }
 }
 
@@ -335,6 +336,7 @@ fn state_full() -> PlayerState {
         }),
         next_alarm: Some(NextAlarm { weekday: Weekday::Friday, hour: 7, minute: 30 }),
         input_locked: true,
+        input_lock_available: true,
         track: track_full(),
     }
 }
@@ -630,6 +632,7 @@ fn input_section() -> Vec<String> {
         Command::CancelSleepTimer,
         Command::ToggleInputLock,
         Command::SetInputLock(true),
+        Command::InputLockRefused,
     ];
     for c in &commands {
         l.add(&format!("Command::{}", command_label(c)), c);

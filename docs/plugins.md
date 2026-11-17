@@ -1800,7 +1800,8 @@ what made that migration verifiable.
 
   From `display` contract 1.4 it also carries `input_locked` — `true` while
   the core's remote lock is on (see the `input` contract 1.2 lock below),
-  **absent** when it is off; the core forgets the lock on restart.
+  **absent** when it is off; the core forgets the lock on restart, except the restart an update
+  provokes.
 - `{"frame":"catalog","data":{…}}` — the declared sources, in
   `SourceCycle` order, and for each one that can enumerate them its named
   presets (see [`ListPresets`](#ritornello-plugin-radio--internet-radio) in
@@ -1980,6 +1981,11 @@ data](#where-a-plugin-keeps-its-data) above).
 On a phone its text buttons (Refresh, Learn, Clear, Load, Import, Export, Save)
 become icons, each still named by `aria-label` and `title`.
 
+While the remote is locked, the page shows a "Remote locked" banner at its
+top saying how to unlock it (the long press, or the padlock on the Listen
+page), following the core's `input_locked` live: someone testing keys there would otherwise
+take the ignored keys for a broken remote or broken bindings.
+
 Devices are found at startup and then **every five seconds** by the plugin
 itself: each tick lists `/dev/input` and opens any `eventN` node not already
 open, exactly what the page's "Refresh" button does (the button still
@@ -2041,9 +2047,14 @@ physical key for the timer is out of scope — but any input plugin may send
 them; the web page's menu does (see [Sleep timer and
 alarms](interface.md#sleep-timer-and-alarms)).
 
-`input` contract 1.2 adds the **remote lock**: two commands, `ToggleInputLock`
-and `SetInputLock(bool)`, and a plugin-side opt-in. A plugin that honours the
-lock overrides `InputPlugin::input_lock`, returning the sender of a `watch`
+`input` contract 1.2 adds the **remote lock**: three commands, `ToggleInputLock`,
+`SetInputLock(bool)` and `InputLockRefused`, and a plugin-side opt-in.
+`InputLockRefused` is what a plugin that honours the lock sends when it refuses
+a key: the core shows the LOCKED message on the displays (standby included) and
+does nothing else — no lock change, no lock sound — and only while the lock is
+on, so a refusal crossing an unlock says nothing. Throttling it is the sender's
+business. A core older than 1.2 logs it as an unknown command and skips it.
+A plugin that honours the lock overrides `InputPlugin::input_lock`, returning the sender of a `watch`
 channel it reads; the SDK announces that as `input_lock` (omitted from the
 announcement when false). Only such a plugin ever receives anything from the
 core on its input socket, and the only frame the core writes back is
@@ -2051,10 +2062,12 @@ core on its input socket, and the only frame the core writes back is
 once on each change of it. A plugin that did not opt in is never written to,
 and an unknown frame, or an unreadable line, is logged and skipped by the SDK's
 reader rather than ending it. A plugin that opts in without the SDK should
-know that if the core's lock writer gives up (a write blocked past its 2-second
-deadline, or an error), it closes its write side and the plugin reads EOF: that
-is not the core going away, and the commands the plugin sends keep flowing. The
-core does **not** filter commands itself:
+know that the core's lock writer never gives up on a slow reader: a write
+blocked past its 2-second deadline is logged once and then waited for, and when
+it completes the writer sends the lock's current value if it moved meanwhile,
+so a plugin that stops reading for a while catches up on resuming. Only a write
+error (the peer is gone) ends the writer, and the commands the plugin sends keep
+flowing throughout. The core does **not** filter commands itself:
 what a locked state means for its own keys is the plugin's decision (the MPD
 plugin does not opt in: phone apps are an adult's remote).
 
@@ -2068,11 +2081,18 @@ pressed again to toggle back. The lock key never sends anything on a plain
 press, and it keeps working while locked, since it is the way out. While
 locked, **every other key is ignored — Power included**, and so are their
 autorepeats; the core applies whatever it receives, so this is the only place
-that stays silent. Learning is unaffected: a key being learned is captured, not
+that stays silent. Silent toward the music, not toward the owner: the press of
+an ignored key sends `InputLockRefused`, so the displays say LOCKED, at most
+once every 3 seconds counted from the last one sent and shared by every device
+(a remote drummed on does not re-arm the message or bother the core on every
+key: LOCKED stays up while keys keep coming, and goes `overlay_ms` after the
+last refusal sent); autorepeats, releases and the lock key itself never send
+it. Learning is unaffected: a key being learned is captured, not
 interpreted, locked or not. The state belongs to the core: the plugin only
 mirrors the `lock` frames the SDK feeds its `watch`, so a restarted plugin
 comes back locked if the core still is (it is told at connection), and a core
-restart unlocks.
+restart unlocks, except the one an update provokes (the core keeps the lock
+through it, as it keeps the sleep timer).
 
 **Updating an existing installation** (old hard-coded-keyboard
 `ritornello-plugin-mce`): the old `deploy.sh` removed the

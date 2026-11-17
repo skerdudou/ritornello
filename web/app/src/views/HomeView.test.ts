@@ -248,10 +248,10 @@ describe('HomeView', () => {
     vi.stubGlobal('EventSource', FakeEventSource)
     const HomeView = (await import('./HomeView.vue')).default
     const w = mount(HomeView)
-    FakeEventSource.last!.push({ input_locked: false })
+    FakeEventSource.last!.push({ input_locked: false, input_lock_available: true })
     await nextTick()
     await w.get('[data-input-lock]').trigger('click')
-    FakeEventSource.last!.push({ input_locked: true })
+    FakeEventSource.last!.push({ input_locked: true, input_lock_available: true })
     await nextTick()
     await w.get('[data-input-lock]').trigger('click')
     expect(posts).toEqual([
@@ -507,11 +507,34 @@ describe('HomeView — unavailable buttons', () => {
     expect(keyLocked.attributes('aria-pressed')).toBe('true')
     expect(keyLocked.attributes('aria-label')).toBe('input_lock_locked')
     expect(keyLocked.attributes('title')).toBe('input_lock_locked')
-    // The field is omitted from the payload when false.
-    const unlocked = await mountWith({})
+    // `input_locked` is omitted from the payload when false.
+    const unlocked = await mountWith({ input_lock_available: true })
     const keyUnlocked = unlocked.get('[data-input-lock]')
     expect(keyUnlocked.attributes('aria-pressed')).toBe('false')
     expect(keyUnlocked.attributes('aria-label')).toBe('input_lock_unlocked')
+    expect(keyUnlocked.attributes('disabled')).toBeUndefined()
+  })
+
+  it('the padlock is greyed, and says why, when no remote honours the lock', async () => {
+    // `input_lock_available` is omitted from the payload when false: with
+    // generic-input disabled, locking would lock nothing while the page
+    // claimed otherwise and the device chimed.
+    const w = await mountWith({})
+    const key = w.get('[data-input-lock]')
+    expect(key.attributes('disabled')).toBeDefined()
+    expect(key.attributes('aria-label')).toBe('input_lock_unavailable')
+    expect(key.attributes('title')).toBe('input_lock_unavailable')
+    // A disabled kit Button takes no pointer events: the hover hint comes
+    // from its box.
+    expect(w.get('[data-input-lock-box]').attributes('title')).toBe('input_lock_unavailable')
+  })
+
+  it('a locked padlock stays clickable even when no remote honours the lock', async () => {
+    // The plugin went away while locked: the lock must still be removable.
+    const w = await mountWith({ input_locked: true })
+    const key = w.get('[data-input-lock]')
+    expect(key.attributes('disabled')).toBeUndefined()
+    expect(key.attributes('aria-label')).toBe('input_lock_locked')
   })
 
   it('the padlock stays enabled in standby', async () => {

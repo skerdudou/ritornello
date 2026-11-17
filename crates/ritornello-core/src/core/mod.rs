@@ -41,6 +41,7 @@ mod alarms;
 mod commands;
 mod deadlines;
 mod equalizer;
+mod input_relays;
 mod lock_sound;
 mod play_request;
 mod playback;
@@ -52,6 +53,7 @@ mod sleep_timer;
 mod sources;
 pub use alarms::{first_check_in, secs_until_next_check};
 pub use deadlines::next_deadline;
+pub use input_relays::InputLockRelays;
 
 #[cfg(test)]
 mod test_support;
@@ -143,9 +145,18 @@ pub struct Core<P: Player> {
     /// `PlayerState::input_locked` and honoured by the input plugins that
     /// opted in (`Announcement::input_lock`), **never by the core** — mpd is
     /// not locked and the page is never locked, so `handle_command` applies
-    /// whatever it receives. `false` at construction and never persisted: a
-    /// restart unlocks, so a lock cannot outlive the reason it was set for.
+    /// whatever it receives. `false` at construction: a restart unlocks, so a
+    /// lock cannot outlive the reason it was set for — except the restart an
+    /// update provokes, which keeps it like the sleep timer (`startup`).
+    /// Written to `state.json` on every change.
     input_locked: bool,
+    /// The lock `state.json` held at launch, a snapshot for the reason
+    /// `persisted_standby` gives. Consumed by `startup`.
+    persisted_input_locked: bool,
+    /// The connected input relays whose plugin honours the lock, published as
+    /// `PlayerState::input_lock_available` (see `InputLockRelays`). Empty at
+    /// construction; `main` hands over the one its startup relays joined.
+    input_lock_relays: InputLockRelays,
     /// Standby as `state.json` had it at launch — the only thing
     /// `StartupPower::Previous` needs, and the reason it is a snapshot and
     /// not a re-read: `startup` runs after `new`, and by then `persist`
@@ -662,6 +673,8 @@ impl<P: Player> Core<P> {
             muted: false,
             standby: false,
             input_locked: false,
+            persisted_input_locked: persisted.input_locked,
+            input_lock_relays: InputLockRelays::default(),
             persisted_standby: persisted.standby,
             expecting_stream: false,
             playback: false,

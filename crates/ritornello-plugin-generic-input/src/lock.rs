@@ -61,9 +61,52 @@ impl LockKeyPress {
     }
 }
 
+/// The shortest time between two `InputLockRefused` sent to the core. A
+/// child drumming on a locked remote must not re-arm the displays' overlay
+/// nor bother the core on every key; one answer every few seconds is enough
+/// to say why nothing happens. It does not take LOCKED off the screen: with
+/// the default `overlay_ms` (5 s, longer than this interval) the message
+/// stays up while keys keep coming, and goes `overlay_ms` after the last
+/// refusal sent.
+pub const REFUSAL_INTERVAL: Duration = Duration::from_secs(3);
+
+/// When a refused key last made the plugin say so, shared by every device:
+/// one answer per interval in all, whichever receiver the press came from.
+#[derive(Default)]
+pub struct Refusals {
+    last_said: Option<Instant>,
+}
+
+impl Refusals {
+    /// `true` when a refusal at `now` must be sent: the first ever, or one
+    /// at least `REFUSAL_INTERVAL` after the last one **sent** (a refusal
+    /// kept silent does not push the next one back).
+    pub fn say(&mut self, now: Instant) -> bool {
+        match self.last_said {
+            Some(at) if now < at + REFUSAL_INTERVAL => false,
+            _ => {
+                self.last_said = Some(now);
+                true
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refusal_is_said_at_most_once_per_interval() {
+        let t0 = Instant::now();
+        let mut r = Refusals::default();
+        assert!(r.say(t0), "the first is said");
+        assert!(!r.say(t0 + Duration::from_millis(1)));
+        assert!(!r.say(t0 + REFUSAL_INTERVAL - Duration::from_millis(1)));
+        assert!(r.say(t0 + REFUSAL_INTERVAL), "counted from the last one said");
+        assert!(!r.say(t0 + REFUSAL_INTERVAL + Duration::from_secs(2)));
+        assert!(r.say(t0 + REFUSAL_INTERVAL * 2));
+    }
 
     #[test]
     fn a_press_shorter_than_the_threshold_never_fires() {

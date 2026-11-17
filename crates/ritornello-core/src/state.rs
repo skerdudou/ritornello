@@ -591,10 +591,25 @@ pub struct PersistedState {
     /// drops it. Lenient at load: see `lenient_option`.
     #[serde(default, deserialize_with = "lenient_option", skip_serializing_if = "Option::is_none")]
     pub sleep_timer: Option<PersistedSleep>,
+    /// The remote lock, written on every change and only while on. Read back
+    /// only by the restart an update provokes (`Core::startup` with
+    /// `StartupOverride::Previous`), like the sleep timer; every other start
+    /// drops it. Lenient at load: anything but `true` reads as unlocked. An
+    /// older core, which does not know the field, ignores it (no
+    /// `deny_unknown_fields` here).
+    #[serde(default, deserialize_with = "lenient_bool", skip_serializing_if = "std::ops::Not::not")]
+    pub input_locked: bool,
     /// The equalizer. Always written, so the file shows the setting. Lenient
     /// at load, as a whole: see `lenient_equalizer`.
     #[serde(default, deserialize_with = "lenient_equalizer")]
     pub equalizer: EqualizerSettings,
+}
+
+/// A value that is not a boolean reads as `false`, never as a reason to take
+/// `load`'s all-or-nothing path (`PersistedState.fallback`'s doc measured why).
+fn lenient_bool<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(v.as_bool().unwrap_or(false))
 }
 
 /// A block that does not read as `EqualizerSettings`, or reads but does not
@@ -720,6 +735,7 @@ impl Default for PersistedState {
             last_alarm_minute: None,
             last_alarm_local: None,
             sleep_timer: None,
+            input_locked: false,
             equalizer: EqualizerSettings::default(),
         }
     }
@@ -1111,6 +1127,7 @@ mod tests {
             last_alarm_minute: Some(28_333_333),
             last_alarm_local: Some(LocalMinute { day_key: 123_317, hour: 7, minute: 30 }),
             sleep_timer: Some(PersistedSleep { ends_at_unix_s: 1_700_000_000, mode: ritornello_proto::SleepMode::EndOfTrack }),
+            input_locked: false,
             equalizer: Default::default(),
         };
         save(&path, &st).unwrap();
@@ -1148,6 +1165,7 @@ mod tests {
             last_alarm_minute: None,
             last_alarm_local: None,
             sleep_timer: None,
+            input_locked: false,
             equalizer: Default::default(),
         };
         save(&path, &st).unwrap();
@@ -1178,6 +1196,7 @@ mod tests {
             last_alarm_minute: None,
             last_alarm_local: None,
             sleep_timer: None,
+            input_locked: false,
             equalizer: Default::default(),
         };
         save(&path, &st).unwrap();
@@ -1384,6 +1403,22 @@ mod tests {
         }
         std::fs::write(&path, r#"{"active_source":"cd","volume":41,"update_sources":[1,"a/b",null,"c/d"]}"#).unwrap();
         assert_eq!(load(&path).update_sources, vec!["a/b".to_string(), "c/d".to_string()]);
+    }
+
+    /// A remote lock that does not read as a boolean is unlocked, never a
+    /// reset of the other settings. **[MUTATION]** drop the `deserialize_with`:
+    /// every shape below resets the volume, red.
+    #[test]
+    fn a_malformed_input_lock_reads_as_unlocked_and_never_resets_the_other_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        for bad in ["\"yes\"", "1", "null", "{}", "[true]"] {
+            std::fs::write(&path, format!(r#"{{"active_source":"cd","volume":41,"input_locked":{bad}}}"#)).unwrap();
+            let st = load(&path);
+            assert_eq!((st.active_source.as_str(), st.volume, st.input_locked), ("cd", 41, false), "{bad}");
+        }
+        std::fs::write(&path, r#"{"active_source":"cd","volume":41,"input_locked":true}"#).unwrap();
+        assert!(load(&path).input_locked);
     }
 
     /// A sleep timer that does not read as one is no timer, never a reset of

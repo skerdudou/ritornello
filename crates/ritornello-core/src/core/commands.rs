@@ -9,7 +9,8 @@ impl<P: Player> Core<P> {
         // a source on the page, the remote or an MPD client turns the device
         // on there instead of doing nothing. The remote lock is the other
         // exception: it must be lockable and unlockable while the device
-        // sleeps, or a locked remote could never be freed in standby.
+        // sleeps, or a locked remote could never be freed in standby — and a
+        // key it refuses still says LOCKED on the console.
         // Everything else, presets and volume included, is still ignored.
         if self.standby
             && !matches!(
@@ -19,6 +20,7 @@ impl<P: Player> Core<P> {
                     | Command::SelectSource(_)
                     | Command::ToggleInputLock
                     | Command::SetInputLock(_)
+                    | Command::InputLockRefused
             )
         {
             return Ok(());
@@ -47,19 +49,35 @@ impl<P: Player> Core<P> {
     /// repeated is harmless. The lock is only state and feedback here: the
     /// input plugins that opted in read it from the published state and
     /// refuse their own keys; the core keeps applying every command it
-    /// receives. Not persisted — see the field. The overlay is shown even
+    /// receives. Persisted on every change, read back only after an update
+    /// restart — see the field. The overlay is shown even
     /// when the value did not change, so that pressing the unlock key on an
     /// unlocked device still answers — and so is the lock sound, for the
     /// same reason: a device asleep has no screen, and the chime is then the
     /// key's only answer (`lock_sound.rs`; it never fails the lock).
     pub(super) async fn set_input_lock(&mut self, locked: bool) {
         self.input_locked = locked;
+        self.persist();
         tracing::info!("remote lock: {}", if locked { "on" } else { "off" });
         let key = if locked { "overlay_input_locked" } else { "overlay_input_unlocked" };
         let text = self.catalog.read().await.get(key).to_string();
         self.show_message(text);
         let motif = if locked { crate::lock_sound::Motif::Lock } else { crate::lock_sound::Motif::Unlock };
         self.play_lock_sound(self.settings.lock_sound, motif).await;
+    }
+
+    /// A key refused by a locked remote: the LOCKED message again, so the key
+    /// gets an answer — and nothing else. No chime (it belongs to a lock
+    /// change, and a remote pressed in a child's hands would ring on every
+    /// key), no write, no change of the lock. Only while locked: a refusal
+    /// sent just before an unlock reached the plugin must not claim LOCKED
+    /// over the UNLOCKED just shown. The plugin throttles what it sends.
+    pub(super) async fn say_input_locked(&mut self) {
+        if !self.input_locked {
+            return;
+        }
+        let text = self.catalog.read().await.get("overlay_input_locked").to_string();
+        self.show_message(text);
     }
 
     /// Absolute volume, the only way in for a setting that comes from no key:
@@ -184,6 +202,15 @@ impl<P: Player> Core<P> {
                 (in_standby, None)
             }
         };
+        // The remote lock follows the same rule as the timer: kept by the
+        // restart an update provokes, dropped by every other. Restored
+        // silently (nothing was toggled: no overlay, no chime) and published,
+        // so that the relay writes it to the input plugins at connection.
+        // Set before the writes below, which is also what drops a lock left
+        // on disk by a start that does not keep it.
+        let locked = std::mem::take(&mut self.persisted_input_locked);
+        self.input_locked = locked && matches!(over, crate::update::StartupOverride::Previous { .. });
+        self.publish_state();
         // Both branches persist, which is also what drops a timer left on
         // disk by a start that does not keep it.
         let outcome = if in_standby {
@@ -699,6 +726,7 @@ impl<P: Player> Core<P> {
             Command::CancelSleepTimer => self.cancel_sleep_timer().await,
             Command::ToggleInputLock => self.set_input_lock(!self.input_locked).await,
             Command::SetInputLock(locked) => self.set_input_lock(locked).await,
+            Command::InputLockRefused => self.say_input_locked().await,
         }
         Ok(())
     }
@@ -1845,16 +1873,92 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_lock_is_not_persisted() {
+    async fn the_lock_survives_the_restart_an_update_provokes() {
         let (mut core, _pc, _sc, _rx, d) = setup();
         core.handle_command(Command::SetInputLock(true)).await.unwrap();
-        // A volume step writes `state.json`; the lock was on when it did.
-        core.handle_command(Command::VolumeUp).await.unwrap();
         let path = d.path().join("state.json");
-        let text = std::fs::read_to_string(&path).expect("the volume step persisted");
-        assert!(!text.contains("input_lock") && !text.contains("locked"), "no lock field in the persisted state: {text}");
-        let (reborn, _pc, _sc, _rx, _d2) = setup_persisted(crate::state::load(&path));
-        assert!(!reborn.player_state().input_locked, "a restart unlocks");
+        assert!(crate::state::load(&path).input_locked, "written on the change itself");
+        let now = crate::update::now_unix_s();
+        let (mut reborn, _pc, _sc, rx, d2) = setup_persisted(crate::state::load(&path));
+        reborn
+            .startup(crate::update::StartupOverride::Previous { since_unix_s: now - 5 }, now)
+            .await
+            .unwrap();
+        assert!(reborn.player_state().input_locked, "an update restart keeps the lock");
+        assert!(rx.borrow().input_locked, "and publishes it, for the relay to tell the input plugins");
+        assert_eq!(overlay_text(&reborn), None, "restored silently: nothing was toggled");
+        assert!(crate::state::load(&d2.path().join("state.json")).input_locked, "and still on disk");
+    }
+
+    #[tokio::test]
+    async fn the_lock_is_forgotten_by_any_other_restart_and_the_file_with_it() {
+        let (mut core, _pc, _sc, _rx, d) = setup();
+        core.handle_command(Command::SetInputLock(true)).await.unwrap();
+        let path = d.path().join("state.json");
+        let now = crate::update::now_unix_s();
+        let (mut reborn, _pc, _sc, rx, d2) = setup_persisted(crate::state::load(&path));
+        reborn.startup(crate::update::StartupOverride::AsConfigured, now).await.unwrap();
+        assert!(!reborn.player_state().input_locked, "a power cut or a manual restart unlocks");
+        assert!(!rx.borrow().input_locked);
+        // A later update restart must not resurrect the old lock.
+        let left = crate::state::load(&d2.path().join("state.json"));
+        assert!(!left.input_locked, "the file no longer holds the lock");
+        let (mut again, _pc, _sc, _rx, _d3) = setup_persisted(left);
+        again
+            .startup(crate::update::StartupOverride::Previous { since_unix_s: now - 5 }, now)
+            .await
+            .unwrap();
+        assert!(!again.player_state().input_locked);
+    }
+
+    /// What a lock chime leaves in the player's calls (`lock_sound.rs`):
+    /// played aside when idle, mixed into `af` while playing.
+    fn chime_calls(calls: &Mutex<Vec<String>>) -> Vec<String> {
+        calls.lock().unwrap().iter().filter(|c| c.starts_with("aside ") || c.starts_with("af")).cloned().collect()
+    }
+
+    #[tokio::test]
+    async fn a_refused_key_says_locked_without_a_chime_or_a_change() {
+        let (mut core, pc, _sc, rx, d) = setup();
+        core.handle_command(Command::SetInputLock(true)).await.unwrap();
+        assert!(!chime_calls(&pc).is_empty(), "otherwise the silence below proves nothing");
+        core.overlay = None;
+        pc.lock().unwrap().clear();
+        let path = d.path().join("state.json");
+        std::fs::remove_file(&path).unwrap();
+
+        core.handle_command(Command::InputLockRefused).await.unwrap();
+
+        assert_eq!(overlay_text(&core).as_deref(), Some("LOCKED"));
+        assert_eq!(chime_calls(&pc), Vec::<String>::new(), "a refused key never chimes");
+        assert!(core.lock_sound_deadline().is_none());
+        assert!(rx.borrow().input_locked, "still locked");
+        assert!(rx.borrow().overlay.is_some(), "and published");
+        assert!(!path.exists(), "nothing changed, nothing written");
+    }
+
+    #[tokio::test]
+    async fn a_refused_key_never_locks_an_unlocked_device() {
+        // A refusal that crosses an unlock (sent by the plugin before the new
+        // value reached it) must neither relock nor claim LOCKED.
+        let (mut core, pc, _sc, rx, _d) = setup();
+        core.handle_command(Command::InputLockRefused).await.unwrap();
+        assert!(!rx.borrow().input_locked);
+        assert_eq!(overlay_text(&core), None);
+        assert_eq!(chime_calls(&pc), Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn a_refused_key_answers_in_standby() {
+        let (mut core, pc, _sc, rx, _d) = setup();
+        core.start_in_standby().await.unwrap();
+        core.handle_command(Command::SetInputLock(true)).await.unwrap();
+        core.overlay = None;
+        pc.lock().unwrap().clear();
+        core.handle_command(Command::InputLockRefused).await.unwrap();
+        assert_eq!(overlay_text(&core).as_deref(), Some("LOCKED"), "the console still answers in standby");
+        assert!(rx.borrow().standby, "without waking the device");
+        assert_eq!(chime_calls(&pc), Vec::<String>::new());
     }
 
     #[tokio::test]

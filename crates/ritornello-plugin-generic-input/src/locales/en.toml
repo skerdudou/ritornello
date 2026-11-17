@@ -10,6 +10,7 @@ save_failed = "the save failed"
 conflict_code = "code {code} is already assigned to {action}"
 conflict_dup = "code {code} is entered twice"
 save_conflicts = "Resolve the duplicate key codes before saving"
+lock_banner = "Remote locked: keys are ignored until it is unlocked (long press on the lock key, or the padlock on the Listen page)"
 
 # admin page
 title = "Key bindings"

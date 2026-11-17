@@ -40,6 +40,17 @@ async function errorMessage(r: Response): Promise<string> {
 /// otherwise. Convention taken as is from the `put()` helper of the current
 /// pages, so that migrated views do not have to change their logic.
 async function send(method: 'PUT' | 'POST' | 'DELETE', url: string, body: unknown): Promise<string | null> {
+  return (await sendWithStatus(method, url, body)).error
+}
+
+/// `send`, plus the HTTP status of a refusal (`null` when `fetch` itself
+/// rejected, or on success): for the rare caller that must tell one refusal
+/// from another, such as a 429 that is not worth a toast.
+async function sendWithStatus(
+  method: 'PUT' | 'POST' | 'DELETE',
+  url: string,
+  body: unknown,
+): Promise<{ error: string | null; status: number | null }> {
   // A rejection of `fetch` itself (core restarting, Wi-Fi down) is part of the
   // "return value" convention, like the non-ok statuses: nearly all callers do
   // not wrap an `api.put` in a `try`, and an exception here became a silent
@@ -49,10 +60,10 @@ async function send(method: 'PUT' | 'POST' | 'DELETE', url: string, body: unknow
   try {
     r = await fetch(url, { method, headers: JSON_HEADERS, body: JSON.stringify(body) })
   } catch (e) {
-    return e instanceof Error ? e.message : String(e)
+    return { error: e instanceof Error ? e.message : String(e), status: null }
   }
-  if (r.ok) return null
-  return errorMessage(r)
+  if (r.ok) return { error: null, status: null }
+  return { error: await errorMessage(r), status: r.status }
 }
 
 export const api = {
@@ -66,6 +77,7 @@ export const api = {
   },
   put: (url: string, body: unknown) => send('PUT', url, body),
   post: (url: string, body: unknown) => send('POST', url, body),
+  postWithStatus: (url: string, body: unknown) => sendWithStatus('POST', url, body),
   // Same return convention as put/post — an error message or null, never a
   // rejection. Nearly no caller wraps these in a try, and an exception here
   // became a silent unhandled rejection: the user pressed a button and

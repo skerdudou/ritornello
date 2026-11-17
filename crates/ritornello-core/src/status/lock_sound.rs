@@ -18,7 +18,9 @@ struct PreviewRequest {
     sound: LockSound,
 }
 
-async fn refuse(state: &AppState) -> Response {
+/// The 422 `lock_sound_invalid` of an unknown sound, shared with
+/// `PUT /api/settings` (`settings_put`).
+pub(super) async fn refuse(state: &AppState) -> Response {
     let msg = state.catalog.read().await.get("lock_sound_invalid").to_string();
     (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": msg }))).into_response()
 }

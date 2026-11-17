@@ -10,6 +10,7 @@ save_failed = "no se pudo guardar"
 conflict_code = "el código {code} ya está asignado a {action}"
 conflict_dup = "el código {code} está introducido dos veces"
 save_conflicts = "Resuelve los códigos de tecla duplicados antes de guardar"
+lock_banner = "Mando bloqueado: las teclas se ignoran hasta desbloquearlo (pulsación larga en la tecla de bloqueo, o el candado de la página Escuchar)"
 
 # admin page
 title = "Asignación de teclas"

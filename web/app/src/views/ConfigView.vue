@@ -318,8 +318,10 @@ const lockSoundNote = computed(() => {
 
 /** Plays the value on screen on the device, saved or not. */
 async function previewLockSound() {
-  const err = await api.post('/api/lock-sound/preview', { sound: settings.value.lock_sound })
-  if (err) toast.error(err)
+  const { error, status } = await api.postWithStatus('/api/lock-sound/preview', { sound: settings.value.lock_sound })
+  // 429: a preview is already queued (the route answers at once on a full
+  // queue), so a press while it plays is a no-op, not a failure.
+  if (error && status !== 429) toast.error(error)
 }
 
 const clockHoursLabel = computed(() =>

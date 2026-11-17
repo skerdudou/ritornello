@@ -664,10 +664,12 @@ pub async fn run_input_client(
     run_input_client_with_timeout(socket_path, cmd_tx, lock, INPUT_LOCK_WRITE_TIMEOUT).await
 }
 
-/// Ceiling on one lock-frame write. A plugin that stops reading its socket
-/// would otherwise leave the writer parked forever on a full buffer; the
-/// writer gives up instead (one `warn`) and the commands, read by another
-/// task, keep flowing.
+/// How long one lock-frame write may take before the writer complains (one
+/// `warn`). It never gives up: a plugin that stops reading its socket parks
+/// the writer on a full buffer (the commands, read by another task, keep
+/// flowing), and as soon as the plugin reads again the write completes and
+/// the writer relays the lock's current value. Only a write error (peer gone)
+/// ends it.
 const INPUT_LOCK_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Aborts its task when dropped: the lock writer ends with the reader.
@@ -682,7 +684,10 @@ impl Drop for AbortOnDrop {
 /// Writes the lock to the plugin: the current value, then each change of
 /// `input_locked`. Runs on its own task so that a blocked write can never
 /// hold up the read loop, nor (it only borrows the watch) the publisher that
-/// toggles the lock.
+/// toggles the lock. A write that outlasts `timeout` is warned about once and
+/// then awaited to its end (never cancelled: a half-written line would corrupt
+/// the framing); the value is re-read afterwards, so a slow plugin is never
+/// left on a stale lock.
 async fn write_lock_frames(mut write: OwnedWriteHalf, mut state: watch::Receiver<PlayerState>, timeout: Duration) {
     let mut last = state.borrow_and_update().input_locked;
     loop {
@@ -694,19 +699,26 @@ async fn write_lock_frames(mut write: OwnedWriteHalf, mut state: watch::Receiver
                 return;
             }
         };
-        match tokio::time::timeout(timeout, write.write_all(line.as_bytes())).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                tracing::warn!("writing the lock to the input plugin failed, no longer relaying it: {e}");
-                return;
-            }
+        // The write future is pinned and awaited to its end: dropping a
+        // `write_all` midway could leave half a line on the socket and
+        // corrupt the framing. The timeout only decides when to complain.
+        let mut written = std::pin::pin!(write.write_all(line.as_bytes()));
+        let result = match tokio::time::timeout(timeout, written.as_mut()).await {
+            Ok(r) => r,
             Err(_) => {
-                tracing::warn!("the input plugin does not read its socket, no longer relaying the lock");
-                return;
+                tracing::warn!("the input plugin does not read its socket, the lock relay waits for it");
+                written.await
             }
+        };
+        if let Err(e) = result {
+            tracing::warn!("writing the lock to the input plugin failed, no longer relaying it: {e}");
+            return;
         }
         // Wait for a change of the field itself: a publish that touched only
-        // the volume wakes `changed()` but is not written.
+        // the volume wakes `changed()` but is not written. A change that landed
+        // during a slow write left `changed()` pending (nothing marked it seen
+        // since the last `borrow_and_update`), so it fires at once here and the
+        // current value is compared with what was written.
         loop {
             if state.changed().await.is_err() {
                 return;
@@ -2187,30 +2199,48 @@ mod tests {
         assert_eq!(msg.cmd, ritornello_proto::Command::Next);
     }
 
-    /// The write deadline itself. The test below this one never fills the
-    /// socket buffer (an even number of flips between two yields means the
-    /// writer sees no change), so it cannot reach the timeout. Here the writer
-    /// runs against a peer that never reads, and it gets a change to write
-    /// after **every** flip, until well past a Unix socket's buffer (about
-    /// 208 KB, i.e. ~7 000 frames of ~31 bytes): a write must then block, and
-    /// the writer must give up within its deadline.
+    /// The write deadline itself, and what follows it. The socket buffer is
+    /// filled to the byte with blank lines before the writer starts, so its
+    /// very first frame (`locked:false`, the initial state) is, by
+    /// construction, the one stuck mid-write and timing out. The writer must
+    /// not give up: the lock then changes to `true`, and when the peer resumes
+    /// reading, the **last** frame it reads is that current value, never the
+    /// stale one the writer was stuck on.
     #[tokio::test]
-    async fn a_writer_facing_a_full_socket_gives_up_within_its_deadline() {
-        let (ours, _peer_that_never_reads) = tokio::net::UnixStream::pair().unwrap();
+    async fn a_writer_that_timed_out_still_relays_the_current_lock_once_the_peer_reads() {
+        let timeout = std::time::Duration::from_millis(100);
+        let (ours, peer) = tokio::net::UnixStream::pair().unwrap();
         let (_read, write) = ours.into_split();
+        let mut filler = 0usize;
+        while let Ok(1) = write.try_write(b"\n") {
+            filler += 1;
+        }
+        // A Unix socket charges each small write its own buffer overhead, so
+        // a few hundred one-byte writes already fill it.
+        assert!(filler > 100, "the buffer must have been filled, {filler} bytes");
         let (tx, rx) = watch::channel(state_with_lock(false));
-        let writer = tokio::spawn(write_lock_frames(write, rx, std::time::Duration::from_millis(200)));
-        for _ in 0..100_000u32 {
-            tx.send_modify(|s| s.input_locked = !s.input_locked);
-            tokio::task::yield_now().await;
-            if writer.is_finished() {
-                break;
+        let writer = tokio::spawn(write_lock_frames(write, rx, timeout));
+        // Well past the deadline: the first write has timed out.
+        tokio::time::sleep(timeout * 4).await;
+        assert!(!writer.is_finished(), "a write timeout must not end the writer");
+        tx.send_modify(|s| s.input_locked = true);
+
+        let (read, _w) = peer.into_split();
+        let mut lines = BufReader::new(read).lines();
+        let mut frames = Vec::new();
+        while let Ok(Ok(Some(line))) =
+            tokio::time::timeout(std::time::Duration::from_millis(500), lines.next_line()).await
+        {
+            if !line.is_empty() {
+                frames.push(line);
             }
         }
-        tokio::time::timeout(std::time::Duration::from_secs(3), writer)
-            .await
-            .expect("the writer must give up on its own, not stay parked on a full socket")
-            .unwrap();
+        assert_eq!(
+            frames,
+            [r#"{"frame":"lock","locked":false}"#, r#"{"frame":"lock","locked":true}"#],
+            "the stuck frame completes, then the current value follows"
+        );
+        assert!(!writer.is_finished());
     }
 
     /// A plugin that never reads must neither stall the toggling nor the

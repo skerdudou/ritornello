@@ -89,6 +89,15 @@ describe('api', () => {
     await expect(api.del('/api/plugins/cd')).resolves.toBe("No plugin named 'cd'")
   })
 
+  it('postWithStatus tells a refusal by its status and keeps the post convention', async () => {
+    mockFetch(new Response(null, { status: 429 }))
+    await expect(api.postWithStatus('/x', {})).resolves.toEqual({ error: 'HTTP 429', status: 429 })
+    mockFetch(new Response(null, { status: 204 }))
+    await expect(api.postWithStatus('/x', {})).resolves.toEqual({ error: null, status: null })
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
+    await expect(api.postWithStatus('/x', {})).resolves.toEqual({ error: 'Failed to fetch', status: null })
+  })
+
   it('put and post render a network failure as a message, never as an exception', async () => {
     // Regression (review 2026-07-27): a rejection of `fetch` itself (core
     // restarting, Wi-Fi down) escaped the "return value" convention — callers

@@ -10,6 +10,7 @@ save_failed = "salvataggio non riuscito"
 conflict_code = "il codice {code} è già assegnato a {action}"
 conflict_dup = "il codice {code} è inserito due volte"
 save_conflicts = "Correggi i codici tasto duplicati prima di salvare"
+lock_banner = "Telecomando bloccato: i tasti vengono ignorati fino allo sblocco (pressione lunga sul tasto di blocco, o il lucchetto della pagina Ascolta)"
 
 # admin page
 title = "Associazioni dei tasti"
