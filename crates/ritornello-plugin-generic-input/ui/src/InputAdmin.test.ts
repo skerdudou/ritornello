@@ -802,3 +802,57 @@ describe('phone layout', () => {
     expect(w.find('[data-device-select]').classes()).toContain('max-w-full')
   })
 })
+
+describe('remote lock banner', () => {
+  // jsdom has no `EventSource`: stand in for the core's pushed `/api/player`
+  // stream and keep a handle on it to push frames.
+  let streams: Array<{ url: string; closed: boolean; onmessage: ((e: { data: string }) => void) | null }>
+  beforeEach(() => {
+    vi.unstubAllGlobals()
+    document.body.innerHTML = ''
+    streams = []
+    vi.stubGlobal(
+      'EventSource',
+      class {
+        url: string
+        closed = false
+        onmessage: ((e: { data: string }) => void) | null = null
+        constructor(url: string) {
+          this.url = url
+          streams.push(this)
+        }
+        close() {
+          this.closed = true
+        }
+      },
+    )
+  })
+  const push = async (state: unknown) => {
+    streams[0]!.onmessage?.({ data: JSON.stringify(state) })
+    await flushPromises()
+  }
+  const CAT = { ...CATALOG, lock_banner: 'Remote locked: keys are ignored' }
+  const mountWithBanner = async () => {
+    stub(() => DATA)
+    const w = mount(InputAdmin, { props: { catalog: CAT, base: BASE }, attachTo: document.body })
+    await flushPromises()
+    return w
+  }
+
+  it('is shown while the core reports the remote locked, and gone once unlocked', async () => {
+    const w = await mountWithBanner()
+    expect(streams[0]!.url).toBe('/api/player')
+    expect(w.find('[data-input-locked]').exists()).toBe(false)
+    await push({ input_locked: true })
+    expect(w.find('[data-input-locked]').text()).toBe('Remote locked: keys are ignored')
+    // The core omits the field when it is off.
+    await push({})
+    expect(w.find('[data-input-locked]').exists()).toBe(false)
+  })
+
+  it('closes its stream when the page goes away', async () => {
+    const w = await mountWithBanner()
+    w.unmount()
+    expect(streams[0]!.closed).toBe(true)
+  })
+})

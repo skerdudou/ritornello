@@ -9,6 +9,7 @@ save_failed = "l'enregistrement a échoué"
 conflict_code = "le code {code} est déjà affecté à {action}"
 conflict_dup = "le code {code} est saisi deux fois"
 save_conflicts = "Corrigez les codes en double avant d’enregistrer"
+lock_banner = "Télécommande verrouillée : les touches sont ignorées jusqu’au déverrouillage (appui long sur la touche de verrou, ou cadenas de la page Écouter)"
 
 title = "Affectation des touches"
 device_label = "Périphérique"

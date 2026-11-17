@@ -10,6 +10,7 @@ save_failed = "Speichern fehlgeschlagen"
 conflict_code = "Code {code} ist bereits {action} zugewiesen"
 conflict_dup = "Code {code} ist doppelt eingetragen"
 save_conflicts = "Beheben Sie die doppelten Tastencodes vor dem Speichern"
+lock_banner = "Fernbedienung gesperrt: Tasten werden bis zur Entsperrung ignoriert (lange auf die Sperrtaste drücken oder das Schloss auf der Seite Hören verwenden)"
 
 # admin page
 title = "Tastenbelegung"

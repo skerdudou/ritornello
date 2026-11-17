@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import {
-  api, Button, Card, CardContent, CardHeader, CardTitle, createT, Input, type Catalog,
+  api, Button, Card, CardContent, CardHeader, CardTitle, createT, Input, onPlayer, type Catalog,
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@ritornello/ui'
 import {
@@ -139,8 +139,25 @@ async function reload() {
   }
 }
 
-onMounted(reload)
-onUnmounted(() => stopTimer())
+// The core's remote lock, read from the pushed player stream (the kit's
+// `onPlayer`, the same mechanism the other plugin pages use: no polling).
+// While it is on the core ignores every key, so a user testing keys on this
+// page would think the remote or the bindings are broken. The core omits the
+// field when the lock is off, hence the strict comparison. Without
+// `EventSource` the banner simply never shows.
+const locked = ref(false)
+let stopPlayer: (() => void) | null = null
+
+onMounted(() => {
+  stopPlayer = onPlayer((state) => {
+    locked.value = (state as { input_locked?: boolean } | null)?.input_locked === true
+  })
+  void reload()
+})
+onUnmounted(() => {
+  stopPlayer?.()
+  stopTimer()
+})
 
 // A stable identity for a row, independent of its *position* in `rows` and
 // of its *label* text: a fixed action's catalogue key, or a source row's
@@ -459,6 +476,9 @@ function export_() {
       <CardTitle>{{ t('title') }}</CardTitle>
     </CardHeader>
     <CardContent class="space-y-4">
+    <p v-if="locked" data-input-locked role="status" class="rounded-md border border-border bg-muted px-3 py-2 text-sm">
+      {{ t('lock_banner') }}
+    </p>
     <div class="flex flex-wrap items-center gap-2">
       <!-- The neighboring <label> is not associated with the trigger (no
            for/id through the Select component): the aria-label provides the
