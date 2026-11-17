@@ -254,6 +254,7 @@ impl<P: Player> Core<P> {
             // Kept by `refresh_next_alarm`, not computed here: see the field.
             next_alarm: self.next_alarm,
             input_locked: self.input_locked,
+            input_lock_available: self.input_lock_relays.any(),
             track: {
                 let mut m = self.metadata.state();
                 // Precedence: the duration measured by mpv wins over the one

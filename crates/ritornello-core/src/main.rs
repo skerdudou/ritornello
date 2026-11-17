@@ -80,24 +80,34 @@ impl core::Source for SourceClient {
 /// the current value at once rather than waiting for a change (see the note on
 /// `main`'s `state_rx` at `spawn_display_relay`).
 ///
+/// The same flag counts the relay in `relays` (`InputLockRelays`), for the
+/// page to know whether the lock has an effect anywhere: joined here, before
+/// the task exists, and given back when the task ends — **before** it reports
+/// on `unreachable`, so the loop's arm that republishes on that report reads
+/// the count without this relay. The caller publishes after the spawn.
+///
 /// `run_input_client` **never** returns `Ok`: it exits with an error both on
 /// EOF and on the core's channel closing. The second case reports into the
 /// void — the loop is gone, its receiver with it — so it does not need to be
 /// distinguished.
+#[allow(clippy::too_many_arguments)]
 fn spawn_input_relay(
     name: String,
     socket: PathBuf,
     cmd_tx: mpsc::Sender<InputMessage>,
     input_lock: bool,
     state_rx: &watch::Receiver<PlayerState>,
+    relays: &core::InputLockRelays,
     unreachable: mpsc::Sender<(String, u64)>,
     wiring: u64,
 ) {
     let lock = input_lock.then(|| state_rx.clone());
+    let share = input_lock.then(|| relays.join());
     tokio::spawn(async move {
         if let Err(e) = run_input_client(&socket, cmd_tx, lock).await {
             tracing::warn!("input plugin {name} disconnected: {e}");
         }
+        drop(share);
         let _ = unreachable.send((name, wiring)).await;
     });
 }
@@ -1091,9 +1101,12 @@ async fn hotplug<P: player::Player>(
                     children.cmd_tx.clone(),
                     announcement.input_lock,
                     &children.state_rx,
+                    &core.input_lock_relays(),
                     children.unreachable_tx.clone(),
                     wiring,
                 );
+                // The page learns at once that the lock now has an effect.
+                core.publish_state();
                 lines.push(announced_plugin_line(&name, "input", true, &announcement, &limited));
             }
             PluginKind::Metadata => {
@@ -2032,6 +2045,10 @@ async fn main() -> Result<()> {
     // `gathered.announcements` later, so that only a source actually wired
     // gets one.
     let mut source_icons: Vec<(String, Option<String>)> = Vec::new();
+    // The input relays whose plugin honours the lock, joined as they are
+    // spawned below and handed to the core right after `Core::new`, which
+    // does not exist yet here (see `InputLockRelays`).
+    let input_lock_relays = core::InputLockRelays::default();
     // The name travels with the client: it is what names the plugin in the
     // log when its relay stops.
     // The announcement's `covers` flag travels with the client: by the time
@@ -2126,6 +2143,7 @@ async fn main() -> Result<()> {
                         cmd_tx.clone(),
                         announcement.input_lock,
                         &state_rx,
+                        &input_lock_relays,
                         unreachable_tx.clone(),
                         0,
                     );
@@ -2489,6 +2507,7 @@ async fn main() -> Result<()> {
         for (name, icon) in source_icons {
             core.set_source_icon(&name, icon);
         }
+        core.set_input_lock_relays(input_lock_relays);
         app_covers = app_state.covers.clone();
         app_lyrics = app_state.lyrics.clone();
         let app = status::router(app_state);
@@ -2799,6 +2818,11 @@ async fn main() -> Result<()> {
             // not strict proof of death, and nothing here infers an exit
             // code from it.
             Some((name, wiring)) = unreachable_rx.recv() => {
+                // Whatever the wiring: an input relay that honoured the lock
+                // left `InputLockRelays` before reporting here, stale
+                // incarnation or not, and the page must stop offering a lock
+                // nothing honours any more.
+                core.publish_state();
                 if wirings.get(&name).copied().unwrap_or(0) != wiring {
                     // The socket of a previous incarnation, arriving after
                     // the next one's rewiring. See `wirings`.
@@ -4947,6 +4971,62 @@ mod toggle_tests {
     async fn a_rewired_input_that_did_not_opt_in_receives_no_lock_frame() {
         let line = first_line_after_wiring(false, std::time::Duration::from_millis(300)).await;
         assert_eq!(line, None);
+    }
+
+    /// Hot-wires the input with a listener standing in for its socket, and
+    /// returns the core's end of the connection once the relay connected.
+    async fn wire_input(b: &mut Bench, input_lock: bool) -> tokio::net::UnixStream {
+        let socket = ritornello_plugin_sdk::socket_kind(&b.children.sockets_dir.join("mpd"), PluginKind::Input);
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        hotplug(
+            lock_input(input_lock),
+            &b.children,
+            &mut b.core,
+            &mut b.gathered,
+            &b.kill_triggers,
+            &mut b.non_supervised,
+            1,
+        )
+        .await;
+        assert!(b.gathered.announcements.contains_key("mpd"), "bench precondition: the input was wired");
+        let (stream, _) = tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
+            .await
+            .expect("the core connects to the input socket")
+            .unwrap();
+        stream
+    }
+
+    /// The page's padlock tells whether the lock has an effect anywhere: on
+    /// while a plugin that honours it is connected, off again once its relay
+    /// ended. Without the second half, a disabled generic-input left the page
+    /// offering a lock that locked nothing — the reported defect.
+    #[tokio::test]
+    async fn the_lock_is_available_only_while_an_input_that_honours_it_is_connected() {
+        let mut b = bench();
+        assert!(!b.core.player_state().input_lock_available, "bench precondition: no input yet");
+
+        let stream = wire_input(&mut b, true).await;
+        assert!(b.children.state_rx.borrow().input_lock_available, "published as soon as the input is wired");
+
+        // The plugin goes away: its relay reads EOF and ends.
+        drop(stream);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while b.core.player_state().input_lock_available {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a relay that ended no longer makes the lock available");
+    }
+
+    /// A plugin that did not announce `input_lock` honours nothing: counting
+    /// it would let the page lock a remote that ignores the lock.
+    #[tokio::test]
+    async fn an_input_that_did_not_opt_in_makes_no_lock_available() {
+        let mut b = bench();
+        let _stream = wire_input(&mut b, false).await;
+        assert!(!b.core.player_state().input_lock_available);
+        assert!(!b.children.state_rx.borrow().input_lock_available);
     }
 
     #[tokio::test]

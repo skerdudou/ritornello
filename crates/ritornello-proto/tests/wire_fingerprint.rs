@@ -336,6 +336,7 @@ fn state_full() -> PlayerState {
         }),
         next_alarm: Some(NextAlarm { weekday: Weekday::Friday, hour: 7, minute: 30 }),
         input_locked: true,
+        input_lock_available: true,
         track: track_full(),
     }
 }

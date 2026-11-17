@@ -132,7 +132,8 @@ mod tests {
             // - display: 1.1 for the source catalog's `icon`, 1.2 for lyrics
             //   (`DisplayFrame::Lyrics`, `Track::lyrics_href`…), 1.3 for the
             //   sleep timer and the next alarm (`PlayerState::sleep_timer`,
-            //   `PlayerState::next_alarm`), 1.4 for `PlayerState::input_locked`;
+            //   `PlayerState::next_alarm`), 1.4 for `PlayerState::input_locked`
+            //   and `PlayerState::input_lock_available`;
             // - metadata: 1.1 for `NowPlaying::armed`, 1.2 for lyrics
             //   (`Enrichment::lyrics`, `Known::lyrics`,
             //   `Known::measured_duration_s`);

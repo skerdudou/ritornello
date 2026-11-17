@@ -726,10 +726,16 @@ export interface PlayerPayload {
   next_alarm?: NextAlarm
   /**
    * The remote lock: `true` while the input plugins that honour it (not the
-   * page, not mpd) ignore physical keys. Absent when unlocked. Held in memory
-   * by the core, so a restart forgets it.
+   * page, not mpd) ignore physical keys. Absent when unlocked. A restart
+   * forgets it, except the one an update provokes.
    */
   input_locked?: boolean
+  /**
+   * At least one connected input plugin honours the lock. Absent when none
+   * does: the padlock is then greyed while unlocked, since locking would lock
+   * nothing.
+   */
+  input_lock_available?: boolean
 }
 /** The sound played on the device at every lock change; `none` is silence. Mirrors the core's `lock_sound::LockSound`. */
 export type LockSound = 'none' | 'a' | 'b' | 'c' | 'd' | 'e'

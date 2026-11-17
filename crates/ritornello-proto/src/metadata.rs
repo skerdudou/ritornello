@@ -874,6 +874,14 @@ pub struct PlayerState {
     /// existing frame changes shape.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub input_locked: bool,
+    /// At least one connected input plugin announced `Announcement::input_lock`,
+    /// so the lock has an effect somewhere. Counted by the core over the input
+    /// relays it holds, the plugin's own announcement deciding (a relay ends
+    /// with its plugin, whatever the cause). The SPA greys its padlock when
+    /// this is off and the lock is off too: locking would lock nothing. Absent
+    /// when off, so no existing frame changes shape.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub input_lock_available: bool,
     #[serde(flatten)]
     pub track: Track,
 }
@@ -1018,6 +1026,18 @@ mod tests {
         let state: PlayerState = serde_json::from_str(r#"{"source":"radio","volume":10,"muted":false,"standby":false,"preset":null,"preset_count":null,"preset_name":null}"#).unwrap();
         assert_eq!(state.sleep_timer, None);
         assert_eq!(state.next_alarm, None);
+    }
+
+    #[test]
+    fn input_lock_available_is_absent_when_off_and_round_trips_when_on() {
+        let json = serde_json::to_string(&PlayerState::default()).unwrap();
+        assert!(!json.contains("input_lock_available"), "{json}");
+        let off: PlayerState = serde_json::from_str(r#"{"source":"radio","volume":10,"muted":false,"standby":false,"preset":null,"preset_count":null,"preset_name":null}"#).unwrap();
+        assert!(!off.input_lock_available, "an older core's frame reads as unavailable");
+        let on = PlayerState { input_lock_available: true, ..Default::default() };
+        let json = serde_json::to_string(&on).unwrap();
+        assert!(json.contains(r#""input_lock_available":true"#), "{json}");
+        assert_eq!(serde_json::from_str::<PlayerState>(&json).unwrap(), on);
     }
 
     #[test]

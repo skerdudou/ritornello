@@ -73,6 +73,14 @@ onUnmounted(() => {
   observer?.disconnect()
   sleepObserver?.disconnect()
 })
+// The lock acts only through the input plugins that honour it: with none
+// connected, an unlocked padlock would lock nothing. A locked one is never
+// greyed, so the lock can always be removed.
+const lockUnavailable = computed(() => !state.value?.input_locked && !state.value?.input_lock_available)
+const lockLabel = computed(() =>
+  state.value?.input_locked ? 'input_lock_locked' : lockUnavailable.value ? 'input_lock_unavailable' : 'input_lock_unlocked',
+)
+
 const mode = computed(() =>
   headerMode({
     sources: sources.value.length,
@@ -158,19 +166,26 @@ onMounted(async () => {
             <SleepTimerKey :state="state" :mode="settings.sleep_timer_mode" @command="send" />
           </span>
           <!-- Simple tap, state shown; stays enabled in standby (never greyed
-               by `unavailable`) so a locked remote can always be unlocked. -->
-          <Button
-            :variant="state?.input_locked ? 'default' : 'outline'"
-            size="icon-sm"
-            data-input-lock
-            :aria-pressed="state?.input_locked ? 'true' : 'false'"
-            :aria-label="t(state?.input_locked ? 'input_lock_locked' : 'input_lock_unlocked')"
-            :title="t(state?.input_locked ? 'input_lock_locked' : 'input_lock_unlocked')"
-            @click="send({ cmd: 'SetInputLock', arg: !state?.input_locked })"
-          >
-            <LockClosedIcon v-if="state?.input_locked" class="size-4" />
-            <LockOpen1Icon v-else class="size-4" />
-          </Button>
+               by `unavailable`) so a locked remote can always be unlocked.
+               Greyed only while unlocked with no connected remote plugin
+               honouring the lock: locking would lock nothing. The box repeats
+               the title because a disabled kit Button takes no pointer
+               events, so its own title would never show on hover. -->
+          <span class="inline-flex" data-input-lock-box :title="t(lockLabel)">
+            <Button
+              :variant="state?.input_locked ? 'default' : 'outline'"
+              size="icon-sm"
+              data-input-lock
+              :disabled="lockUnavailable"
+              :aria-pressed="state?.input_locked ? 'true' : 'false'"
+              :aria-label="t(lockLabel)"
+              :title="t(lockLabel)"
+              @click="send({ cmd: 'SetInputLock', arg: !state?.input_locked })"
+            >
+              <LockClosedIcon v-if="state?.input_locked" class="size-4" />
+              <LockOpen1Icon v-else class="size-4" />
+            </Button>
+          </span>
           <Button variant="outline" size="icon-sm" data-remote-power :aria-label="t(REMOTE_POWER.key)" :title="t(REMOTE_POWER.key)" @click="send(REMOTE_POWER.cmd)">
             <StandbyIcon class="size-4" />
           </Button>

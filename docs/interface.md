@@ -305,11 +305,23 @@ it: `generic-input` does (the infrared or keyboard device), `mpd` does not
 is never locked — otherwise nobody could unlock it. A key `generic-input`
 refuses still gets an answer: its press shows LOCKED on the displays, at most
 once every 3 seconds and without the lock sound (see "Locking the remote"
-below). The padlock is therefore
-never greyed: both lock commands pass the core's standby gate, so a locked
-remote can be unlocked whatever the device is doing. The lock is held in
-memory only: **a core restart forgets it**, and the device comes back
-unlocked.
+below). Standby never greys the padlock: both lock commands pass the core's
+standby gate, so a locked remote can be unlocked whatever the device is
+doing.
+
+The padlock is greyed in one case only: **unlocked, with no connected input
+plugin honouring the lock** — `generic-input` switched off, or not yet
+reconnected after a restart — since locking would then lock nothing while
+the page said locked and the device chimed. Its label says so ("No connected
+remote plugin honours the lock"). The core counts the input relays whose
+plugin announced `input_lock`, each one leaving the count when its connection
+ends whatever the cause, and publishes `input_lock_available` on the same
+stream (**omitted** while none is connected). A locked padlock is never
+greyed, available or not: a lock must always be removable from the page.
+
+The lock is forgotten when the core restarts, except for the restart an
+update provokes, which keeps it (see "Locking the remote" below); a power
+cut or a manual restart unlocks.
 
 Every lock change also plays a short **lock sound** on the device, chosen in
 the Player card (below): the chosen sound, with its locking or its unlocking
