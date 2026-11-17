@@ -10,7 +10,7 @@
 //! | op | does, in the call | spawns |
 //! |---|---|---|
 //! | `probe` | parses the lines (pure) | one task: yt-dlp, a line at a time |
-//! | `save` | validates, writes `entries.toml` and the playlist caches | nothing |
+//! | `remove`, `move`, `rename` | one change of the table through `Store::change`: validates, writes `entries.toml` and the playlist caches | nothing |
 //! | `list_targets` | nothing | read the share roots and `/proc/mounts` (also spawned by `get_data` when the cache is stale) |
 //! | `list_dirs`, `create_dir` | nothing | the share's I/O, each under a deadline |
 //! | `download` | checks ffmpeg for mp3 (the last probe, in memory), queues the job (no I/O on this thread) | settings write |
@@ -19,25 +19,26 @@
 //! | `set_channel` | nothing | settings write, then an update request |
 //! | `reprobe` | nothing | the machine probe |
 //!
-//! The one thing `save` does synchronously is local file writes of a few
+//! The one thing a table change does synchronously is local file writes of a few
 //! kilobytes, each under its own deadline.
 
 mod explore;
 mod probe;
+mod store;
 #[cfg(test)]
 mod tests;
 
 use explore::Explore;
 use probe::ProbeState;
+use store::Store;
 use ritornello_plugin_web_streaming::reason;
 use ritornello_files_mount::mounts::read_proc_mounts;
 use ritornello_plugin_sdk::AdminPlugin;
-use ritornello_plugin_web_streaming::entries::{Entries, Entry, ListCache};
+use ritornello_plugin_web_streaming::entries::Entries;
 use ritornello_plugin_web_streaming::download::{CoverMode, Format, Trim, default_name};
 use ritornello_plugin_web_streaming::jobs::{JobOptions, Jobs};
-use ritornello_plugin_web_streaming::link::parse_link;
 use ritornello_plugin_web_streaming::settings::Channel;
-use ritornello_plugin_web_streaming::targets::{self, files_roots_path, Target};
+use ritornello_plugin_web_streaming::targets::{files_roots_path, Target};
 use ritornello_plugin_web_streaming::playfail::PlaybackFailure;
 use ritornello_plugin_web_streaming::tool::Tool;
 use ritornello_plugin_web_streaming::ytdlp::{Kind, Ytdlp};
@@ -50,7 +51,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::RwLock as AsyncRwLock;
 
-/// How long `save` waits for its local file writes: under the 5 s ceiling of
+/// How long a table change waits for its local file writes: under the 5 s ceiling of
 /// `GetData`, which queues behind a `SetData` (it is exclusive). A blocking
 /// write cannot be cancelled: after a timeout it may still complete, leaving
 /// the disk ahead of the memory (and of the page) until the next load.
@@ -68,8 +69,13 @@ const LAST_COVER: &str = "last_cover";
 enum Op {
     /// Reads the links, one per line; the answers arrive through `get_data`.
     Probe { text: String },
-    /// Saves the whole table.
-    Save { entries: Vec<Entry> },
+    /// Drops a preset; those after it move up. `preset` and `url` name the row
+    /// as the page drew it (`stale` when the table moved meanwhile).
+    Remove { preset: u8, url: String },
+    /// Puts a preset at the 1-based position `to`.
+    Move { preset: u8, url: String, to: u8 },
+    /// Retitles a preset (trimmed, never blank).
+    Rename { preset: u8, url: String, title: String },
     /// Re-reads where a download may go.
     ListTargets,
     ListDirs { target: Target },
@@ -160,9 +166,8 @@ pub struct WebStreamingAdmin {
     ytdlp: Arc<Ytdlp>,
     tool: Tool,
     jobs: Jobs,
-    /// Ticks after each successful save: the source half announces the new
-    /// table to the core.
-    saved: tokio::sync::watch::Sender<()>,
+    /// Every change of the table; shared with the probe task.
+    store: Arc<Store>,
     env: Arc<Environment>,
     shared: Arc<Shared>,
 }
@@ -196,11 +201,11 @@ impl WebStreamingAdmin {
     ) -> Self {
         Self {
             ytdlp: Arc::new(Ytdlp::new(&data)),
+            store: Arc::new(Store::new(data.clone(), entries.clone(), saved)),
             data,
             entries,
             tool,
             jobs,
-            saved,
             env: Arc::new(env),
             shared: Arc::new(Shared::default()),
         }
@@ -240,62 +245,6 @@ impl WebStreamingAdmin {
         let value = self.tool.settings().other.get(LAST_TARGET)?.clone();
         let target: Target = value.try_into().ok()?;
         targets.contains(&target.root).then_some(target)
-    }
-
-    async fn save(&self, entries: Vec<Entry>) -> Result<(), Text> {
-        let table = Entries { entry: entries };
-        table.validate().map_err(|e| match e {
-            // Past 99 it is one preset too many; 0 is a number that does not exist.
-            ritornello_plugin_web_streaming::entries::ValidationError::PresetOutOfRange { preset, .. } if preset > 99 => {
-                keyed("too_many_entries")
-            }
-            ritornello_plugin_web_streaming::entries::ValidationError::PresetOutOfRange { preset, .. } => {
-                keyed_with("preset_out_of_range", "preset", preset)
-            }
-            ritornello_plugin_web_streaming::entries::ValidationError::DuplicatePreset { preset } => {
-                keyed_with("duplicate_preset", "preset", preset)
-            }
-        })?;
-        for e in &table.entry {
-            // A YouTube link must name what the preset says; another site's
-            // link names whatever its probe found, so it fits either kind.
-            let fits = parse_link(&e.url).ok().is_some_and(|l| match e.kind {
-                Kind::Video => l.watch_url().is_some(),
-                Kind::Playlist => l.cache_key().is_some(),
-            });
-            if !fits {
-                return Err(keyed("bad_entry"));
-            }
-        }
-        // The playlists the operator just probed are cached by this very
-        // save: the first `select` of a new playlist never meets an empty
-        // cache (which would refuse it, and refresh in the background).
-        let probed = self.shared.probe.lock().unwrap_or_else(|p| p.into_inner()).lists_for(&table);
-        let (data, path) = (self.data.clone(), self.data.join("entries.toml"));
-        let to_write = table.clone();
-        let written = targets::blocking(SAVE_DEADLINE, move || {
-            let cache = ListCache::new(&data);
-            for (key, videos) in &probed {
-                if let Err(e) = cache.store(key, videos) {
-                    // The select then refreshes the cache by itself.
-                    tracing::warn!("playlist {key} not cached: {e:#}");
-                }
-            }
-            to_write.save(&path).map_err(|e| std::io::Error::other(format!("{e:#}")))
-        })
-        .await;
-        if let Err(e) = written {
-            // The path and the cause stay in the log, not on the page.
-            tracing::warn!("entries not saved: {e}");
-            return Err(keyed("save_failed"));
-        }
-        // Stored now: their copy in memory is not needed any more.
-        self.shared.probe.lock().unwrap_or_else(|p| p.into_inner()).forget_lists_of(&table);
-        *self.entries.write().await = table;
-        // On every successful save, as the radio does: the core's own merge
-        // drops what did not change.
-        self.saved.send_replace(());
-        Ok(())
     }
 
     fn download(&self, presets: Vec<u8>, target: Target, mut options: JobOptions, playlists: &[u8]) -> Result<(), Text> {
@@ -455,7 +404,42 @@ impl AdminPlugin for WebStreamingAdmin {
             serde_json::from_value(data).map_err(|e| keyed_with("bad_request", "detail", e.to_string()))?;
         match op {
             Op::Probe { text } => probe::start(&self.shared, &self.ytdlp, &text),
-            Op::Save { entries } => self.save(entries).await,
+            Op::Remove { preset, url } => {
+                self.store
+                    .change(&self.shared.probe, |rows| {
+                        let at = store::find(rows, preset, &url)?;
+                        rows.remove(at);
+                        Ok(())
+                    })
+                    .await
+            }
+            Op::Move { preset, url, to } => {
+                self.store
+                    .change(&self.shared.probe, |rows| {
+                        let at = store::find(rows, preset, &url)?;
+                        let to = usize::from(to);
+                        if !(1..=rows.len()).contains(&to) {
+                            return Err(keyed_with("bad_request", "detail", format!("position {to} is outside 1 to {}", rows.len())));
+                        }
+                        let row = rows.remove(at);
+                        rows.insert(to - 1, row);
+                        Ok(())
+                    })
+                    .await
+            }
+            Op::Rename { preset, url, title } => {
+                self.store
+                    .change(&self.shared.probe, |rows| {
+                        let at = store::find(rows, preset, &url)?;
+                        let title = title.trim();
+                        if title.is_empty() {
+                            return Err(keyed("empty_title"));
+                        }
+                        rows[at].title = title.to_string();
+                        Ok(())
+                    })
+                    .await
+            }
             Op::ListTargets => {
                 self.refresh_targets();
                 Ok(())

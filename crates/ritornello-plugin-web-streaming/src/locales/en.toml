@@ -24,6 +24,8 @@ probe_busy = "links are already being read"
 too_many_entries = "99 presets at most"
 duplicate_preset = "preset {preset} appears twice"
 save_failed = "the presets could not be saved"
+stale = "the presets changed meanwhile: shown again as they are"
+empty_title = "a preset needs a title"
 nothing_selected = "select at least one preset"
 
 # What a code from the plugin says, on the page
@@ -59,7 +61,6 @@ fault_trim_outside = "the part to keep is outside the video"
 fault_bad_entry = "the preset's address cannot be read"
 fault_unreadable_output = "yt-dlp gave an answer that cannot be read ({detail})"
 row_preset = "Preset {preset}"
-preset_out_of_range = "preset {preset} is outside 1 to 99"
 
 # why the last update of yt-dlp failed
 update_busy = "an update is already running"

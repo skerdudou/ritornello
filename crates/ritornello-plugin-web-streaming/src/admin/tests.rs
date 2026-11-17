@@ -3,6 +3,7 @@ use crate::source::WebStreamingSource;
 use ritornello_files_mount::roots::{Root, RootKind, Roots};
 use ritornello_plugin_sdk::SourcePlugin;
 use ritornello_plugin_web_streaming::download::{Ctx, Limits};
+use ritornello_plugin_web_streaming::entries::{Entry, ListCache};
 use ritornello_plugin_web_streaming::reason;
 use ritornello_plugin_web_streaming::targets::{Resolved, TargetError};
 use ritornello_plugin_web_streaming::tool::fetch::{BoxFuture, Fetch, Limit};
@@ -298,7 +299,7 @@ async fn another_site_s_link_is_whatever_yt_dlp_says_it_is() {
     found.site = Some("SoundcloudSet".into());
     let mut video = entry(2, SC_TRACK, Kind::Video);
     video.identity = Some("Soundcloud:293".into());
-    w.op(json!({ "op": "save", "entries": [found, video] })).await.unwrap();
+    w.add(vec![found, video]).await.unwrap();
     let key = ritornello_plugin_web_streaming::link::parse_link(SC_SET).unwrap().cache_key().unwrap();
     assert_eq!(ListCache::new(&w.data).load(&key).unwrap().len(), 6);
     let mut source = WebStreamingSource::new(w.data.clone(), w.entries.clone(), Some(w.saved.clone()));
@@ -310,11 +311,12 @@ async fn another_site_s_link_is_whatever_yt_dlp_says_it_is() {
 
 #[tokio::test]
 async fn a_web_link_fits_either_kind_and_a_local_one_does_not_save() {
-    let mut w = world("exit 1").await;
+    let w = world("exit 1").await;
     let both = vec![entry(1, SC_TRACK, Kind::Video), entry(2, SC_SET, Kind::Playlist)];
-    w.op(json!({ "op": "save", "entries": both })).await.unwrap();
+    w.add(both).await.unwrap();
     let local = vec![entry(1, "http://192.168.1.1/x", Kind::Video)];
-    assert_eq!(key_of(w.op(json!({ "op": "save", "entries": local })).await), "bad_entry");
+    assert_eq!(key_of(w.add(local).await), "bad_entry");
+    assert_eq!(w.entries.read().await.entry.len(), 2, "the refusal changed nothing");
 }
 
 #[tokio::test]
@@ -365,25 +367,145 @@ async fn a_second_probe_while_one_runs_is_refused_and_too_many_links_are() {
     assert_eq!(key_of(w.op(json!({ "op": "probe", "text": "  \n " })).await), "no_links");
 }
 
-// ---- save -------------------------------------------------------------------
+// ---- the table's operations -------------------------------------------------
 
-#[tokio::test]
-async fn save_refuses_more_than_99() {
-    let mut w = world("exit 1").await;
-    let hundred: Vec<Entry> = (1..=100).map(|n| entry(n as u8, VIDEO, Kind::Video)).collect();
-    let r = w.op(json!({ "op": "save", "entries": hundred })).await;
-    assert_eq!(key_of(r), "too_many_entries");
-    let ninety_nine: Vec<Entry> = (1..=99).map(|n| entry(n, VIDEO, Kind::Video)).collect();
-    w.op(json!({ "op": "save", "entries": ninety_nine })).await.unwrap();
-    assert_eq!(w.entries.read().await.entry.len(), 99);
-    assert!(w.data.join("entries.toml").is_file());
+const OTHER: &str = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+
+impl World {
+    /// Puts a table in place as it would be after earlier changes: the file
+    /// and the memory, no notification.
+    async fn seed(&mut self, rows: Vec<Entry>) {
+        let table = Entries { entry: rows };
+        table.save(&self.data.join("entries.toml")).unwrap();
+        *self.entries.write().await = table;
+        self.saved.borrow_and_update();
+    }
+
+    /// Adds rows through the store, the way the probe task will.
+    async fn add(&self, rows: Vec<Entry>) -> Result<(), Text> {
+        self.admin
+            .store
+            .change(&self.admin.shared.probe, |table| {
+                table.extend(rows);
+                Ok(())
+            })
+            .await
+    }
+
+    async fn rows(&self) -> Vec<(u8, String)> {
+        self.entries.read().await.entry.iter().map(|e| (e.preset, e.url.clone())).collect()
+    }
+}
+
+async fn three(w: &mut World) {
+    w.seed(vec![entry(1, VIDEO, Kind::Video), entry(2, LIST, Kind::Playlist), entry(3, OTHER, Kind::Video)]).await;
 }
 
 #[tokio::test]
-async fn preset_zero_is_not_said_to_be_the_hundredth() {
+async fn remove_renumbers_by_position() {
     let mut w = world("exit 1").await;
-    let r = w.op(json!({ "op": "save", "entries": [entry(0, VIDEO, Kind::Video)] })).await;
-    assert_eq!(key_of(r), "preset_out_of_range");
+    three(&mut w).await;
+    w.op(json!({ "op": "remove", "preset": 2, "url": LIST })).await.unwrap();
+    assert_eq!(w.rows().await, [(1, VIDEO.to_string()), (2, OTHER.to_string())]);
+    assert_eq!(Entries::load(&w.data.join("entries.toml")).unwrap(), *w.entries.read().await, "the disk is the memory");
+    assert!(w.saved.has_changed().unwrap());
+}
+
+#[tokio::test]
+async fn move_puts_the_preset_at_its_new_position() {
+    let mut w = world("exit 1").await;
+    three(&mut w).await;
+    w.op(json!({ "op": "move", "preset": 3, "url": OTHER, "to": 1 })).await.unwrap();
+    assert_eq!(w.rows().await, [(1, OTHER.to_string()), (2, VIDEO.to_string()), (3, LIST.to_string())]);
+    assert_eq!(Entries::load(&w.data.join("entries.toml")).unwrap(), *w.entries.read().await);
+    // Down as well, and out of range is refused with nothing changed.
+    w.op(json!({ "op": "move", "preset": 1, "url": OTHER, "to": 3 })).await.unwrap();
+    assert_eq!(w.rows().await, [(1, VIDEO.to_string()), (2, LIST.to_string()), (3, OTHER.to_string())]);
+    for to in [0, 4] {
+        assert_eq!(key_of(w.op(json!({ "op": "move", "preset": 1, "url": VIDEO, "to": to })).await), "bad_request");
+    }
+    assert_eq!(w.rows().await, [(1, VIDEO.to_string()), (2, LIST.to_string()), (3, OTHER.to_string())]);
+}
+
+#[tokio::test]
+async fn rename_trims_and_refuses_blank() {
+    let mut w = world("exit 1").await;
+    three(&mut w).await;
+    w.op(json!({ "op": "rename", "preset": 1, "url": VIDEO, "title": "  New  " })).await.unwrap();
+    assert_eq!(w.entries.read().await.entry[0].title, "New");
+    let r = w.op(json!({ "op": "rename", "preset": 1, "url": VIDEO, "title": "   " })).await;
+    assert_eq!(key_of(r), "empty_title");
+    assert_eq!(w.entries.read().await.entry[0].title, "New");
+}
+
+#[tokio::test]
+async fn an_op_on_a_moved_preset_is_stale_and_changes_nothing() {
+    let mut w = world("exit 1").await;
+    w.seed(vec![entry(1, VIDEO, Kind::Video), entry(2, LIST, Kind::Playlist)]).await;
+    let path = w.data.join("entries.toml");
+    let (before_text, before_mtime) = (std::fs::read_to_string(&path).unwrap(), std::fs::metadata(&path).unwrap().modified().unwrap());
+    let before_rows = w.rows().await;
+    // Preset 1 is not LIST any more than preset 2 is VIDEO.
+    assert_eq!(key_of(w.op(json!({ "op": "remove", "preset": 1, "url": LIST })).await), "stale");
+    assert_eq!(key_of(w.op(json!({ "op": "move", "preset": 2, "url": VIDEO, "to": 1 })).await), "stale");
+    assert_eq!(key_of(w.op(json!({ "op": "rename", "preset": 9, "url": VIDEO, "title": "x" })).await), "stale");
+    assert_eq!(w.rows().await, before_rows);
+    assert!(!w.saved.has_changed().unwrap());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before_text);
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before_mtime, "not rewritten");
+}
+
+#[tokio::test]
+async fn a_failed_write_changes_nothing() {
+    let mut w = world("exit 1").await;
+    three(&mut w).await;
+    let path = w.data.join("entries.toml");
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let before = w.rows().await;
+    assert_eq!(key_of(w.op(json!({ "op": "remove", "preset": 1, "url": VIDEO })).await), "save_failed");
+    assert_eq!(w.rows().await, before);
+    assert!(!w.saved.has_changed().unwrap());
+}
+
+#[tokio::test]
+async fn concurrent_changes_lose_nothing() {
+    let mut w = world("exit 1").await;
+    three(&mut w).await;
+    let (store, probe) = (&w.admin.store, &w.admin.shared.probe);
+    let (renamed, removed) = tokio::join!(
+        store.change(probe, |rows| {
+            let at = super::store::find(rows, 1, VIDEO)?;
+            rows[at].title = "Renamed".into();
+            Ok(())
+        }),
+        store.change(probe, |rows| {
+            let at = super::store::find(rows, 3, OTHER)?;
+            rows.remove(at);
+            Ok(())
+        }),
+    );
+    renamed.unwrap();
+    removed.unwrap();
+    let rows = w.entries.read().await.entry.clone();
+    assert_eq!(rows.len(), 2);
+    assert_eq!((rows[0].preset, rows[0].title.as_str()), (1, "Renamed"));
+    assert_eq!(Entries::load(&w.data.join("entries.toml")).unwrap().entry, rows);
+}
+
+#[tokio::test]
+async fn a_change_that_runs_does_not_hold_back_a_reader() {
+    // `f` runs under the edit lock only: the table stays readable meanwhile.
+    let mut w = world("exit 1").await;
+    three(&mut w).await;
+    let (entries, store, probe) = (w.entries.clone(), &w.admin.store, &w.admin.shared.probe);
+    store
+        .change(probe, |_| {
+            assert!(entries.try_read().is_ok(), "the write lock is held while the edit runs");
+            Ok(())
+        })
+        .await
+        .unwrap();
 }
 
 /// The playlist was probed, saved (so its videos are on disk), and is saved
@@ -393,38 +515,25 @@ async fn a_cached_playlist_not_probed_this_session_keeps_its_cache_when_the_tabl
     let mut w = world(&answering()).await;
     w.op(json!({ "op": "probe", "text": LIST })).await.unwrap();
     w.until("probe done", |d| d["probe"]["running"] == false).await;
-    w.op(json!({ "op": "save", "entries": [entry(1, LIST, Kind::Playlist)] })).await.unwrap();
+    w.add(vec![entry(1, LIST, Kind::Playlist)]).await.unwrap();
     let cached = ListCache::new(&w.data).load(LIST_ID).unwrap();
     assert_eq!(cached.len(), 12);
 
-    // Reordered, nothing probed in between: the memory of the probe is gone.
-    let reordered = vec![entry(1, VIDEO, Kind::Video), entry(2, LIST, Kind::Playlist)];
-    w.op(json!({ "op": "save", "entries": reordered })).await.unwrap();
+    // Changed again, nothing probed in between: the memory of the probe is gone.
+    w.add(vec![entry(2, VIDEO, Kind::Video)]).await.unwrap();
+    w.op(json!({ "op": "move", "preset": 2, "url": VIDEO, "to": 1 })).await.unwrap();
+    assert_eq!(w.rows().await, [(1, VIDEO.to_string()), (2, LIST.to_string())]);
     assert_eq!(ListCache::new(&w.data).load(LIST_ID), Some(cached));
 }
 
 #[tokio::test]
-async fn save_refuses_what_it_could_not_play_and_writes_nothing() {
-    let mut w = world("exit 1").await;
-    let twice = vec![entry(1, VIDEO, Kind::Video), entry(1, VIDEO, Kind::Video)];
-    assert_eq!(key_of(w.op(json!({ "op": "save", "entries": twice })).await), "duplicate_preset");
-    let wrong_kind = vec![entry(1, VIDEO, Kind::Playlist)];
-    assert_eq!(key_of(w.op(json!({ "op": "save", "entries": wrong_kind })).await), "bad_entry");
-    let foreign = vec![entry(1, "https://studio.youtube.com/watch?v=jNQXAC9IVRw", Kind::Video)];
-    assert_eq!(key_of(w.op(json!({ "op": "save", "entries": foreign })).await), "bad_entry");
-    assert!(!w.data.join("entries.toml").exists());
-    assert!(w.entries.read().await.entry.is_empty());
-    assert!(!w.saved.has_changed().unwrap(), "no notification for a refusal");
-}
-
-#[tokio::test]
-async fn a_save_notifies_the_source_and_survives_a_restart() {
-    let mut w = world("exit 1").await;
-    w.op(json!({ "op": "save", "entries": [entry(2, VIDEO, Kind::Video)] })).await.unwrap();
+async fn a_change_notifies_the_source_and_survives_a_restart() {
+    let w = world("exit 1").await;
+    w.add(vec![entry(2, VIDEO, Kind::Video)]).await.unwrap();
     assert!(w.saved.has_changed().unwrap(), "the source half is told");
     assert_eq!(Entries::load(&w.data.join("entries.toml")).unwrap().entry.len(), 1);
     let d = w.admin.get_data().await;
-    assert_eq!(d["entries"][0]["preset"], 2);
+    assert_eq!(d["entries"][0]["preset"], 1, "numbered by position");
 }
 
 #[tokio::test]
@@ -436,7 +545,7 @@ async fn a_saved_playlist_is_cached_so_the_first_select_plays() {
 
     let mut found = entry(1, LIST, Kind::Playlist);
     found.count = Some(12);
-    w.op(json!({ "op": "save", "entries": [found] })).await.unwrap();
+    w.add(vec![found]).await.unwrap();
     assert_eq!(ListCache::new(&w.data).load(LIST_ID).unwrap().len(), 12);
 
     // The very first select, before any background refresh could have run.
@@ -447,8 +556,8 @@ async fn a_saved_playlist_is_cached_so_the_first_select_plays() {
 
 #[tokio::test]
 async fn a_playlist_that_was_never_probed_is_saved_without_a_cache() {
-    let mut w = world(&answering()).await;
-    w.op(json!({ "op": "save", "entries": [entry(1, LIST, Kind::Playlist)] })).await.unwrap();
+    let w = world(&answering()).await;
+    w.add(vec![entry(1, LIST, Kind::Playlist)]).await.unwrap();
     assert!(ListCache::new(&w.data).load(LIST_ID).is_none());
 }
 

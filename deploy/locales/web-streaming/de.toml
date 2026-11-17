@@ -24,6 +24,8 @@ probe_busy = "es werden bereits Links gelesen"
 too_many_entries = "höchstens 99 Voreinstellungen"
 duplicate_preset = "Voreinstellung {preset} kommt doppelt vor"
 save_failed = "die Voreinstellungen konnten nicht gespeichert werden"
+stale = "die Voreinstellungen haben sich inzwischen geändert: so angezeigt, wie sie jetzt sind"
+empty_title = "eine Voreinstellung braucht einen Titel"
 nothing_selected = "wähle mindestens eine Voreinstellung aus"
 
 # What a code from the plugin says, on the page
@@ -59,7 +61,6 @@ fault_trim_outside = "der zu behaltende Teil liegt außerhalb des Videos"
 fault_bad_entry = "die Adresse der Voreinstellung ist nicht lesbar"
 fault_unreadable_output = "yt-dlp hat eine unlesbare Antwort gegeben ({detail})"
 row_preset = "Voreinstellung {preset}"
-preset_out_of_range = "Voreinstellung {preset} liegt nicht zwischen 1 und 99"
 
 # why the last update of yt-dlp failed
 update_busy = "es läuft bereits ein Update"

@@ -24,6 +24,8 @@ probe_busy = "ya se están leyendo enlaces"
 too_many_entries = "99 preajustes como máximo"
 duplicate_preset = "el preajuste {preset} aparece dos veces"
 save_failed = "no se pudieron guardar los preajustes"
+stale = "los preajustes cambiaron entretanto: se muestran tal como están"
+empty_title = "un preajuste necesita un título"
 nothing_selected = "selecciona al menos un preajuste"
 
 # What a code from the plugin says, on the page
@@ -59,7 +61,6 @@ fault_trim_outside = "la parte que se conserva está fuera del vídeo"
 fault_bad_entry = "la dirección del preajuste no se puede leer"
 fault_unreadable_output = "yt-dlp dio una respuesta ilegible ({detail})"
 row_preset = "Preajuste {preset}"
-preset_out_of_range = "el preajuste {preset} no está entre 1 y 99"
 
 # why the last update of yt-dlp failed
 update_busy = "ya hay una actualización en curso"

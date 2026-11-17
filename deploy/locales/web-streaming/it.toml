@@ -24,6 +24,8 @@ probe_busy = "sono già in lettura dei link"
 too_many_entries = "al massimo 99 preselezioni"
 duplicate_preset = "la preselezione {preset} compare due volte"
 save_failed = "non è stato possibile salvare le preselezioni"
+stale = "le preselezioni sono cambiate nel frattempo: mostrate come sono"
+empty_title = "una preselezione ha bisogno di un titolo"
 nothing_selected = "seleziona almeno una preselezione"
 
 # What a code from the plugin says, on the page
@@ -59,7 +61,6 @@ fault_trim_outside = "la parte da tenere è fuori dal video"
 fault_bad_entry = "l’indirizzo della preselezione non è leggibile"
 fault_unreadable_output = "yt-dlp ha dato una risposta illeggibile ({detail})"
 row_preset = "Preselezione {preset}"
-preset_out_of_range = "la preselezione {preset} non è compresa tra 1 e 99"
 
 # why the last update of yt-dlp failed
 update_busy = "è già in corso un aggiornamento"

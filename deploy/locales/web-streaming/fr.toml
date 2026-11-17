@@ -24,6 +24,8 @@ probe_busy = "des liens sont déjà en cours de lecture"
 too_many_entries = "99 préréglages au plus"
 duplicate_preset = "le préréglage {preset} apparaît deux fois"
 save_failed = "les préréglages n’ont pas pu être enregistrés"
+stale = "les préréglages ont changé entre-temps : affichés tels qu’ils sont"
+empty_title = "un préréglage doit avoir un titre"
 nothing_selected = "sélectionnez au moins un préréglage"
 
 # What a code from the plugin says, on the page
@@ -59,7 +61,6 @@ fault_trim_outside = "la partie à garder est en dehors de la vidéo"
 fault_bad_entry = "l’adresse du préréglage est illisible"
 fault_unreadable_output = "yt-dlp a donné une réponse illisible ({detail})"
 row_preset = "Préréglage {preset}"
-preset_out_of_range = "le préréglage {preset} n’est pas compris entre 1 et 99"
 
 # why the last update of yt-dlp failed
 update_busy = "une mise à jour est déjà en cours"
