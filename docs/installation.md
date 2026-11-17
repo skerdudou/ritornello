@@ -1713,6 +1713,12 @@ loop; four things remain unobserved:
   and Next and Previous moving the armed track without any mpv action;
 - the radio on the Pi: Next and Previous while stopped moving the armed station
   without tuning it, and the table reshuffle following the armed station by URL;
+- a **playing** file described from the path `files` declares with the identity
+  (`source` contract 1.4) rather than from mpv: the race it closes (mpv naming
+  the next file before the source declares it) was measured on the Pi, the fix
+  only reproduced with ffmpeg-made files in tests. Embedded lyrics are now read
+  by `lofty`, not FFmpeg, and were compared to FFmpeg's reading only on files
+  tagged on a development machine;
 - an armed file read on a **sleeping NAS**: the tags and the embedded cover are
   read from the share under a deadline, and what the owner sees while the share
   spins up, and the late answer being dropped, were exercised only with a read
