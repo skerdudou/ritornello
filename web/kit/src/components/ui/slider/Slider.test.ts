@@ -146,5 +146,37 @@ describe('Slider: what a pointerdown on the track starts', () => {
       await flushPromises()
       expect(w.emitted('update:modelValue')).toBeDefined()
     })
+
+    // Since a new pointerdown frees its id anyway, this one documents the
+    // release path rather than guards it: removing the pointerup listener
+    // alone keeps it green.
+    it('a gesture kept away ends with its pointerup: the same pointer id then drags the thumb', async () => {
+      vi.spyOn(Element.prototype, 'hasPointerCapture').mockReturnValue(true)
+      const { w } = mountSlider('vertical')
+      await flushPromises()
+      const track = w.get('[data-slot="slider-track"]').element
+      const thumb = w.get('[role="slider"]').element
+      pointerdown(track, 'touch')
+      pointer('pointerup', track, 'touch')
+      pointerdown(thumb, 'touch')
+      pointer('pointermove', thumb, 'touch', 30)
+      await flushPromises()
+      expect(w.emitted('update:modelValue')).toBeDefined()
+    })
+
+    it('a gesture whose end never reached the root does not block the next drag of the same id', async () => {
+      // A pen lifted off the slider, with no implicit capture: neither its
+      // pointerup nor a pointercancel reaches the root.
+      vi.spyOn(Element.prototype, 'hasPointerCapture').mockReturnValue(true)
+      const { w } = mountSlider('vertical')
+      await flushPromises()
+      const track = w.get('[data-slot="slider-track"]').element
+      const thumb = w.get('[role="slider"]').element
+      pointerdown(track, 'pen')
+      pointerdown(thumb, 'pen')
+      pointer('pointermove', thumb, 'pen', 30)
+      await flushPromises()
+      expect(w.emitted('update:modelValue')).toBeDefined()
+    })
   })
 })

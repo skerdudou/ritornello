@@ -47,8 +47,9 @@ const rootAttrs = computed(() => Object.fromEntries(
 // value **by the thumb alone**: the root lets the browser pan
 // (`touch-manipulation` instead of `touch-none`), and this capture-phase
 // listener keeps a touch or pen pointerdown that is not on the thumb away from
-// reka-ui, which then never starts a slide — the browser scrolls the page. The thumb keeps `touch-none` (dragging it moves
-// the value) and a larger hit area, its `before:` pseudo-element: 24 x 40 px
+// reka-ui, which then never starts a slide — the browser scrolls the page.
+// The thumb keeps `touch-none` (dragging it moves the value) and a larger hit
+// area, its `before:` pseudo-element: 24 x 40 px
 // around the 16 px dot, no wider than the narrowest equalizer column (24 px
 // on a phone), so it never reaches a neighbour's thumb. A mouse and the
 // keyboard are untouched. When the finger lands on the root's own
@@ -64,15 +65,19 @@ const rootAttrs = computed(() => Object.fromEntries(
 // end, which a cancelled gesture never sends) — the next thumb drag then
 // read its value against where the slider used to be (measured: a drag
 // down that set +11 dB).
+// A new pointerdown closes whatever an earlier gesture of the same pointer id
+// left behind: its up or cancel may never have reached the root (a pen
+// lifted off the slider, with no implicit capture), and a stale id would
+// swallow the moves of a later drag on the thumb.
 // Horizontal sliders (progress, volume, alarm) keep whole-track
 // drag-to-set on purpose: they lie across the scrolling direction.
 const keptAway = new Set<number>()
 
 function keepTouchForScrolling(event: PointerEvent) {
+  keptAway.delete(event.pointerId)
   if (props.orientation !== "vertical") return
   if (event.pointerType !== "touch" && event.pointerType !== "pen") return
-  const thumb = (event.currentTarget as HTMLElement).querySelector("[data-slot=slider-thumb]")
-  if (thumb && thumb.contains(event.target as Node)) return
+  if ((event.target as Element).closest("[data-slot=slider-thumb]")) return
   keptAway.add(event.pointerId)
   event.stopImmediatePropagation()
 }
