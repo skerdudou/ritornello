@@ -886,7 +886,11 @@ impl MpvPlayer {
             // A stream's `duration` is its cache end (measured): no guard.
             return Ok(ChimeRoute::Paused { sample_rate, channels, resume_at: None });
         }
-        let Some(position) = position else {
+        // After a restore, still paused, the pause point is the one the gate
+        // kept: `time-pos` then read up to 0.17 s short (`end_paused_chime`),
+        // and a second chime would put the file back there.
+        let kept = self.gate().frozen().and_then(|p| p.position_s);
+        let Some(position) = kept.or(position) else {
             // Nowhere to put the file back: the chime would move it.
             return Ok(ChimeRoute::Silent);
         };
@@ -2896,6 +2900,28 @@ pub(crate) mod tests {
         // Seekable but no position: nowhere to put it back.
         let (route, _) = route_with(paused_answers(Value::Null, json!(150.0), json!(true))).await;
         assert_eq!(route.unwrap(), ChimeRoute::Silent);
+    }
+
+    /// A second lock change after a paused chime, still paused: the pause
+    /// point is the one the gate kept, not `time-pos`, which right after a
+    /// restore read 0.17 s short (see `end_paused_chime`). **[MUTATION]**
+    /// the frozen position ignored → the second chime restores 0.17 s early.
+    /// Also the near-end guard reads it.
+    #[tokio::test]
+    async fn after_a_restore_the_route_puts_the_file_back_at_the_kept_pause_point() {
+        use crate::player::ChimeRoute;
+        let kept = |g: &mut AsideGate| {
+            g.begin_paused_chime(Progress { position_s: Some(4.416), duration_s: Some(150.0) });
+            g.end_paused_chime(true);
+        };
+        let (route, _) = route_with_gate(paused_answers(json!(4.25), json!(150.0), json!(true)), kept).await;
+        assert_eq!(route.unwrap(), ChimeRoute::Paused { sample_rate: 48000, channels: 2, resume_at: Some(4.416) });
+        // A guard on the kept point: 1.73 s left from 4.416, not from 4.25.
+        let (route, _) = route_with_gate(paused_answers(json!(4.25), json!(6.146), json!(true)), kept).await;
+        assert_eq!(route.unwrap(), ChimeRoute::Silent);
+        // A stream keeps no position to go back to.
+        let (route, _) = route_with_gate(paused_answers(json!(4.25), json!(5.0), json!(false)), kept).await;
+        assert_eq!(route.unwrap(), ChimeRoute::Paused { sample_rate: 48000, channels: 2, resume_at: None });
     }
 
     /// **[MUTATION]** the `in_paused_chime` checks removed from
