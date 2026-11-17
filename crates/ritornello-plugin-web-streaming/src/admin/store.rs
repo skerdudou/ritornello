@@ -15,6 +15,7 @@ use ritornello_proto::Text;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock as AsyncRwLock;
 
 pub(crate) struct Store {
@@ -25,28 +26,58 @@ pub(crate) struct Store {
     saved: tokio::sync::watch::Sender<()>,
     /// Serialises the changes. The write lock of `entries` is NOT held while
     /// an edit runs and the files are written (the source half and `get_data`
-    /// read it): it is taken for the swap only.
-    edit: tokio::sync::Mutex<()>,
+    /// read it): it is taken for the swap only. Owned, so a write that
+    /// outlived its deadline keeps it until it really ends (see [`Store::change`]).
+    pub(super) edit: Arc<tokio::sync::Mutex<()>>,
+    /// What one change may take, the wait for the lock included:
+    /// [`SAVE_DEADLINE`], shorter in the tests.
+    pub(super) deadline: Duration,
+    /// Runs on the blocking thread before the files are written: a test holds
+    /// a write there so that it outlives its deadline.
+    #[cfg(test)]
+    pub(super) before_write: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl Store {
     pub fn new(data: PathBuf, entries: Arc<AsyncRwLock<Entries>>, saved: tokio::sync::watch::Sender<()>) -> Self {
-        Self { data, entries, saved, edit: tokio::sync::Mutex::new(()) }
+        Self {
+            data,
+            entries,
+            saved,
+            edit: Arc::new(tokio::sync::Mutex::new(())),
+            deadline: SAVE_DEADLINE,
+            #[cfg(test)]
+            before_write: None,
+        }
     }
 
     /// Applies `f` to a copy of the table, renumbers it by position (sorted by
     /// the current preset number first, then `preset = index + 1`), validates
-    /// it, writes the cache of the playlists just probed and `entries.toml`
-    /// under [`SAVE_DEADLINE`], then swaps the table in memory, forgets the
-    /// cached lists and ticks `saved`. `f` runs under the edit lock: what it
-    /// judges (a stale preset) cannot move before it is applied.
+    /// it, writes the cache of the playlists just probed and `entries.toml`,
+    /// then swaps the table in memory, forgets the cached lists and ticks
+    /// `saved`. `f` runs under the edit lock: what it judges (a stale preset)
+    /// cannot move before it is applied.
+    ///
+    /// **One deadline covers the wait for the lock and the write**
+    /// ([`SAVE_DEADLINE`]): a change queued behind a slow one (the probe
+    /// worker's, in the background) fails with `save_failed` instead of adding
+    /// its own wait to it. The lock goes into the blocking write and comes
+    /// back out of it: a write that outlived the deadline keeps it until it
+    /// really ends, so no later change writes before it and is then
+    /// overwritten by it.
     ///
     /// A refused `f` or a failed write: nothing changes, nothing ticks.
     pub async fn change<F>(&self, probe: &Mutex<ProbeState>, f: F) -> Result<(), Text>
     where
         F: FnOnce(&mut Vec<Entry>) -> Result<(), Text> + Send,
     {
-        let _editing = self.edit.lock().await;
+        let started = Instant::now();
+        let Ok(editing) = tokio::time::timeout(self.deadline, self.edit.clone().lock_owned()).await else {
+            // An earlier write still runs (or is stuck): this one fails
+            // cleanly rather than queueing past the route's ceiling.
+            tracing::warn!("entries not saved: an earlier change still writes them");
+            return Err(keyed("save_failed"));
+        };
         let mut rows = self.entries.read().await.entry.clone();
         rows.sort_by_key(|e| e.preset);
         f(&mut rows)?;
@@ -76,7 +107,17 @@ impl Store {
         let probed = probe.lock().unwrap_or_else(|p| p.into_inner()).lists_for(&table);
         let (data, path) = (self.data.clone(), self.data.join("entries.toml"));
         let to_write = table.clone();
-        let written = targets::blocking(SAVE_DEADLINE, move || {
+        #[cfg(test)]
+        let before_write = self.before_write.clone();
+        let left = self.deadline.saturating_sub(started.elapsed());
+        let written = targets::blocking(left, move || {
+            // Held on the blocking thread: dropped when this write ends, even
+            // one the deadline gave up on; handed back when it succeeds.
+            let editing = editing;
+            #[cfg(test)]
+            if let Some(hook) = before_write {
+                hook();
+            }
             let cache = ListCache::new(&data);
             for (key, videos) in &probed {
                 if let Err(e) = cache.store(key, videos) {
@@ -84,14 +125,20 @@ impl Store {
                     tracing::warn!("playlist {key} not cached: {e:#}");
                 }
             }
-            to_write.save(&path).map_err(|e| std::io::Error::other(format!("{e:#}")))
+            to_write.save(&path).map_err(|e| std::io::Error::other(format!("{e:#}")))?;
+            Ok(editing)
         })
         .await;
-        if let Err(e) = written {
-            // The path and the cause stay in the log, not on the page.
-            tracing::warn!("entries not saved: {e}");
-            return Err(keyed("save_failed"));
-        }
+        // Kept until the memory is swapped: a change that read the table
+        // before the swap would write over this one.
+        let _editing = match written {
+            Ok(editing) => editing,
+            Err(e) => {
+                // The path and the cause stay in the log, not on the page.
+                tracing::warn!("entries not saved: {e}");
+                return Err(keyed("save_failed"));
+            }
+        };
         // Stored now: their copy in memory is not needed any more.
         probe.lock().unwrap_or_else(|p| p.into_inner()).forget_lists_of(&table);
         *self.entries.write().await = table;

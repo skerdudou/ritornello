@@ -53,10 +53,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::RwLock as AsyncRwLock;
 
-/// How long a table change waits for its local file writes: under the 5 s ceiling of
-/// `GetData`, which queues behind a `SetData` (it is exclusive). A blocking
-/// write cannot be cancelled: after a timeout it may still complete, leaving
-/// the disk ahead of the memory (and of the page) until the next load.
+/// How long a table change may take, its wait for the store's edit lock and
+/// its local file writes together: under the 5 s ceiling of `GetData`, which
+/// queues behind a `SetData` (it is exclusive). The probe worker changes the
+/// table in the background, so a page's change may find the lock taken: it
+/// then fails with `save_failed` rather than wait and write for two
+/// deadlines. A blocking write cannot be cancelled: after a timeout it may
+/// still complete, leaving the disk ahead of the memory (and of the page)
+/// until the next change or load; it keeps the edit lock until it ends, so no
+/// later change is overwritten by it.
 const SAVE_DEADLINE: Duration = Duration::from_secs(4);
 /// How many links one `probe` takes: they are probed one after the other.
 pub const MAX_LINKS: usize = 20;
@@ -382,6 +387,10 @@ impl AdminPlugin for WebStreamingAdmin {
     }
 
     async fn get_data(&self) -> serde_json::Value {
+        // The lines before the table: a line that becomes a preset in between
+        // then shows as both (the next read drops the line), never as neither
+        // with `running` false, which would stop the page's polling.
+        let probe = self.shared.probe.lock().unwrap_or_else(|p| p.into_inner()).view();
         let mut entries = self.entries.read().await.entry.clone();
         entries.sort_by_key(|e| e.preset);
         // The names a download would give, shown and editable in the dialog:
@@ -399,7 +408,6 @@ impl AdminPlugin for WebStreamingAdmin {
         if stale {
             self.refresh_targets();
         }
-        let probe = self.shared.probe.lock().unwrap_or_else(|p| p.into_inner()).view();
         let explore = self.shared.explore.lock().unwrap_or_else(|p| p.into_inner()).view();
         let jobs = jobs_for_page(&self.jobs.view().lock().unwrap_or_else(|p| p.into_inner()).jobs);
         let caps = self.tool.capabilities();

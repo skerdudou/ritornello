@@ -229,8 +229,9 @@ pub async fn add(probe: &Mutex<ProbeState>, store: &Store, id: u64, found: Found
     Ok(())
 }
 
-/// Clears `running` if the worker dies on its way (a panic). Disarmed when
-/// it exits normally: that exit cleared it under the lock already, and a
+/// Clears `running` if the worker dies on its way (a panic), and ends the
+/// line it was probing: no worker would ever settle it. Disarmed when it
+/// exits normally: that exit cleared it under the lock already, and a
 /// `start` may have set it again for a new worker since.
 struct Running {
     shared: Arc<super::Shared>,
@@ -240,7 +241,32 @@ struct Running {
 impl Drop for Running {
     fn drop(&mut self) {
         if self.armed {
-            lock(&self.shared.probe).running = false;
+            let mut state = lock(&self.shared.probe);
+            state.running = false;
+            for line in state.results.iter_mut().filter(|l| l.outcome == Outcome::Probing) {
+                line.outcome = Outcome::Error(Fault { code: "exited".into(), detail: Some("panicked".into()) });
+            }
+        }
+    }
+}
+
+/// The next pending line, marked `probing`, with its link; `None` once no
+/// line is pending, `running` then cleared under the same lock (a `start`
+/// that comes after sees it false and spawns a worker of its own).
+fn take_next(state: &mut ProbeState) -> Option<(u64, Link)> {
+    loop {
+        let Some(line) = state.results.iter_mut().find(|l| l.outcome == Outcome::Pending) else {
+            state.running = false;
+            return None;
+        };
+        match line.link.clone() {
+            Some(link) => {
+                line.outcome = Outcome::Probing;
+                return Some((line.id, link));
+            }
+            // `start` gives every pending line its link. Were one without,
+            // it must end as an error: nothing would ever probe it.
+            None => line.outcome = Outcome::Error(Fault { code: "no_media".into(), detail: None }),
         }
     }
 }
@@ -278,24 +304,11 @@ pub fn start(shared: &Arc<super::Shared>, ytdlp: &Arc<Ytdlp>, store: &Arc<Store>
     tokio::spawn(async move {
         let mut running = Running { shared: shared.clone(), armed: true };
         loop {
-            // Decided under the lock: a `start` that comes after this exit
-            // sees `running` false and spawns a worker of its own.
-            let next = {
-                let mut state = lock(&shared.probe);
-                match state.results.iter_mut().find(|l| l.outcome == Outcome::Pending) {
-                    Some(line) => {
-                        line.outcome = Outcome::Probing;
-                        line.link.clone().map(|link| (line.id, link))
-                    }
-                    None => {
-                        state.running = false;
-                        running.armed = false;
-                        break;
-                    }
-                }
+            let next = take_next(&mut lock(&shared.probe));
+            let Some((id, link)) = next else {
+                running.armed = false;
+                break;
             };
-            // A pending line always has its link.
-            let Some((id, link)) = next else { continue };
             let outcome = probe_link(&shared, &ytdlp, &link).await;
             settle(&shared.probe, &store, id, outcome).await;
         }
@@ -386,5 +399,48 @@ async fn probe_link(shared: &super::Shared, ytdlp: &Ytdlp, link: &Link) -> Resul
         (false, _) => Ok(choices),
         (true, Some(fault)) => Err(fault),
         (true, None) => Err(Fault { code: "no_media".into(), detail: None }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(id: u64, outcome: Outcome, link: Option<Link>) -> Line {
+        Line { id, line: format!("line {id}"), outcome, link }
+    }
+
+    #[test]
+    fn a_pending_line_without_its_link_ends_as_an_error_and_the_next_one_is_taken() {
+        let mut state = ProbeState { running: true, ..ProbeState::default() };
+        state.results.push(line(0, Outcome::Pending, None));
+        state.results.push(line(1, Outcome::Pending, Some(Link::Video { id: "jNQXAC9IVRw".into() })));
+        assert_eq!(take_next(&mut state).map(|(id, _)| id), Some(1));
+        assert_eq!(state.results[0].outcome, Outcome::Error(Fault { code: "no_media".into(), detail: None }));
+        assert_eq!(state.results[1].outcome, Outcome::Probing);
+        assert!(state.running);
+        assert_eq!(take_next(&mut state).map(|(id, _)| id), None);
+        assert!(!state.running, "no pending line: the worker exits");
+    }
+
+    #[test]
+    fn a_worker_that_panics_leaves_no_line_probing() {
+        let shared = Arc::new(super::super::Shared::default());
+        {
+            let mut state = lock(&shared.probe);
+            state.running = true;
+            state.results.push(line(0, Outcome::Probing, None));
+            state.results.push(line(1, Outcome::Pending, None));
+        }
+        let worker = shared.clone();
+        let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _running = Running { shared: worker, armed: true };
+            panic!("a defect while settling a line");
+        }));
+        assert!(died.is_err());
+        let state = lock(&shared.probe);
+        assert!(!state.running, "a later send starts a worker again");
+        assert_eq!(state.results[0].outcome, Outcome::Error(Fault { code: "exited".into(), detail: Some("panicked".into()) }));
+        assert_eq!(state.results[1].outcome, Outcome::Pending, "a waiting line is taken by the next worker");
     }
 }

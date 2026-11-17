@@ -67,7 +67,13 @@ struct World {
     mounts: Arc<Mutex<String>>,
     /// How long reading the mount table takes (a stalled system).
     mounts_delay_ms: Arc<std::sync::atomic::AtomicU64>,
+    /// A job resolves its target before it looks its presets up, with one of
+    /// these permits: a test that takes them all holds every job right there.
+    resolve_gate: Arc<tokio::sync::Semaphore>,
 }
+
+/// The permits of `World::resolve_gate`: more than any test's jobs take.
+const RESOLVE_PERMITS: u32 = 1000;
 
 fn smb_root(name: &str, writable: bool) -> Root {
     Root {
@@ -124,6 +130,8 @@ async fn world_searching(tool_body: &str, targets_max_age: Duration, arch: &str,
     let out = tmp.path().join("out");
     std::fs::create_dir_all(&out).unwrap();
     let resolved = Resolved { base: out.clone(), dir: out };
+    let resolve_gate = Arc::new(tokio::sync::Semaphore::new(RESOLVE_PERMITS as usize));
+    let gate = resolve_gate.clone();
     let ctx = Ctx {
         ytdlp: Arc::new(Ytdlp::new(&data)),
         lists: ListCache::new(&data),
@@ -133,8 +141,11 @@ async fn world_searching(tool_body: &str, targets_max_age: Duration, arch: &str,
         &data,
         ctx,
         Arc::new(move |_| {
-            let r = resolved.clone();
-            Box::pin(async move { Ok(r) })
+            let (r, gate) = (resolved.clone(), gate.clone());
+            Box::pin(async move {
+                drop(gate.acquire().await.unwrap());
+                Ok(r)
+            })
         }),
     );
     let deps = Deps {
@@ -162,7 +173,7 @@ async fn world_searching(tool_body: &str, targets_max_age: Duration, arch: &str,
         targets_max_age,
     };
     let admin = WebStreamingAdmin::new(data.clone(), entries.clone(), tool, jobs, tx, env);
-    World { _tmp: tmp, data, admin, saved, entries, mounts, mounts_delay_ms }
+    World { _tmp: tmp, data, admin, saved, entries, mounts, mounts_delay_ms, resolve_gate }
 }
 
 /// A call that must come back at once, whatever the tool or the share does.
@@ -274,9 +285,8 @@ async fn each_refused_line_has_its_own_error_and_the_valid_ones_are_probed() {
     assert_eq!(results[1]["detail"], "studio.youtube.com");
     assert_eq!(results[2]["code"], "live_stream");
     assert_eq!((results[3]["code"].clone(), results[3]["detail"].clone()), (json!("local_network"), json!("192.168.1.1")));
-    let mut ids: Vec<u64> = results.iter().map(|l| l["id"].as_u64().unwrap()).collect();
-    ids.dedup();
-    assert_eq!(ids.len(), 4, "distinct ids");
+    let ids: std::collections::HashSet<u64> = results.iter().map(|l| l["id"].as_u64().unwrap()).collect();
+    assert_eq!(ids.len(), results.len(), "distinct ids");
 }
 
 /// A yt-dlp that answers with the SoundCloud and Bandcamp captures, by the
@@ -672,6 +682,67 @@ async fn a_change_that_runs_does_not_hold_back_a_reader() {
         })
         .await
         .unwrap();
+}
+
+/// A change queued behind one that still writes (the probe worker's, in the
+/// background) used to wait for it without a deadline, then write under its
+/// own: two deadlines of an exclusive `SetData`, past `GetData`'s ceiling.
+#[tokio::test]
+async fn a_change_that_cannot_take_the_lock_in_time_fails_and_changes_nothing() {
+    let mut w = world("exit 1").await;
+    three(&mut w).await;
+    Arc::get_mut(&mut w.admin.store).unwrap().deadline = Duration::from_millis(200);
+    let path = w.data.join("entries.toml");
+    let (before_text, before_rows) = (std::fs::read_to_string(&path).unwrap(), w.rows().await);
+    // Another change holds the lock, and keeps it.
+    let _held = w.admin.store.edit.clone().lock_owned().await;
+    let started = Instant::now();
+    let r = tokio::time::timeout(Duration::from_secs(3), w.op(json!({ "op": "remove", "preset": 1, "url": VIDEO })))
+        .await
+        .expect("the change waited for the lock past its deadline");
+    assert_eq!(key_of(r), "save_failed");
+    assert!(started.elapsed() < Duration::from_secs(1), "took {:?}", started.elapsed());
+    assert_eq!(w.rows().await, before_rows);
+    assert!(!w.saved.has_changed().unwrap());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before_text);
+}
+
+/// A write that outlived its deadline still ends later. It used to release
+/// the lock when the deadline passed: the next change then wrote before it,
+/// and the late write put an older table on disk than the one in memory.
+#[tokio::test]
+async fn a_write_that_outlived_its_deadline_keeps_the_lock_until_it_ends() {
+    let mut w = world("exit 1").await;
+    three(&mut w).await;
+    // The first write is held on its blocking thread until the test lets it go.
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let held = Arc::new(Mutex::new(held));
+    let first = Arc::new(AtomicBool::new(true));
+    {
+        let store = Arc::get_mut(&mut w.admin.store).unwrap();
+        store.deadline = Duration::from_millis(300);
+        store.before_write = Some(Arc::new(move || {
+            if first.swap(false, Ordering::SeqCst) {
+                let _ = held.lock().unwrap().recv();
+            }
+        }));
+    }
+    let before = w.rows().await;
+    assert_eq!(key_of(w.op(json!({ "op": "remove", "preset": 1, "url": VIDEO })).await), "save_failed");
+    // The late write still holds the lock: the next change fails cleanly
+    // instead of writing first and being overwritten.
+    let r = w.op(json!({ "op": "rename", "preset": 1, "url": VIDEO, "title": "Renamed" })).await;
+    assert_eq!(key_of(r), "save_failed", "a change was written while a late write still ran");
+    assert_eq!(w.rows().await, before);
+    assert_eq!(w.entries.read().await.entry[0].title, "t1");
+
+    // Once it ends the lock is free, and the next change writes the memory's
+    // table over the late one.
+    release.send(()).unwrap();
+    drop(w.admin.store.edit.clone().lock_owned().await);
+    w.op(json!({ "op": "rename", "preset": 1, "url": VIDEO, "title": "Renamed" })).await.unwrap();
+    assert_eq!(w.rows().await, before);
+    assert_eq!(Entries::load(&w.data.join("entries.toml")).unwrap(), *w.entries.read().await, "the disk is the memory");
 }
 
 /// The playlist was probed, so added and cached, and the table is saved
@@ -1092,19 +1163,17 @@ async fn the_last_failed_playback_is_served_to_the_page() {
 
 // ---- a download and a table that moves ---------------------------------------
 
-/// A yt-dlp that is slow to probe, so a job is still waiting for it while the
-/// table changes under the page.
-const SLOW_PROBE: &str = "sleep 1; cat '{dir}/video.json'";
-
 #[tokio::test]
 async fn a_download_keeps_what_was_picked_when_the_table_moves() {
-    let slow = SLOW_PROBE.replace("{dir}", &fixtures().display().to_string());
-    let mut w = world(&slow).await;
+    let mut w = world(&format!("cat '{}/video.json'", fixtures().display())).await;
     w.entries.write().await.entry = vec![entry(1, VIDEO, Kind::Video)];
+    // Every job held at its resolver, before it looks its presets up.
+    let held = w.resolve_gate.clone().acquire_many_owned(RESOLVE_PERMITS).await.unwrap();
     w.op(json!({ "op": "download", "items": [pick(1, VIDEO)], "target": { "root": "nas", "path": "" } })).await.unwrap();
     // The preset goes before the job has looked at it.
     w.op(json!({ "op": "remove", "preset": 1, "url": VIDEO })).await.unwrap();
     assert!(w.entries.read().await.entry.is_empty());
+    drop(held);
     let d = w.until("the job is over", |d| d["jobs"][0]["state"] == "done" || d["jobs"][0]["state"] == "failed").await;
     let rows = d["jobs"][0]["rows"].as_array().unwrap();
     assert_eq!(rows.len(), 1, "{d}");
