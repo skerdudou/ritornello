@@ -64,7 +64,12 @@
 //! core when the user resumes — `equalizer_live` then finds nothing to
 //! send. And the two calls run on the core loop: at worst (every IPC step
 //! timing out, 5 s each, plus the bounded wait for the chain rebuild) about
-//! 25 s to start and 16 s to end, the same order as `load_list`.
+//! 25 s to start and 16 s to end, the same order as `load_list`. And when
+//! mpv goes on to the next file by itself and a lock change is handled
+//! before that `FileStarting`, the second-chime path reads the new file's
+//! progress and flushes it to the old pause point; the `FileStarting` that
+//! follows ends the chime in place, so the new file stays paused at that
+//! position — a very narrow window, like the queued `TrackChanged` race.
 //!
 //! Muted means no chime at all, preview included: the owner silenced the
 //! device. Every failure is logged and swallowed — the lock itself must

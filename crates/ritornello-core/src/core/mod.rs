@@ -593,7 +593,8 @@ pub struct Core<P: Player> {
     lock_sound_mixed: Option<(String, Instant)>,
     /// A lock chime sounding over the paused file, mpv unpaused for it
     /// (`lock_sound.rs`): what to end it with and when. It must always be
-    /// ended (`finish_paused_chime`), except by a file start.
+    /// ended: put back (`finish_paused_chime`), or in place on a file start
+    /// or an idle mpv (`finish_paused_chime_in_place`).
     lock_sound_paused: Option<lock_sound::PausedChime>,
     /// mpv holds a live chain `af-command` can reach: set at
     /// `PlaybackRestarted`, cleared at `FileStarting` and `PlaybackIdle` (an
