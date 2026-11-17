@@ -1,14 +1,20 @@
 **Nothing to do** — replace the binaries. A device on 0.2.0, 0.3.0-beta.1 or
 0.3.0-beta.2 updates from the page once "Offer prereleases" is ticked.
 
-**Ritornello 0.3.0-beta.3 — who asked for an update, in the log.** The third
-beta of the 0.3 generation. It is a prerelease: only a device that ticked
-"Offer prereleases" is offered it.
+**Ritornello 0.3.0-beta.3 — equalizer, remote lock, phone-friendly page.**
+The third beta of the 0.3 generation. It is a prerelease: only a device that
+ticked "Offer prereleases" is offered it.
 
 No systemd unit, polkit rule, privileged updater or mount helper changed
 since 0.3.0-beta.2: the root mount helper `files-mount` 1.0.3, the privileged
 updater 1.0.0 and the installer 0.5.0 keep their numbers. This is not a wire
-break: no contract moved, and the bootstrap `PROTOCOL_VERSION` did not move.
+break: two contracts moved by a compatible minor (input 1.2, display 1.4),
+and the bootstrap `PROTOCOL_VERSION` did not move.
+
+**One click for a switched-off plugin.** A plugin that is already switched
+off when this release lands still has a binary without the new version block:
+its row reads `? → 0.3.0-beta.3` and the night run leaves it alone. One click
+on **Install** fixes it for good.
 <!-- The opening block above is this release's answer to "is there anything
      to do by hand?", and it is rewritten at every release rather than left
      to rot. When the next one needs nothing, the whole block above becomes
@@ -44,22 +50,52 @@ break: no contract moved, and the bootstrap `PROTOCOL_VERSION` did not move.
 
 ## Behaviour changes since 0.3.0-beta.2
 
-**The journal names who asked for an update.** Pressing "Check for updates"
-or confirming an install now writes one line in the journal with the address
-of the device that asked, and for an install the components it asked for:
-`update: check requested by 192.168.0.32`,
-`update: install of ["core"] requested by 192.168.0.32`. An install the night
-schedule starts keeps its own line (`scheduled update run`), so the two can
-no longer be confused.
+**Equalizer.**
+- 10 bands (31 Hz – 16 kHz, ±12 dB) on the Configuration page, applied to
+  every source; seven built-in presets plus up to 20 of your own.
+- Automatic compensation (on by default) keeps boosts from clipping; changes
+  apply without clicks, even while a station is connecting.
 
-The web page is built with this week's patch releases of Vue, Vite and
-Tailwind; nothing visible changes.
+**Remote lock (child lock).**
+- Hold a key bound to the new **"Lock (long press)"** action for 2 s, or tap
+  the padlock in the Player card: the physical remote ignores every other key
+  until unlocked the same way. The page and the mpd apps keep working.
+- No key is bound by default: bind one on the generic-input page.
+- The displays show LOCKED / UNLOCKED, a refused key shows LOCKED, and a soft
+  chime plays (choice of five, or none, under Settings → Player, with a
+  preview on the device), also in standby and while paused.
+- The lock survives the restart of an update, and only that one.
 
-This release carries `ritornello-core` as `0.3.0-beta.3`, and nothing else.
-The language packs stay on their 0.3.0-beta.2 archives, in the v0.3.0-beta.2
-release; the console and web-streaming plugins on their 0.3.0-beta.1
-archives, in the v0.3.0-beta.1 release; every other plugin on its 0.2.0
-archive, in the v0.2.0 release.
+**On a phone.**
+- Every page fits a 412 px screen; generic-input's buttons become icons.
+- Reordering by finger with the ⠿ handle in the four reorderable lists.
+- Presets: a scrolling list mode, and a swipe turns the pages.
+- Enlarged cover: pinch, pan, double tap.
+- Volume in steps of 5, heard while dragging.
+
+**Other changes.**
+- Theme: a third mode, **auto**, follows each browser's system setting.
+- files: the always-empty Length column is gone.
+- web-streaming: the square album art of an album track instead of the 16:9
+  frame; a playlist can take the folder's `cover.jpg` alone; cut times accept
+  milliseconds (`1:30,25`).
+- Updates: a switched-off plugin's version is now read from its binary, so
+  its row and the night run judge it like the others (see the note above);
+  the journal names the address that asked for a check or an install.
+
+French, German, Spanish and Italian cover the new texts.
+
+**Before rolling back generic-input to 0.2.0:** remove the lock binding
+first. The old binary does not know the action and then ignores every
+binding of the remote.
+
+This release carries, each as `0.3.0-beta.3`: `ritornello-core`, all twelve
+plugins and the language packs fr, de, es, it. `files-mount` stays on its
+1.0.3 archive, in the v0.2.0 release.
+
+Never run on the Pi: the equalizer on a real output, the remote lock with the
+real receiver and its chime, the phone pages on a real phone. The full list
+is in docs/installation.md, "What has not been verified".
 
 ## Since 0.3.0-beta.1
 
