@@ -6,8 +6,10 @@ import {
   CATALOG, cleanup, clickDialog, inDialog, LIST_URL, mountAdmin, mountPage, OTHER_URL, server, state, typeDialog, VIDEO_URL,
 } from './harness'
 
+/** One address per preset: the page ticks and names a preset by its address. */
+const videoUrl = (preset: number): string => (preset === 1 ? VIDEO_URL : `${VIDEO_URL}&n=${preset}`)
 const video = (preset: number, title = `Video ${preset}`): Entry => ({
-  preset, url: VIDEO_URL, kind: 'video', title, channel: 'Chan', count: null,
+  preset, url: videoUrl(preset), kind: 'video', title, channel: 'Chan', count: null,
 })
 const list = (preset: number): Entry => ({
   preset, url: LIST_URL, kind: 'playlist', title: `List ${preset}`, channel: null, count: 12,
@@ -26,44 +28,140 @@ describe('WebStreamingAdmin', () => {
 
   // ---- the presets ----------------------------------------------------------
 
-  it('lists the presets in order, and saves them numbered by position', async () => {
-    const { w, s } = await mountAdmin({ entries: [video(2, 'B'), video(1, 'A'), list(3)] })
+  it('lists the presets in order, by the number the server gave', async () => {
+    const { w } = await mountAdmin({ entries: [video(2, 'B'), video(1, 'A'), list(3)] })
     expect(titles(w)).toEqual(['A', 'B', 'List 3'])
+    expect(w.findAll('[data-entry-num]').map((n) => n.text())).toEqual(['1', '2', '3'])
     expect(w.text()).toContain('12 videos')
-
-    await w.findAll('[data-entry-delete]')[0]!.trigger('click')
-    await w.findAll('[data-entry-up]')[1]!.trigger('click')
-    expect(titles(w)).toEqual(['List 3', 'B'])
-    await w.find('[data-save]').trigger('click')
-    await flushPromises()
-
-    const [save] = s.putsOf('save') as { entries: Entry[] }[]
-    expect(save!.entries.map((e) => [e.preset, e.title, e.kind])).toEqual([
-      [1, 'List 3', 'playlist'],
-      [2, 'B', 'video'],
-    ])
-    expect(w.text()).toContain(CATALOG.saved)
   })
 
-  it('shows a refused save with its cause, and keeps what was edited', async () => {
-    const { w, s } = await mountAdmin({ entries: [video(1)] })
-    s.refusal = '99 presets at most'
-    await w.find('[data-entry-title]').setValue('Renamed')
-    await w.find('[data-save]').trigger('click')
+  it('has no Save button', async () => {
+    const { w } = await mountAdmin({ entries: [video(1)] })
+    expect(w.find('[data-save]').exists()).toBe(false)
+    expect(w.text()).not.toContain('Save')
+  })
+
+  it('removes a preset at once, by its number and link', async () => {
+    const { w, s } = await mountAdmin({ entries: [video(1), list(2)] })
+    await w.findAll('[data-entry-delete]')[1]!.trigger('click')
     await flushPromises()
-    expect(w.text()).toContain('Could not save: 99 presets at most')
-    expect(titles(w)).toEqual(['Renamed'])
+    expect(s.putsOf('remove')).toEqual([{ op: 'remove', preset: 2, url: LIST_URL }])
+  })
+
+  it('shows the refusal of an action, and reads the table again', async () => {
+    const { w, s } = await mountAdmin({ entries: [video(1)] })
+    s.refusal = 'the presets changed meanwhile'
+    const reads = s.gets()
+    await w.find('[data-entry-delete]').trigger('click')
+    await flushPromises()
+    expect(w.find('[data-message]').text()).toContain('the presets changed meanwhile')
+    expect(s.gets()).toBeGreaterThan(reads)
+  })
+
+  it('moves by arrow and by drag, by number and link', async () => {
+    const { w, s } = await mountAdmin({ entries: [video(1, 'A'), video(2, 'B'), video(3, 'C')] })
+    await w.findAll('[data-entry-down]')[0]!.trigger('click')
+    await w.findAll('[data-entry-up]')[2]!.trigger('click')
+    // `ReorderList` is generic, which `findComponent`'s typing cannot follow.
+    const onMove = (
+      w.findComponent(ReorderList as never) as unknown as { props(k: string): unknown }
+    ).props('onMove') as (from: number, to: number) => Promise<void>
+    await onMove(0, 2)
+    await flushPromises()
+    expect(s.putsOf('move')).toEqual([
+      { op: 'move', preset: 1, url: videoUrl(1), to: 2 },
+      { op: 'move', preset: 3, url: videoUrl(3), to: 2 },
+      { op: 'move', preset: 1, url: videoUrl(1), to: 3 },
+    ])
+  })
+
+  it('the first row cannot go up and the last cannot go down', async () => {
+    const { w } = await mountAdmin({ entries: [video(1, 'A'), video(2, 'B')] })
+    expect(w.findAll('[data-entry-up]')[0]!.attributes('disabled')).toBeDefined()
+    expect(w.findAll('[data-entry-down]')[1]!.attributes('disabled')).toBeDefined()
+  })
+
+  it('renames on Enter and on leaving the field, not while typing', async () => {
+    const { w, s } = await mountAdmin({ entries: [video(1, 'A'), video(2, 'B')] })
+    const [first, second] = w.findAll('[data-entry-title]')
+    await first!.trigger('focus')
+    await first!.setValue('Alpha')
+    expect(s.putsOf('rename'), 'typing sends nothing').toEqual([])
+    await first!.trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect(s.putsOf('rename')).toEqual([{ op: 'rename', preset: 1, url: videoUrl(1), title: 'Alpha' }])
+    // Leaving the field right after Enter says nothing more.
+    await first!.trigger('blur')
+    await flushPromises()
+    expect(s.putsOf('rename')).toHaveLength(1)
+
+    // Leaving a field that was not changed sends nothing; a changed one does.
+    await second!.trigger('focus')
+    await second!.trigger('blur')
+    await flushPromises()
+    expect(s.putsOf('rename')).toHaveLength(1)
+    await second!.trigger('focus')
+    await second!.setValue('  Beta  ')
+    await second!.trigger('blur')
+    await flushPromises()
+    expect(s.putsOf('rename')[1]).toEqual({ op: 'rename', preset: 2, url: videoUrl(2), title: 'Beta' })
+  })
+
+  it('Escape and a blank title put the saved title back', async () => {
+    const { w, s } = await mountAdmin({ entries: [video(1, 'A')] })
+    const input = w.find('[data-entry-title]')
+    await input.trigger('focus')
+    await input.setValue('Changed')
+    await input.trigger('keydown', { key: 'Escape' })
+    await input.trigger('blur')
+    await flushPromises()
+    expect(titles(w)).toEqual(['A'])
+
+    await input.trigger('focus')
+    await input.setValue('   ')
+    await input.trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect(titles(w)).toEqual(['A'])
+    expect(s.putsOf('rename'), 'nothing was sent for either').toEqual([])
+  })
+
+  it('keeps the typed title while a poll arrives', async () => {
+    const { w, s } = await mountAdmin({ entries: [video(1, 'A')], targets: ['nas'] })
+    const input = w.find('[data-entry-title]')
+    await input.trigger('focus')
+    await input.setValue('Typed')
+    // Any action reads again: the table comes back with another title for that preset.
+    s.data.entries = [video(1, 'Renamed elsewhere')]
+    await w.find('[data-entry-select]').setValue(true)
+    await w.find('[data-download]').trigger('click')
+    await flushPromises()
+    expect((input.element as HTMLInputElement).value).toBe('Typed')
+  })
+
+  it('a ticked preset stays ticked when its number changes', async () => {
+    const { w, s } = await mountAdmin({ entries: [video(1, 'A'), video(2, 'B')], targets: ['nas'] })
+    await w.findAll('[data-entry-select]')[1]!.setValue(true)
+    // Another page moved B to the top.
+    s.data.entries = [{ ...video(2, 'B'), preset: 1 }, { ...video(1, 'A'), preset: 2 }]
+    await w.find('[data-entry-down]').trigger('click')
+    await flushPromises()
+    const boxes = w.findAll('[data-entry-select]').map((b) => (b.element as HTMLInputElement).checked)
+    expect(titles(w)).toEqual(['B', 'A'])
+    expect(boxes).toEqual([true, false])
   })
 
   // ---- adding links ---------------------------------------------------------
 
   it('sends the pasted lines as one probe, and shows one error line per refused link', async () => {
     const results: ProbeLine[] = [
-      { line: VIDEO_URL, state: 'found', choices: [{ url: VIDEO_URL, kind: 'video', title: 'Me at the zoo', channel: 'jawed', count: null, site: 'Youtube', identity: null }] },
-      { line: 'not a link', state: 'error', code: 'not_a_url' },
-      { line: 'https://www.youtube.com/live/jNQXAC9IVRw', state: 'error', code: 'live_stream' },
-      { line: 'https://studio.youtube.com/x', state: 'error', code: 'foreign_host', detail: 'studio.youtube.com' },
-      { line: 'http://192.168.1.1/x', state: 'error', code: 'local_network', detail: '192.168.1.1' },
+      { id: 2, line: 'not a link', state: 'error', code: 'not_a_url' },
+      { id: 3, line: 'https://www.youtube.com/live/jNQXAC9IVRw', state: 'error', code: 'live_stream' },
+      { id: 4, line: 'https://studio.youtube.com/x', state: 'error', code: 'foreign_host', detail: 'studio.youtube.com' },
+      { id: 5, line: 'http://192.168.1.1/x', state: 'error', code: 'local_network', detail: '192.168.1.1' },
+      { id: 6, line: OTHER_URL, state: 'error', code: 'already_present' },
+      { id: 7, line: 'https://x/y', state: 'error', code: 'table_full' },
+      { id: 8, line: 'https://x/z', state: 'error', code: 'save_failed' },
+      { id: 9, line: 'https://x/w', state: 'probing' },
     ]
     const { w, s } = await mountAdmin()
     s.onPut = (p) => {
@@ -76,49 +174,28 @@ describe('WebStreamingAdmin', () => {
     expect(s.putsOf('probe')).toHaveLength(1)
     expect((s.putsOf('probe')[0] as { text: string }).text).toContain('not a link')
     const errors = w.findAll('[data-probe-error]').map((e) => e.text())
-    expect(errors).toHaveLength(4)
+    expect(errors).toHaveLength(7)
     expect(errors[0]).toContain('not a link')
     expect(errors[0]).toContain('this is not a link')
     expect(errors[1]).toContain('live streams are not supported')
     expect(errors[2]).toContain('not a supported link (studio.youtube.com)')
     expect(errors[3]).toContain('links to the local network are refused (192.168.1.1)')
-    expect(w.findAll('[data-add]')).toHaveLength(1)
+    expect(errors[4]).toContain(CATALOG.fault_already_present)
+    expect(errors[5]).toContain(CATALOG.fault_table_full)
+    expect(errors[6]).toContain(CATALOG.fault_save_failed)
   })
 
-  it('adds a probed video as a new unsaved row, once', async () => {
-    const found = { url: OTHER_URL, kind: 'video' as const, title: 'Me at the zoo', channel: 'jawed', count: null, site: 'Youtube', identity: null }
-    const { w } = await mountAdmin({
-      entries: [video(1, 'First')],
-      probe: { running: false, results: [{ line: OTHER_URL, state: 'found', choices: [found] }] },
-    })
-    await w.find('[data-add]').trigger('click')
-    expect(titles(w)).toEqual(['First', 'Me at the zoo'])
-    expect(w.text()).toContain(CATALOG.unsaved_changes)
-    expect(w.find('[data-add]').attributes('disabled')).toBeDefined()
+  it('a probe is never refused while another runs: the button stays usable', async () => {
+    const { w } = await mountAdmin({ probe: { running: true, results: [{ id: 1, line: VIDEO_URL, state: 'probing' }] } })
+    await w.find('[data-links]').setValue(OTHER_URL)
+    expect(w.find('[data-probe]').attributes('disabled')).toBeUndefined()
   })
 
-  it('shows the site of a preset, and saves its site and identity with it', async () => {
-    const track = 'https://soundcloud.com/forss/flickermood'
-    const found = {
-      url: track, kind: 'video' as const, title: 'Flickermood', channel: 'Forss', count: null,
-      site: 'Soundcloud', identity: 'Soundcloud:293',
-    }
-    const { w, s } = await mountAdmin({
-      entries: [{ ...list(1), site: 'BandcampAlbum' }],
-      probe: { running: false, results: [{ line: track, state: 'found', choices: [found] }] },
-    })
-    expect(w.find('[data-probe-line]').text()).toContain('Flickermood (Soundcloud · video)')
-    await w.find('[data-add]').trigger('click')
+  it('shows the site of a preset', async () => {
+    const { w } = await mountAdmin({ entries: [{ ...list(1), site: 'BandcampAlbum' }, { ...video(2), site: 'Soundcloud' }] })
     const details = w.findAll('[data-entry-detail]').map((d) => d.text())
     expect(details[0]).toMatch(/^BandcampAlbum\s+·\s+playlist/)
-    expect(details[1]).toMatch(/^Soundcloud\s+·\s+video\s+·\s+Forss/)
-    await w.find('[data-save]').trigger('click')
-    await flushPromises()
-    const [save] = s.putsOf('save') as { entries: Entry[] }[]
-    expect(save!.entries.map((e) => [e.site, e.identity])).toEqual([
-      ['BandcampAlbum', null],
-      ['Soundcloud', 'Soundcloud:293'],
-    ])
+    expect(details[1]).toMatch(/^Soundcloud\s+·\s+video\s+·\s+Chan/)
   })
 
   it('shows no site for a preset saved without one', async () => {
@@ -127,31 +204,30 @@ describe('WebStreamingAdmin', () => {
     expect(w.find('[data-entry-detail]').text()).toMatch(/^video/)
   })
 
-  it('asks which one when a link names a video and its playlist', async () => {
+  it('asks which one when a link names a video and its playlist, and sends the choice', async () => {
     const choices = [
-      { url: VIDEO_URL, kind: 'video' as const, title: 'The video', channel: null, count: null, site: 'Youtube', identity: null },
-      { url: LIST_URL, kind: 'playlist' as const, title: 'The playlist', channel: null, count: 12, site: 'YoutubeTab', identity: null },
+      { url: VIDEO_URL, kind: 'video' as const, title: 'The video', channel: null, count: null, site: 'Youtube', identity: null, present: false },
+      { url: LIST_URL, kind: 'playlist' as const, title: 'The playlist', channel: null, count: 12, site: 'YoutubeTab', identity: null, present: false },
     ]
-    const { w } = await mountAdmin({
-      probe: { running: false, results: [{ line: `${VIDEO_URL}&list=PLx`, state: 'found', choices }] },
+    const { w, s } = await mountAdmin({
+      probe: { running: false, results: [{ id: 4, line: `${VIDEO_URL}&list=PLx`, state: 'found', choices }] },
     })
     expect(w.text()).toContain(CATALOG.choose_one)
-    expect(w.find('[data-add]').exists()).toBe(false)
     await w.find('[data-add-choice="playlist"]').trigger('click')
-    expect(titles(w)).toEqual(['The playlist'])
-    expect(w.findAll('[data-entry-row]')).toHaveLength(1)
+    await flushPromises()
+    expect(s.putsOf('choose')).toEqual([{ op: 'choose', line: 4, url: LIST_URL }])
   })
 
-  it('refuses a hundredth preset', async () => {
-    const entries = Array.from({ length: 99 }, (_, i) => video(i + 1))
-    const found = { url: OTHER_URL, kind: 'video' as const, title: 'One too many', channel: null, count: null, site: null, identity: null }
+  it('does not offer a choice the table already holds', async () => {
+    const choices = [
+      { url: VIDEO_URL, kind: 'video' as const, title: 'The video', channel: null, count: null, site: 'Youtube', identity: null, present: true },
+      { url: LIST_URL, kind: 'playlist' as const, title: 'The playlist', channel: null, count: 12, site: 'YoutubeTab', identity: null, present: false },
+    ]
     const { w } = await mountAdmin({
-      entries,
-      probe: { running: false, results: [{ line: OTHER_URL, state: 'found', choices: [found] }] },
+      probe: { running: false, results: [{ id: 4, line: `${VIDEO_URL}&list=PLx`, state: 'found', choices }] },
     })
-    await w.find('[data-add]').trigger('click')
-    expect(w.findAll('[data-entry-row]')).toHaveLength(99)
-    expect(w.text()).toContain(CATALOG.limit_reached)
+    expect(w.find('[data-add-choice="video"]').attributes('disabled')).toBeDefined()
+    expect(w.find('[data-add-choice="playlist"]').attributes('disabled')).toBeUndefined()
   })
 
   // ---- downloading ----------------------------------------------------------
@@ -163,17 +239,17 @@ describe('WebStreamingAdmin', () => {
     expect(w.text()).toContain(CATALOG.no_writable_share)
   })
 
-  it('needs a selection and saved changes before it opens the dialog', async () => {
+  it('offers Download with a selection and a share, whatever else happened', async () => {
     const { w } = await mountAdmin({ entries: [video(1), video(2)], targets: ['nas'] })
     expect(w.find('[data-download]').attributes('disabled')).toBeDefined()
     await w.findAll('[data-entry-select]')[1]!.setValue(true)
     expect(w.find('[data-download]').attributes('disabled')).toBeUndefined()
+    // A title typed and not sent does not block it.
     await w.find('[data-entry-title]').setValue('edited')
-    expect(w.find('[data-download]').attributes('disabled')).toBeDefined()
-    expect(w.text()).toContain(CATALOG.save_first)
+    expect(w.find('[data-download]').attributes('disabled')).toBeUndefined()
   })
 
-  it('offers the shares, preselects the last target, and downloads the selected presets there', async () => {
+  it('downloads the ticked presets by number and link, to the last target', async () => {
     const { w, s } = await mountAdmin({
       entries: [video(1), video(2), video(3)],
       targets: ['nas', 'other'],
@@ -194,7 +270,7 @@ describe('WebStreamingAdmin', () => {
 
     expect(s.putsOf('download')).toEqual([
       {
-        op: 'download', presets: [1, 3], target: { root: 'nas', path: 'rock' },
+        op: 'download', items: [{ preset: 1, url: videoUrl(1) }, { preset: 3, url: videoUrl(3) }], target: { root: 'nas', path: 'rock' },
         format: 'original', cover: 'separate', names: { 1: 'Video 1', 3: 'Video 3' }, trims: {},
       },
     ])
@@ -322,7 +398,7 @@ describe('WebStreamingAdmin', () => {
     await clickDialog('[data-cover="embedded"]')
     expect(inDialog('[data-cover="embedded"]')!.getAttribute('aria-pressed')).toBe('true')
     await clickDialog('[data-download-here]')
-    expect(s.putsOf('download')[0]).toMatchObject({ presets: [1], cover: 'embedded' })
+    expect(s.putsOf('download')[0]).toMatchObject({ items: [{ preset: 1, url: LIST_URL }], cover: 'embedded' })
     cleanup()
     const again = await mountAdmin({ entries: [list(1), video(2)], targets: ['nas'] })
     await again.w.findAll('[data-entry-select]')[1]!.setValue(true)
@@ -350,7 +426,7 @@ describe('WebStreamingAdmin', () => {
     // The video of the batch has no folder: where its picture goes is said.
     expect(inDialog('[data-cover-folder-video]')!.textContent).toContain(CATALOG.cover_help_folder_video)
     await clickDialog('[data-download-here]')
-    expect(s.putsOf('download')[0]).toMatchObject({ presets: [1, 2], cover: 'folder' })
+    expect(s.putsOf('download')[0]).toMatchObject({ items: [{ preset: 1, url: LIST_URL }, { preset: 2, url: videoUrl(2) }], cover: 'folder' })
     cleanup()
     // A playlist alone: nothing to say about a video.
     const alone = await mountAdmin({ entries: [list(1)], targets: ['nas'], last_cover: 'folder' })
@@ -617,6 +693,7 @@ describe('WebStreamingAdmin', () => {
   it('clears the downloads that are over, and offers it only when there is one', async () => {
     const at = { root: 'nas', path: '' }
     const { w, s } = await mountAdmin({
+      entries: [video(1)],
       jobs: [{ id: 1, presets: [1], target: at, state: 'running', rows: [] }],
     })
     expect(w.find('[data-jobs-clear]').exists(), 'nothing over: nothing to clear').toBe(false)
@@ -624,7 +701,7 @@ describe('WebStreamingAdmin', () => {
       { id: 1, presets: [1], target: at, state: 'running', rows: [] },
       { id: 2, presets: [1], target: at, state: 'done', rows: [] },
     ]
-    await w.find('[data-save]').trigger('click') // any send reads again
+    await w.find('[data-entry-delete]').trigger('click') // any send reads again
     await flushPromises()
     s.onPut = (p) => {
       if (p.op === 'clear_jobs') s.data.jobs = s.data.jobs.filter((j) => j.state === 'running')
@@ -723,36 +800,11 @@ describe('WebStreamingAdmin', () => {
     expect(w.text()).not.toContain(CATALOG.no_writable_share)
   })
 
-  // ---- reordering -----------------------------------------------------------
-
-  it('reorders by its handle, and the numbers follow the position', async () => {
-    const { w, s } = await mountAdmin({ entries: [video(1, 'A'), video(2, 'B'), video(3, 'C')] })
-    // `ReorderList` is generic, which `findComponent`'s typing cannot follow.
-    const onMove = (
-      w.findComponent(ReorderList as never) as unknown as { props(k: string): unknown }
-    ).props('onMove') as (from: number, to: number) => Promise<void>
-    await onMove(0, 2)
-    await flushPromises()
-    expect(titles(w)).toEqual(['B', 'C', 'A'])
-    await w.find('[data-save]').trigger('click')
-    await flushPromises()
-    const [save] = s.putsOf('save') as { entries: Entry[] }[]
-    expect(save!.entries.map((e) => [e.preset, e.title])).toEqual([[1, 'B'], [2, 'C'], [3, 'A']])
-  })
-
-  it('moves a row down with the arrow, and the last row cannot go further', async () => {
-    const { w } = await mountAdmin({ entries: [video(1, 'A'), video(2, 'B')] })
-    await w.findAll('[data-entry-down]')[0]!.trigger('click')
-    expect(titles(w)).toEqual(['B', 'A'])
-    expect(w.findAll('[data-entry-down]')[1]!.attributes('disabled')).toBeDefined()
-    expect(w.findAll('[data-entry-up]')[0]!.attributes('disabled')).toBeDefined()
-  })
-
   it('starts polling when a probe is sent', async () => {
     vi.useFakeTimers()
     const { w, s } = await mountAdmin()
     s.onPut = (p) => {
-      if (p.op === 'probe') s.data.probe = { running: true, results: [{ line: VIDEO_URL, state: 'pending' }] }
+      if (p.op === 'probe') s.data.probe = { running: true, results: [{ id: 1, line: VIDEO_URL, state: 'pending' }] }
     }
     await w.find('[data-links]').setValue(VIDEO_URL)
     await w.find('[data-probe]').trigger('click')
@@ -1002,7 +1054,7 @@ describe('WebStreamingAdmin', () => {
   })
 
   it('a probed description or a job\'s detail wraps instead of widening the row', async () => {
-    const found = { url: OTHER_URL, kind: 'video' as const, title: 'Me at the zoo', channel: 'jawed', count: null, site: 'Youtube', identity: null }
+    const found = { url: OTHER_URL, kind: 'video' as const, title: 'Me at the zoo', channel: 'jawed', count: null, site: 'Youtube', identity: null, present: false }
     const job: Job = {
       id: 7,
       presets: [1],
@@ -1014,10 +1066,10 @@ describe('WebStreamingAdmin', () => {
     }
     const { w } = await mountAdmin({
       entries: [video(1)],
-      probe: { running: false, results: [{ line: OTHER_URL, state: 'found', choices: [found] }] },
+      probe: { running: false, results: [{ id: 1, line: OTHER_URL, state: 'found', choices: [found, { ...found, url: LIST_URL, kind: 'playlist' }] }] },
       jobs: [job],
     })
-    const description = w.find('[data-add]').element.previousElementSibling!
+    const description = w.find('[data-add-choice]').element.previousElementSibling!
     expect(description.classList.contains('min-w-0'), description.outerHTML).toBe(true)
     expect(description.classList.contains('wrap-anywhere'), description.outerHTML).toBe(true)
     const note = w.find('[data-job-row-note]').element
@@ -1035,8 +1087,7 @@ describe('WebStreamingAdmin', () => {
     const w = mountPage()
     await flushPromises()
     expect(w.text()).toContain('Error: plugin_timeout')
-    expect(w.find('[data-save]').attributes('disabled')).toBeDefined()
-    await w.find('[data-save]').trigger('click')
+    expect(w.find('[data-download]').attributes('disabled')).toBeDefined()
     expect(s.spy.mock.calls.filter((c) => (c[1] as RequestInit | undefined)?.method === 'PUT')).toHaveLength(0)
   })
 })

@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import {
-  api, Button, Card, CardAction, CardContent, CardHeader, CardTitle, createT, move, Skeleton, useSkeleton, type Catalog,
+  api, Button, Card, CardAction, CardContent, CardHeader, CardTitle, createT, Skeleton, useSkeleton, type Catalog,
 } from '@ritornello/ui'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import AddLinks from './AddLinks.vue'
 import CapabilitiesPanel from './CapabilitiesPanel.vue'
-import { emptyData, workInProgress, type Choices, type Data, type Entry, type Found, type Target } from './data'
+import { emptyData, workInProgress, type Choices, type Data, type Entry, type Target } from './data'
 import DownloadDialog, { type Item } from './DownloadDialog.vue'
-import EntryList, { type Row } from './EntryList.vue'
+import EntryList from './EntryList.vue'
 import JobList from './JobList.vue'
 import ToolPanel from './ToolPanel.vue'
 
@@ -21,8 +21,6 @@ function url(path: string): string {
   return `${props.base}${path}`
 }
 
-/** The server's bound (1..=99); `save` there is the authority. */
-const MAX = 99
 /** How often the page reads again while something runs. */
 const PROBE_PERIOD_MS = 1000
 /** Reads after an action whose effect lands a moment later (a setting written by a task). */
@@ -35,45 +33,23 @@ const GRACE_READS = 3
 const TARGETS_RETRY_MS = 10_000
 
 const data = ref<Data | null>(null)
-const rows = ref<Row[]>([])
-const selected = ref<Set<number>>(new Set())
+/** Addresses of the presets ticked: a number changes under a move, an address does not. */
+const selected = ref<Set<string>>(new Set())
 const message = ref('')
 const dialogOpen = ref(false)
 
 /**
  * Set when the first load failed, and never lifted (only a reload of the page
- * recovers). After a failed GET the table is empty while the server's is not:
- * a "Save" would overwrite every preset with nothing. Better an inert page
- * than one that destroys what it failed to read.
+ * recovers). After a failed GET the table shown is empty while the server's is
+ * not: better an inert page than one that acts on what it failed to read.
  */
 const loadFailed = ref(false)
 const loaded = ref(false)
 const skeleton = useSkeleton(() => !loaded.value)
 
-let nextKey = 0
-function rowOf(
-  e: {
-    url: string; kind: Row['kind']; title: string; channel?: string | null; count?: number | null
-    site?: string | null; identity?: string | null
-  },
-  saved: number | null,
-): Row {
-  nextKey += 1
-  return {
-    key: nextKey, saved, url: e.url, kind: e.kind, title: e.title, channel: e.channel ?? null, count: e.count ?? null,
-    site: e.site ?? null, identity: e.identity ?? null,
-  }
-}
-
 /** The server serves them in order; the page does not rely on it. */
 function byPreset(entries: Entry[]): Entry[] {
   return [...entries].sort((a, b) => a.preset - b.preset)
-}
-
-/** The rows become what the server holds: at load, and after a save. */
-function adopt(d: Data): void {
-  rows.value = byPreset(d.entries).map((e) => rowOf(e, e.preset))
-  selected.value = new Set()
 }
 
 // ---- reading, and polling while work runs -----------------------------------
@@ -99,12 +75,15 @@ function scheduleProbe(): void {
   timer = setTimeout(() => void reload(), PROBE_PERIOD_MS)
 }
 
-/** `adoptRows`: the table becomes what the server holds (first read, after a save). */
-async function reload(adoptRows = !loaded.value): Promise<void> {
+async function reload(): Promise<void> {
   try {
     const d = await api.get<Data>(url('api/data'))
     data.value = d
-    if (adoptRows) adopt(d)
+    // A preset that went (removed here, or from another page) is no longer ticked.
+    const urls = new Set(d.entries.map((e) => e.url))
+    if ([...selected.value].some((u) => !urls.has(u))) {
+      selected.value = new Set([...selected.value].filter((u) => urls.has(u)))
+    }
     scheduleProbe()
   } catch (e) {
     // A later failed read does not make the page inert: the data it holds is
@@ -150,76 +129,54 @@ async function send(op: Record<string, unknown>, reads = GRACE_READS): Promise<s
   if (loadFailed.value) return null
   const err = await api.put(url('api/data'), op)
   grace = reads
-  await reload(false)
+  await reload()
   return err
 }
 
 // ---- the presets ------------------------------------------------------------
+//
+// The server's table is the only one: every action is sent at once, by the
+// preset's number and address, and the page reads again. A `stale` refusal
+// (the table moved meanwhile) needs nothing more than that read.
 
-const dirty = computed(() => {
-  const server = byPreset(data.value?.entries ?? [])
-  return (
-    rows.value.length !== server.length ||
-    rows.value.some((r, i) => {
-      const s = server[i]!
-      return r.saved !== s.preset || r.url !== s.url || r.title !== s.title
-    })
-  )
-})
+const entries = computed(() => byPreset(data.value?.entries ?? []))
 
-const present = computed(() => new Set(rows.value.map((r) => r.url)))
-
-function reorder(from: number, to: number): void {
-  rows.value = move(rows.value, from, to)
+async function act(op: Record<string, unknown>): Promise<void> {
+  const err = await send(op)
+  message.value = err ?? ''
 }
 
-function remove(i: number): void {
-  const [gone] = rows.value.splice(i, 1)
-  if (gone) selected.value.delete(gone.key)
+function remove(preset: number, url: string): Promise<void> {
+  return act({ op: 'remove', preset, url })
 }
 
-function toggle(key: number): void {
-  if (selected.value.has(key)) selected.value.delete(key)
-  else selected.value.add(key)
+function moveTo(preset: number, url: string, to: number): Promise<void> {
+  return act({ op: 'move', preset, url, to })
 }
 
-function add(f: Found): void {
-  if (rows.value.length >= MAX) {
-    message.value = t.value('limit_reached')
-    return
-  }
-  rows.value.push(rowOf(f, null))
-  message.value = ''
+function rename(preset: number, url: string, title: string): Promise<void> {
+  return act({ op: 'rename', preset, url, title })
 }
 
-async function save(): Promise<void> {
-  if (loadFailed.value) return
-  const entries = rows.value.map((r, i) => ({
-    preset: i + 1, url: r.url, kind: r.kind, title: r.title, channel: r.channel, count: r.count,
-    site: r.site, identity: r.identity,
-  }))
-  const err = await api.put(url('api/data'), { op: 'save', entries })
-  if (err) {
-    message.value = t.value('save_error', { cause: err })
-    return
-  }
-  message.value = t.value('saved')
-  // What was saved is what the server holds now: adopt it, so the rows carry
-  // their new numbers (a download goes by number).
-  await reload(true)
+function toggle(url: string): void {
+  if (selected.value.has(url)) selected.value.delete(url)
+  else selected.value.add(url)
 }
 
 // ---- links ------------------------------------------------------------------
 
-async function probe(text: string): Promise<void> {
-  const err = await send({ op: 'probe', text })
-  message.value = err ?? ''
+function probe(text: string): Promise<void> {
+  return act({ op: 'probe', text })
+}
+
+function choose(line: number, url: string): Promise<void> {
+  return act({ op: 'choose', line, url })
 }
 
 // ---- downloading ------------------------------------------------------------
 
 const noShare = computed(() => (data.value?.targets.length ?? 0) === 0)
-const downloadBlocked = computed(() => noShare.value || selected.value.size === 0 || dirty.value)
+const downloadBlocked = computed(() => noShare.value || selected.value.size === 0)
 
 function openDialog(): void {
   // Before the early return: asking is what makes a share that just
@@ -239,16 +196,16 @@ async function createDir(target: Target, name: string): Promise<void> {
   if (err) message.value = err
 }
 
-/** The saved presets ticked for download, in order: what the dialog names. */
+/** The presets ticked for download, in order: what the dialog names. */
 const chosen = computed<Item[]>(() =>
-  rows.value
-    .filter((r) => selected.value.has(r.key) && r.saved !== null)
-    .map((r) => ({ preset: r.saved!, title: r.title, kind: r.kind })),
+  entries.value
+    .filter((e) => selected.value.has(e.url))
+    .map((e) => ({ preset: e.preset, url: e.url, title: e.title, kind: e.kind })),
 )
 
 async function download(target: Target, choices: Choices): Promise<void> {
-  const presets = chosen.value.map((i) => i.preset)
-  const err = await send({ op: 'download', presets, target, ...choices })
+  const items = chosen.value.map(({ preset, url }) => ({ preset, url }))
+  const err = await send({ op: 'download', items, target, ...choices })
   message.value = err ?? ''
   if (!err) {
     dialogOpen.value = false
@@ -302,16 +259,18 @@ async function recheck(): Promise<void> {
         <CardContent class="space-y-3">
           <EntryList
             :t="t"
-            :rows="rows"
+            :entries="entries"
+            :lines="data.probe.results"
             :selected="selected"
-            :dirty="dirty"
             :frozen="loadFailed"
             :download-blocked="downloadBlocked"
             :no-share="noShare"
-            @reorder="reorder"
             @remove="remove"
+            @move="moveTo"
+            @rename="rename"
             @toggle="toggle"
-            @save="save"
+            @choose="choose"
+            @dismiss="(line) => act({ op: 'dismiss', line })"
             @download="openDialog"
           />
           <p v-if="message" class="text-sm text-muted-foreground" role="status" data-message>{{ message }}</p>
@@ -342,11 +301,10 @@ async function recheck(): Promise<void> {
           <AddLinks
             :t="t"
             :running="data.probe.running"
-            :results="data.probe.results"
-            :present="present"
+            :lines="data.probe.results"
             :frozen="loadFailed"
             @probe="probe"
-            @add="add"
+            @choose="choose"
           />
         </CardContent>
       </Card>

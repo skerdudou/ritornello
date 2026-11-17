@@ -39,10 +39,18 @@ export interface Fault {
   detail?: string
 }
 
+/** A choice a line offers: what it would add, and whether the table already holds it. */
+export type ChoiceFound = Found & { present: boolean }
+
+/**
+ * One pasted link, as the plugin works through it. A `found` line exists only
+ * while the operator has two choices to make between; a link with one is
+ * added by the plugin itself.
+ */
 export type ProbeLine =
-  | { line: string; state: 'pending' }
-  | { line: string; state: 'found'; choices: Found[] }
-  | { line: string; state: 'error'; code: string; detail?: string }
+  | { id: number; line: string; state: 'pending' | 'probing' }
+  | { id: number; line: string; state: 'found'; choices: ChoiceFound[] }
+  | { id: number; line: string; state: 'error'; code: string; detail?: string }
 
 export interface Target {
   root: string
@@ -305,6 +313,12 @@ export function faultText(t: T, fault: Fault): string {
       return t('fault_preset_no_video')
     case 'bad_entry':
       return t('fault_bad_entry')
+    case 'already_present':
+      return t('fault_already_present')
+    case 'table_full':
+      return t('fault_table_full')
+    case 'save_failed':
+      return t('fault_save_failed')
     case 'failed_silent':
       return t('fault_failed_silent')
     case 'exited':

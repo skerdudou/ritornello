@@ -6,13 +6,12 @@ import { faultText, videoCount, type Found, type ProbeLine, type T } from './dat
 defineProps<{
   t: T
   running: boolean
-  results: ProbeLine[]
-  /** URLs already in the table: adding them again is not offered. */
-  present: Set<string>
+  /** Only the lines that need the operator: two choices, or a failure. */
+  lines: ProbeLine[]
   frozen: boolean
 }>()
 
-const emit = defineEmits<{ probe: [text: string]; add: [found: Found] }>()
+const emit = defineEmits<{ probe: [text: string]; choose: [line: number, url: string] }>()
 
 const text = ref('')
 
@@ -34,38 +33,21 @@ function describe(t: T, f: Found): string {
       :placeholder="t('add_placeholder')"
     />
     <div class="flex flex-wrap items-center gap-2">
-      <Button data-probe :disabled="frozen || running || !text.trim()" @click="emit('probe', text)">
+      <Button data-probe :disabled="frozen || !text.trim()" @click="emit('probe', text)">
         {{ t('btn_probe') }}
       </Button>
       <span v-if="running" class="text-sm text-muted-foreground" role="status">{{ t('probing') }}</span>
     </div>
 
-    <ul v-if="results.length" class="space-y-2 text-sm">
-      <li v-for="(r, i) in results" :key="i" data-probe-line>
-        <!-- The line is what the operator pasted; textContent only. -->
-        <p
-          v-if="r.state === 'error'"
-          class="text-destructive"
-          data-probe-error
-        >
-          <span class="break-all">{{ r.line }}</span> — {{ faultText(t, r) }}
-        </p>
-        <p v-else-if="r.state === 'pending'" class="text-muted-foreground">
-          <span class="break-all">{{ r.line }}</span> …
-        </p>
-        <div v-else-if="r.choices.length === 1" class="flex flex-wrap items-center gap-2">
-          <span class="min-w-0 flex-1 wrap-anywhere">{{ describe(t, r.choices[0]!) }}</span>
-          <Button
-            variant="secondary"
-            size="sm"
-            data-add
-            :disabled="present.has(r.choices[0]!.url)"
-            @click="emit('add', r.choices[0]!)"
-          >
-            {{ present.has(r.choices[0]!.url) ? t('already_added') : t('btn_add') }}
-          </Button>
-        </div>
-        <div v-else class="space-y-1">
+    <ul v-if="lines.some((l) => l.state === 'found' || l.state === 'error')" class="space-y-2 text-sm">
+      <template v-for="r in lines" :key="r.id">
+        <li v-if="r.state === 'error'" data-probe-line>
+          <!-- The line is what the operator pasted; textContent only. -->
+          <p class="text-destructive" data-probe-error>
+            <span class="break-all">{{ r.line }}</span> — {{ faultText(t, r) }}
+          </p>
+        </li>
+        <li v-else-if="r.state === 'found'" data-probe-line class="space-y-1">
           <p class="text-muted-foreground">{{ t('choose_one') }}</p>
           <div v-for="c in r.choices" :key="c.url" class="flex flex-wrap items-center gap-2">
             <span class="min-w-0 flex-1 wrap-anywhere">{{ describe(t, c) }}</span>
@@ -73,14 +55,14 @@ function describe(t: T, f: Found): string {
               variant="secondary"
               size="sm"
               :data-add-choice="c.kind"
-              :disabled="present.has(c.url)"
-              @click="emit('add', c)"
+              :disabled="c.present"
+              @click="emit('choose', r.id, c.url)"
             >
-              {{ present.has(c.url) ? t('already_added') : c.kind === 'playlist' ? t('btn_add_playlist') : t('btn_add_video') }}
+              {{ c.present ? t('already_added') : c.kind === 'playlist' ? t('btn_add_playlist') : t('btn_add_video') }}
             </Button>
           </div>
-        </div>
-      </li>
+        </li>
+      </template>
     </ul>
   </div>
 </template>
