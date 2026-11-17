@@ -12,6 +12,13 @@
 #
 # Next/Prev are bound to KEY_NEXT/KEY_PREVIOUS (407/412) and interpreted by the
 # active source -- preset for the radio, track for the cd.
+#
+# The play-mode and source keys below were taken from the bindings of the
+# device in the living room: KEY_RED/KEY_GREEN (398/399) toggle random and
+# cycle repeat, KEY_VIDEO (393), KEY_AUDIO (392) and KEY_TV (377) name the
+# cd, files and radio sources. Clear arrives as KEY_DELETE (111), the kernel's MCE keymap mapping
+# it there rather than to KEY_CLEAR: it is the remote lock, toggled by a long
+# press.
 
 [[bindings]]
 code = 2
@@ -168,3 +175,30 @@ cmd = "SourceCycle"
 [[bindings]]
 code = 142
 cmd = "Power"
+
+[[bindings]]
+code = 398
+cmd = "ToggleRandom"
+
+[[bindings]]
+code = 399
+cmd = "CycleRepeat"
+
+[[bindings]]
+code = 393
+cmd = "SelectSource"
+arg = "cd"
+
+[[bindings]]
+code = 392
+cmd = "SelectSource"
+arg = "files"
+
+[[bindings]]
+code = 377
+cmd = "SelectSource"
+arg = "radio"
+
+[[bindings]]
+code = 111
+cmd = "ToggleInputLock"
