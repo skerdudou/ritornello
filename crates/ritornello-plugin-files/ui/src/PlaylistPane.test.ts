@@ -174,8 +174,18 @@ describe('current queue pane', () => {
   // generic, which `findComponent`'s typing cannot follow.
   const list = (w: VueWrapper) =>
     w.findComponent(ReorderList as never) as unknown as { props(k: string): unknown }
-  const dropHandler = (w: VueWrapper) =>
-    list(w).props('onMove') as (from: number, to: number) => Promise<unknown>
+  // The list reports a drop as `(from, to, item)`, `item` being the row held,
+  // taken from the list as it was when the drag began. With no `item` given,
+  // the list's current items stand for that snapshot (no drag in flight).
+  const dropHandler = (w: VueWrapper) => {
+    const onMove = list(w).props('onMove') as (
+      from: number,
+      to: number,
+      item: unknown,
+    ) => Promise<unknown>
+    const items = list(w).props('items') as unknown[]
+    return (from: number, to: number, item: unknown = items[from]) => onMove(from, to, item)
+  }
 
   const LONG = Array.from({ length: 250 }, (_, i) => ({
     path: `/m/${i}.mp3`,
@@ -198,6 +208,25 @@ describe('current queue pane', () => {
     await w.find('[data-page-next]').trigger('click')
     await flushPromises()
     await dropHandler(w)(1, 0)
+    await flushPromises()
+    expect(s.putsOf('move')).toEqual([{ op: 'move', from: 101, to: 100 }])
+  })
+
+  it('a drag moves the tracks it grabbed even if the page turns meanwhile', async () => {
+    // Encoded regression: the drop read `offset` when it landed. The page
+    // follows the playing track, so a track change during the drag turned it
+    // to another page and the drop moved two tracks nobody had touched. The
+    // list freezes its items at drag start and names the grabbed one: the
+    // absolute rank must come from that item.
+    const { w, s } = await mountAdmin({ playlist: LONG, index: 150 })
+    const grabbed = list(w).props('items') as { rank: number }[]
+    const snapshot = [...grabbed] // page 2: ranks 100..199
+    const drop = list(w).props('onMove') as (f: number, t: number, i: unknown) => Promise<unknown>
+    // The page turns to the third one while the finger is still down.
+    await w.find('[data-page-next]').trigger('click')
+    await flushPromises()
+    expect((list(w).props('items') as { rank: number }[])[0]!.rank).toBe(200)
+    await drop(1, 0, snapshot[1])
     await flushPromises()
     expect(s.putsOf('move')).toEqual([{ op: 'move', from: 101, to: 100 }])
   })

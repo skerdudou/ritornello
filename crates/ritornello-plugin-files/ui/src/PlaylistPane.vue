@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { api, Button, Input, ReorderHandle, ReorderList } from '@ritornello/ui'
 import { computed, ref, watch } from 'vue'
-import { INTERNAL, type Data, type Send, type T } from './data'
+import { INTERNAL, type Data, type Send, type T, type Track } from './data'
 
 const props = defineProps<{
   data: Data
@@ -65,6 +65,26 @@ const window = computed(() =>
     ? tracks.value.slice(offset.value, offset.value + PAGE_SIZE)
     : tracks.value,
 )
+
+/**
+ * The visible tracks, each carrying its **absolute** rank at the time the list
+ * was handed over.
+ *
+ * The reorderable list freezes its items when a drag begins and hands the
+ * grabbed one back on drop. The page, meanwhile, follows the playing track
+ * (`data.index`) and may turn to another page: `offset` read at drop time would
+ * then be another page's. The rank carried by the grabbed item is the one of
+ * the page the finger actually started on.
+ */
+type Ranked = Track & { rank: number }
+const rows = computed<Ranked[]>(() =>
+  window.value.map((t, i) => ({ ...t, rank: offset.value + i })),
+)
+
+/** A drop: `from`/`to` are positions among the list's frozen items. */
+function drop(from: number, to: number, item: Ranked): Promise<unknown> {
+  return move(item.rank, item.rank + (to - from))
+}
 
 /**
  * Path of the track whose full path is shown, or `null`.
@@ -240,10 +260,10 @@ function load(): void {
              item, so it can never be a drop position. -->
         <ReorderList
           tag="tbody"
-          :items="window"
+          :items="rows"
           :item-key="(p, i) => `${offset + i}:${p.path}`"
           :disabled="frozen"
-          @move="(from, to) => move(offset + from, offset + to)"
+          @move="drop"
           v-slot="{ item: p, index: i, itemAttrs }"
         >
             <tr
