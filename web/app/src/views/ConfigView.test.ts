@@ -3356,6 +3356,19 @@ describe('ConfigView — lock sound', () => {
     expect(posts).toEqual([{ url: '/api/lock-sound/preview', body: { sound: 'b' } }])
   })
 
+  it('preview_429_is_a_quiet_no_op_but_another_refusal_still_toasts', async () => {
+    const { w } = await mountLock('b')
+    // A queued preview answers 429 at once: pressing again is not a failure.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 429 })))
+    await w.get('[data-lock-sound-preview]').trigger('click')
+    await flushPromises()
+    expect(toast.error).not.toHaveBeenCalled()
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 500 })))
+    await w.get('[data-lock-sound-preview]').trigger('click')
+    await flushPromises()
+    expect(toast.error).toHaveBeenCalledWith('HTTP 500')
+  })
+
   it('preview_is_disabled_for_none', async () => {
     const { w, posts } = await mountLock('none')
     const btn = w.get('[data-lock-sound-preview]')

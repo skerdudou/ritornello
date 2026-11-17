@@ -577,6 +577,14 @@ async fn settings_put(State(state): State<AppState>, Json(body): Json<serde_json
         let msg = e.message(&*state.catalog.read().await);
         return (StatusCode::UNPROCESSABLE_ENTITY, Json(serde_json::json!({ "error": msg }))).into_response();
     }
+    // Same for the chime: `Settings` turns an unknown one into `A` (right for
+    // `state.json`, written by a newer core), whereas this route answers like
+    // the preview route does.
+    if let Some(sound) = body.get("lock_sound")
+        && serde_json::from_value::<crate::lock_sound::LockSound>(sound.clone()).is_err()
+    {
+        return lock_sound::refuse(&state).await;
+    }
     let mut req: crate::state::Settings = match serde_json::from_value(body) {
         Ok(s) => s,
         Err(e) => {
@@ -1659,6 +1667,47 @@ mod tests {
         assert_eq!(settings_current.read().await.overlay_ms, 5000);
         assert_eq!(settings_current.read().await.tens_window_ms, 5000);
         assert!(settings_rx.try_recv().is_err(), "nothing must go out on the channel");
+    }
+
+    #[tokio::test]
+    async fn put_settings_refuses_an_unknown_lock_sound_like_the_preview_route() {
+        // `Settings` would store `a` and answer 204; the preview route answers
+        // 422 `lock_sound_invalid`, and so must this one.
+        let (state, mut settings_rx) = app_state_with_settings();
+        let settings_current = state.settings_current.clone();
+        let expected = state.catalog.read().await.get("lock_sound_invalid").to_string();
+        let app = router(state);
+        let before = settings_current.read().await.lock_sound;
+        for body in [r#"{"lock_sound":"z"}"#, r#"{"lock_sound":7}"#, r#"{"lock_sound":null}"#] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::put("/api/settings")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(v["error"], expected, "{body}");
+        }
+        assert_eq!(settings_current.read().await.lock_sound, before);
+        assert!(settings_rx.try_recv().is_err(), "nothing must go out on the channel");
+        // A valid one still goes through.
+        let resp = app
+            .oneshot(
+                Request::put("/api/settings")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"lock_sound":"e"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(settings_rx.recv().await.unwrap().lock_sound, crate::lock_sound::LockSound::E);
     }
 
     /// PUTs `settings` and returns the status, checking that a refusal leaves

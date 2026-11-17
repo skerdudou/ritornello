@@ -1649,7 +1649,9 @@ nothing will be heard."), read from the same player stream as the Home page.
 The button posts `POST /api/lock-sound/preview` with `{"sound": "<value>"}`:
 `204` when the preview is queued (also for `none`, where nothing is), `422`
 with `{"error": …}` for an unknown value, `429` when a preview is already
-queued.
+queued; the page treats that `429` as a quiet no-op (no toast). `PUT
+/api/settings` refuses an unknown `lock_sound` with the same `422`, rather than
+storing the default.
 
 ### Seek step card
 
