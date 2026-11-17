@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type APIRequestContext } from '@playwright/test'
 import { sidewaysCulprits } from './overflow'
 import { pluginOrder, restoreOrder } from './plugin-order'
 import { touchDrag } from './touch'
@@ -244,6 +244,59 @@ test('on a phone: the presets card toggles list and pages, and a vertical drag o
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(before)
 })
 
+/**
+ * The list frame scrolls on its own, but once it is at its end the gesture
+ * must chain to the page: `overscroll-contain` on a frame up to 60 % of the
+ * viewport high would pin the finger on a list that has nothing left to give.
+ * The frame is shrunk inline so that its content overflows whatever the
+ * fixture holds; the class under test is left alone.
+ */
+test('on a phone: a drag at the end of the presets list frame scrolls the page', async ({ page }) => {
+  await page.setViewportSize({ width: 412, height: 500 })
+  await page.goto('/')
+  const grid = page.locator('[data-preset-grid]')
+  await expect(grid.locator('[data-preset-button]').first()).toBeVisible()
+  const toggle = page.locator('[data-preset-layout-toggle]')
+  try {
+    await toggle.click()
+    await expect(grid).toHaveAttribute('data-preset-layout', 'list')
+    const frame = page.locator('[data-preset-list]')
+    await frame.evaluate((el) => {
+      el.style.maxHeight = '40px'
+      el.scrollTop = el.scrollHeight
+    })
+    expect(await frame.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true)
+    expect(await frame.evaluate((el) => Math.ceil(el.scrollTop + el.clientHeight) >= el.scrollHeight)).toBe(true)
+    // Let the page height settle, then put the frame in the middle of the view.
+    await expect.poll(async () => {
+      const h = await page.evaluate(() => document.documentElement.scrollHeight)
+      await page.waitForTimeout(300)
+      return h === (await page.evaluate(() => document.documentElement.scrollHeight))
+    }).toBe(true)
+    await page.evaluate(() => {
+      // Shrinking the frame shortened the page: give it room below again.
+      const spacer = document.createElement('div')
+      spacer.style.height = '800px'
+      document.body.appendChild(spacer)
+      const top = document.querySelector('[data-preset-list]')!.getBoundingClientRect().top + window.scrollY
+      window.scrollTo(0, Math.max(0, top - 250))
+    })
+    expect(await page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight - window.scrollY)).toBeGreaterThan(0)
+    const box = await frame.boundingBox()
+    if (!box) throw new Error('presets list frame not visible')
+    const from = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+    expect(await page.evaluate(([px, py]) => document.elementFromPoint(px!, py!)?.closest('[data-preset-list]') != null, [from.x, from.y])).toBe(true)
+    const before = await page.evaluate(() => window.scrollY)
+    // The frame is at its end already: only the page can move.
+    await touchDrag(page, from, { x: from.x, y: from.y - 200 }, { steps: 12 })
+    await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(before)
+  } finally {
+    // The layout is kept in this browser context's localStorage
+    // (presetLayout.ts): leave it as pages for the rest of the context.
+    if ((await grid.getAttribute('data-preset-layout')) === 'list') await toggle.click()
+  }
+})
+
 test('on a phone: a station takes two lines, its name then its address, each wide enough to read', async ({ page }) => {
   await page.goto('/plugins/radio/')
   const row = page.locator('[data-station-row]').first()
@@ -451,5 +504,91 @@ test('on a phone: holding a dragged row near the edge scrolls the page', async (
     expect(down ? moved : -moved).toBeGreaterThanOrEqual(300)
   } finally {
     await restoreOrder(request, before, page)
+  }
+})
+
+// The equalizer's ten vertical sliders cover most of their card on a phone,
+// in the page's own scrolling direction. A swipe over a band used to start a
+// slide wherever the finger landed and rewrite that gain (up to 12 dB): on a
+// vertical slider a finger now moves the value by the thumb alone (see the
+// kit's Slider.vue). The equalizer is server state shared by every spec of
+// the run: it is put back through the API, whatever the page did.
+
+interface EqSettings {
+  enabled: boolean
+  auto_preamp: boolean
+  gains: number[]
+  preset: string | null
+  user_presets: { name: string; gains: number[] }[]
+}
+
+const eqSettings = async (request: APIRequestContext) =>
+  ((await (await request.get('/api/equalizer')).json()) as { settings: EqSettings }).settings
+
+/** Writes the whole equalizer state, retried until it holds: a change the
+ * page coalesced may still land after a first write. */
+async function putEq(request: APIRequestContext, settings: EqSettings) {
+  await expect(async () => {
+    const res = await request.put('/api/equalizer', { data: settings })
+    expect(res.ok()).toBe(true)
+    await new Promise((r) => setTimeout(r, 500))
+    expect(await eqSettings(request)).toEqual(settings)
+  }).toPass({ timeout: 15_000 })
+}
+
+test('on a phone: a swipe over an equalizer band scrolls the page; its thumb still moves the gain', async ({ page, request }) => {
+  const original = await eqSettings(request)
+  const band = 4
+  // Enabled (a disabled slider ignores any pointer, and the scroll check
+  // would pass on that alone), every gain at 0: the thumb sits mid-height.
+  await putEq(request, { ...original, enabled: true, gains: original.gains.map(() => 0), preset: null })
+
+  try {
+    await page.goto('/config')
+    const column = page.locator('[data-eq-band]').nth(band)
+    const slider = column.locator('[data-slot="slider"]')
+    const thumb = column.locator('[role="slider"]')
+    const value = column.locator('[data-eq-band-value]')
+    await expect(value).toHaveText('0')
+    await expect(slider).not.toHaveAttribute('data-disabled')
+    await settledHeight(page)
+    // The band in the middle of the viewport, with room left to scroll below.
+    const viewport = page.viewportSize()!
+    const first = (await slider.boundingBox())!
+    await page.evaluate((y) => window.scrollTo(0, Math.max(0, y)), first.y + (await scrollY(page)) - viewport.height / 2)
+    await page.waitForTimeout(100)
+
+    // On the track, 14 px below the slider's top: well clear of the thumb
+    // (mid-height, its hit area 20 px either side of its centre).
+    const box = (await slider.boundingBox())!
+    const track = { x: box.x + box.width / 2, y: box.y + 14 }
+    const onTrack = await page.evaluate(([x, y]) => {
+      const hit = document.elementFromPoint(x!, y!)
+      return hit?.closest('[data-slot="slider"]') != null && hit.closest('[role="slider"]') == null
+    }, [track.x, track.y])
+    expect(onTrack).toBe(true)
+    expect(await page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight - window.scrollY))
+      .toBeGreaterThan(200)
+    const start = await scrollY(page)
+    await touchDrag(page, track, { x: track.x, y: track.y - 200 })
+    await expect.poll(() => scrollY(page)).toBeGreaterThan(start + 100)
+    // Past the card's coalescing window (300 ms): a change would be written.
+    await page.waitForTimeout(600)
+    await expect(value).toHaveText('0')
+    expect((await eqSettings(request)).gains[band]).toBe(0)
+
+    // The same finger on the thumb, 50 px down: the gain goes down, and the
+    // page does not move under it.
+    await page.waitForTimeout(300) // the swipe's momentum, if any, ends
+    const knob = centre((await thumb.boundingBox())!)
+    expect(await onHandle(page, knob, '[role="slider"]')).toBe(true)
+    const still = await scrollY(page)
+    expect(still).toBeGreaterThan(50)
+    await touchDrag(page, knob, { x: knob.x, y: knob.y + 50 })
+    await expect.poll(async () => (await eqSettings(request)).gains[band]!).toBeLessThan(0)
+    await expect(value).not.toHaveText('0')
+    expect(Math.abs((await scrollY(page)) - still)).toBeLessThanOrEqual(2)
+  } finally {
+    await putEq(request, original)
   }
 })

@@ -214,7 +214,7 @@ const dimmed = computed(() => unavailable('Select', props.state))
         ref="listFrame"
         :data-preset-list="listMode ? '' : undefined"
         :class="listMode
-          ? 'relative grid max-h-[min(60vh,32rem)] grid-cols-1 gap-2 overflow-y-auto p-1 overscroll-contain'
+          ? 'relative grid max-h-[min(60vh,32rem)] grid-cols-1 gap-2 overflow-y-auto p-1'
           : 'grid grid-cols-2 gap-2'"
       >
         <Button

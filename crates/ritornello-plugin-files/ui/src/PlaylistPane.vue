@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { api, Button, Input, ReorderHandle, ReorderList } from '@ritornello/ui'
 import { computed, ref, watch } from 'vue'
-import { INTERNAL, type Data, type Send, type T } from './data'
+import { INTERNAL, type Data, type Send, type T, type Track } from './data'
 
 const props = defineProps<{
   data: Data
@@ -65,6 +65,26 @@ const window = computed(() =>
     ? tracks.value.slice(offset.value, offset.value + PAGE_SIZE)
     : tracks.value,
 )
+
+/**
+ * The visible tracks, each carrying its **absolute** rank at the time the list
+ * was handed over.
+ *
+ * The reorderable list freezes its items when a drag begins and hands the
+ * grabbed one back on drop. The page, meanwhile, follows the playing track
+ * (`data.index`) and may turn to another page: `offset` read at drop time would
+ * then be another page's. The rank carried by the grabbed item is the one of
+ * the page the finger actually started on.
+ */
+type Ranked = Track & { rank: number }
+const rows = computed<Ranked[]>(() =>
+  window.value.map((t, i) => ({ ...t, rank: offset.value + i })),
+)
+
+/** A drop: `from`/`to` are positions among the list's frozen items. */
+function drop(from: number, to: number, item: Ranked): Promise<unknown> {
+  return move(item.rank, item.rank + (to - from))
+}
 
 /**
  * Path of the track whose full path is shown, or `null`.
@@ -230,8 +250,12 @@ function load(): void {
              (the same list as the plugins table of the settings page). The
              list is handed the **visible page only**: the positions it
              reports are relative to it, and a track on another page cannot be
-             dragged onto. The ranks sent to the plugin are **absolute**
-             (`offset + position`). The up/down buttons, on the other hand,
+             dragged onto. The ranks sent to the plugin are **absolute**: the
+             `rank` carried by the grabbed row, frozen when the drag began.
+             Rows are keyed by that same rank, not by `offset`: during a drag
+             the list renders its frozen snapshot, and a key read from a page
+             that turned meanwhile would remount every row, the one held
+             included, and lose the move. The up/down buttons, on the other hand,
              cross pages — so they stay there, and not only for the keyboard.
 
              Each track may be followed by a second row carrying its full
@@ -240,23 +264,25 @@ function load(): void {
              item, so it can never be a drop position. -->
         <ReorderList
           tag="tbody"
-          :items="window"
-          :item-key="(p, i) => `${offset + i}:${p.path}`"
+          :items="rows"
+          :item-key="(p) => `${p.rank}:${p.path}`"
           :disabled="frozen"
-          @move="(from, to) => move(offset + from, offset + to)"
+          @move="drop"
           v-slot="{ item: p, index: i, itemAttrs }"
         >
             <tr
               v-bind="itemAttrs"
               data-track-row
               class="border-t border-border"
-              :class="offset + i === data.index ? 'bg-muted/50' : ''"
+              :class="p.rank === data.index ? 'bg-muted/50' : ''"
             >
               <!-- `data-track-num` carries the **number alone**, not the cell:
                    the drag handle also lives in it, and a test reading the
                    cell's text would find the glyph in it. -->
               <td class="whitespace-nowrap tabular-nums text-muted-foreground">
                 <ReorderHandle :title="t('reorder_hint')" data-drag-handle />
+                <!-- Live `offset`: during a drag across an automatic page turn
+                     the numbers are briefly the new page's (cosmetic only). -->
                 <span data-track-num>{{ offset + i + 1 }}</span>
               </td>
               <td class="py-1 pr-2">
@@ -346,7 +372,7 @@ function load(): void {
 
                  `break-all`: an absolute path on a share has no space to break
                  at, and would otherwise widen the table past the screen. -->
-            <tr v-if="openPath === p.path" :class="offset + i === data.index ? 'bg-muted/50' : ''">
+            <tr v-if="openPath === p.path" :class="p.rank === data.index ? 'bg-muted/50' : ''">
               <td
                 colspan="3"
                 data-track-path
