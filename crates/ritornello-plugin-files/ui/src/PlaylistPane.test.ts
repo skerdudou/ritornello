@@ -231,6 +231,29 @@ describe('current queue pane', () => {
     expect(s.putsOf('move')).toEqual([{ op: 'move', from: 101, to: 100 }])
   })
 
+  it('a row keeps its key when the page turns during a drag', async () => {
+    // Encoded regression: rows were keyed by `offset + position`. While a
+    // finger holds a row the list renders its frozen snapshot but keys it
+    // with our `itemKey`; a page turn mid-drag changed every key, Vue
+    // remounted every row, the one Sortable holds included, and the drop
+    // worked on detached nodes: the move was lost.
+    const { w } = await mountAdmin({ playlist: LONG, index: 150 })
+    const snapshot = [...(list(w).props('items') as { rank: number }[])] // page 2
+    const keyOf = () => list(w).props('itemKey') as (item: unknown, i: number) => string | number
+    const before = keyOf()(snapshot[1], 1)
+    await w.find('[data-page-next]').trigger('click')
+    await flushPromises()
+    expect((list(w).props('items') as { rank: number }[])[0]!.rank).toBe(200)
+    expect(keyOf()(snapshot[1], 1)).toBe(before)
+  })
+
+  it('highlights the playing track by its absolute rank on a later page', async () => {
+    const { w } = await mountAdmin({ playlist: LONG, index: 150 })
+    const lit = w.findAll('[data-track-row]').filter((r) => r.classes().includes('bg-muted/50'))
+    expect(lit).toHaveLength(1)
+    expect(lit[0]!.find('[data-track-num]').text()).toBe('151')
+  })
+
   it('only the visible page is handed to the list', async () => {
     // The positions the list reports are relative to what it was given: it
     // must not be given tracks that are not on screen.
