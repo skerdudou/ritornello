@@ -3321,7 +3321,6 @@ describe('ConfigView — lock sound', () => {
     lock_sound_d: 'Marimba feutré', lock_sound_e: 'Xylophone pentatonique',
     lock_sound_preview: "Jouer sur l'appareil",
     lock_sound_muted_note: 'Muet : rien ne sera entendu.',
-    lock_sound_paused_note: 'En pause : rien ne sera entendu.',
   }
 
   async function mountLock(sound: string) {
@@ -3388,8 +3387,9 @@ describe('ConfigView — lock sound', () => {
     stream.push({ ...frame, muted: true, playback: 'playing' })
     await flushPromises()
     expect(w.get('[data-lock-sound-note]').text()).toBe('Muet : rien ne sera entendu.')
+    // Paused is no longer silent: the chime plays, so there is no note.
     stream.push({ ...frame, muted: false, playback: 'paused' })
     await flushPromises()
-    expect(w.get('[data-lock-sound-note]').text()).toBe('En pause : rien ne sera entendu.')
+    expect(w.find('[data-lock-sound-note]').exists()).toBe(false)
   })
 })

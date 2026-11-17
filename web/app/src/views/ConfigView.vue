@@ -312,7 +312,6 @@ const lockSoundLabel = computed(() => lockSoundText(settings.value.lock_sound))
 const { state: player, ouvre: openPlayer } = usePlayer()
 const lockSoundNote = computed(() => {
   if (player.value?.muted) return t.value('lock_sound_muted_note')
-  if (player.value?.playback === 'paused') return t.value('lock_sound_paused_note')
   return null
 })
 
