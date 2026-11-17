@@ -39,6 +39,8 @@ pub struct SourceUpdate {
     pub preset_name: Option<String>,
     /// See `SourceMessage::location`.
     pub location: Option<String>,
+    /// See `SourceMessage::media_path`.
+    pub media_path: Option<String>,
     /// See `SourceMessage::status_text`.
     pub status_text: Option<Text>,
     /// See `SourceMessage::can_eject`. Absent = nothing declared, keep the
@@ -192,6 +194,7 @@ impl SourceClient {
                     preset_count: msg.preset_count,
                     preset_name: msg.preset_name,
                     location: msg.location,
+                    media_path: msg.media_path,
                     status_text: msg.status_text,
                     can_eject: msg.can_eject,
                     has_finite_list: msg.has_finite_list,
@@ -1366,6 +1369,38 @@ mod tests {
             update.armed,
             Some(ritornello_proto::Armed { identity: serde_json::json!({"k": 1}), media_path: Some("/m/a.mp3".into()) })
         );
+    }
+
+    #[tokio::test]
+    async fn a_declared_media_path_reaches_the_update() {
+        // Copied field by field from the frame into `SourceUpdate`: forgotten
+        // there, a playing file would reach the core without its path.
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let line = lines.next_line().await.unwrap().unwrap();
+            let req: ritornello_proto::SourceRequest = serde_json::from_str(&line).unwrap();
+            let msg = ritornello_proto::SourceMessage {
+                id: Some(req.id),
+                action: Some(SourceAction::Noop),
+                identity: Some(IdentityUpdate::Playing(serde_json::json!({"k": 1}))),
+                location: Some("smb://h/a.mp3".into()),
+                media_path: Some("/m/a.mp3".into()),
+                ..Default::default()
+            };
+            write.write_all(format!("{}\n", serde_json::to_string(&msg).unwrap()).as_bytes()).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(8);
+        let client = SourceClient::connect(&socket, "files".into(), update_tx).await.unwrap();
+        client.request(SourceReq::Activate).await.unwrap();
+        let (_, update) = update_rx.recv().await.unwrap();
+        assert_eq!(update.media_path.as_deref(), Some("/m/a.mp3"));
     }
 
     #[tokio::test]

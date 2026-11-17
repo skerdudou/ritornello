@@ -56,7 +56,7 @@ impl fmt::Display for ContractVersion {
 
 // `scripts/changed-components.sh` reads these five lines with sed: keep each
 // one on a single line, in exactly this shape.
-pub const SOURCE_CONTRACT: ContractVersion = ContractVersion::new(1, 3);
+pub const SOURCE_CONTRACT: ContractVersion = ContractVersion::new(1, 4);
 pub const DISPLAY_CONTRACT: ContractVersion = ContractVersion::new(1, 4);
 pub const INPUT_CONTRACT: ContractVersion = ContractVersion::new(1, 2);
 pub const METADATA_CONTRACT: ContractVersion = ContractVersion::new(1, 2);
@@ -128,7 +128,8 @@ mod tests {
             // - source: 1.1 for `play_request`, 1.2 for `armed`, 1.3 for
             //   lyrics (`SourceMessage::lyrics`, `lyrics_archivable`,
             //   `SourceReq::ArchiveLyrics`) and for `Play::ytdl_path`, both
-            //   in the same unreleased version;
+            //   in the same unreleased version, 1.4 for the media path of a
+            //   playing file (`SourceMessage::media_path`);
             // - display: 1.1 for the source catalog's `icon`, 1.2 for lyrics
             //   (`DisplayFrame::Lyrics`, `Track::lyrics_href`…), 1.3 for the
             //   sleep timer and the next alarm (`PlayerState::sleep_timer`,
@@ -143,7 +144,7 @@ mod tests {
             //   `InputFrame::Lock`);
             // - every other one: still 1.0.
             let expected = match c {
-                Contract::Source => ContractVersion::new(1, 3),
+                Contract::Source => ContractVersion::new(1, 4),
                 Contract::Display => ContractVersion::new(1, 4),
                 Contract::Metadata => ContractVersion::new(1, 2),
                 Contract::Input => ContractVersion::new(1, 2),
