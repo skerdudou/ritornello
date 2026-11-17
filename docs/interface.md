@@ -332,7 +332,7 @@ volume and the mute, and is silent while a file is still loading. While the
 music is **paused** it plays too: the music branch is held at gain 0 in mpv's
 filter chain, mpv is unpaused for the chime and paused again, and a seekable
 file is put back at its exact position. A live stream is not seeked, so it
-ends up about 1.5 s further behind live, and the listener may hear about one
+ends up about 1.4 s further behind live, and the listener may hear about one
 audio buffer of music at the unpause. Near the end of a seekable file
 (remaining less than the chime plus 1 s) no chime is played, since it would end
 the file and advance the playlist. A user command during a paused chime (play,

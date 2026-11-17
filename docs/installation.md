@@ -2281,9 +2281,14 @@ the mix rebuild, the idle load's event order behind the gate, and the
 stays in the chain replays it. After a band moved live (`af-command`, which
 mpv's `af` never records), the core mixes the chime into the chain `af`
 holds, not the setting's, so the equalizer's entries are written with the
-arguments they already had; that mpv then keeps those entries — and the live
-gains in them — rather than rebuilding them is inferred from the spike's
-clean add/remove with the equalizer on, not measured after a live change.
+arguments they already had. That mpv then keeps those entries, and the live
+gains in them, was measured on the same machine (20 chimes after a live
+`af-command`, rock preset, 48 kHz): no click at the add nor the removal
+(largest residual 0.0023 against 0.01), and the 1 kHz level stayed at the
+live gain (0.3885, against 0.2750 for the gain written whole) through both.
+Rebuilding the entries from the setting instead clicked at every chime
+(20/20, residual up to 0.237), and any whole write that changes an entry's
+arguments clicked 19/20.
 **The chime while paused** was measured on the same machine only (mpv 0.37,
 `ao=pcm`), never heard on the Pi. A seekable file at 48 kHz with the equalizer
 was clean 20/20: no music in the chime section (1 kHz energy 0 against a 3e-4
@@ -2294,7 +2299,11 @@ the restored chain's `audio-reconfig` before the exact seek back; without the
 wait the restore seek was lost once in about 49, and the guard is reasoned, not
 proven. A non-seekable stream (radio) is not seeked: the listener may hear about
 one audio buffer of music (about 0.2 s on the device, unverified) at the unpause
-before the chime, and the stream ends up about 1.4 s further behind live. Each
+before the chime, and the stream ends up about 1.4 s further behind live. A
+radio paused long enough for its server to drop the connection, woken by a
+paused chime, may reach the end of what it holds: mpv would then go idle and
+the core's stream retry would restart the radio by itself. Not measured; the
+~1.4 s the chime consumes is likely covered by the read-ahead. Each
 step of a paused chime is synchronous on the core loop (worst case about 25 s,
 or 16 s, under the IPC timeouts), not measured on the Pi. A chime mixed into
 playback is built on the filter chain mpv actually holds (rebuilding the
