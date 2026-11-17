@@ -42,7 +42,7 @@ impl<P: Player> Core<P> {
             tracing::debug!("lock sound: muted, not played");
             return;
         }
-        let route = match self.player.chime_route().await {
+        let route = match self.player.chime_route(crate::lock_sound::duration(sound, motif)).await {
             Ok(route) => route,
             Err(e) => {
                 tracing::warn!("lock sound: where to play it: {e}");
@@ -66,7 +66,11 @@ impl<P: Player> Core<P> {
                     Err(e) => tracing::warn!("lock sound while playing: {e}"),
                 }
             }
-            ChimeRoute::Silent => tracing::debug!("lock sound: nothing audible to carry it, not played"),
+            // Not played while paused yet: the core's side of the paused
+            // chime (the user's intent first, the restore) comes next.
+            ChimeRoute::Paused { .. } | ChimeRoute::Silent => {
+                tracing::debug!("lock sound: nothing audible to carry it, not played")
+            }
         }
     }
 

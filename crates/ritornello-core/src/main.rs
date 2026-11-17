@@ -3576,10 +3576,16 @@ mod toggle_tests {
         async fn audio_filter_command(&self, _cmd: &crate::equalizer::AfCommand) -> Result<()> {
             Ok(())
         }
-        async fn chime_route(&self) -> Result<crate::player::ChimeRoute> {
+        async fn chime_route(&self, _chime: std::time::Duration) -> Result<crate::player::ChimeRoute> {
             Ok(crate::player::ChimeRoute::Silent)
         }
         async fn play_aside(&self, _uri: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn sound_while_paused(&self, _chain: &str, _resume_at: Option<f64>) -> Result<()> {
+            Ok(())
+        }
+        async fn end_sound_while_paused(&self, _chain: &str, _resume_at: Option<f64>) -> Result<()> {
             Ok(())
         }
     }
