@@ -104,7 +104,7 @@ pub struct Metadata {
     /// and end up pinned to the next one — which would be another album.
     cover_source: Option<(CoverRef, Option<CoverRef>, String)>,
     /// Cover embedded in the file, read by the core (`player::mpv::
-    /// embedded_cover`, via `Core::extraction_arrived`).
+    /// read_media_file`, via `Core::file_read_arrived`).
     ///
     /// A `CoverSource` and not a bare `CoverRef`: this is the one tier that
     /// can carry `CoverSource::Embedded`, since it is the core's own probe

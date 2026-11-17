@@ -1,4 +1,4 @@
-//! Track metadata: identity declared by the source, ICY titles, file tags, plugin enrichments, covers and their extraction.
+//! Track metadata: identity declared by the source, the file it plays, ICY titles, file tags, plugin enrichments and covers.
 
 use super::*;
 
@@ -101,34 +101,26 @@ impl<P: Player> Core<P> {
         self.set_identity_state(identity, false)
     }
 
+    /// Declares what plays, as a Source frame's `IdentityUpdate::Playing`
+    /// does, with the local file it plays when the Source named one
+    /// (`SourceMessage::media_path`): the slate follows `set_identity`'s rule,
+    /// then the file is read (see `declare_media_path`).
+    pub(super) fn declare_playing(&mut self, identity: serde_json::Value, media_path: Option<String>) {
+        self.set_identity(Some(identity));
+        if let Some(path) = media_path {
+            self.declare_media_path(path);
+        }
+    }
+
     /// Arms what a Source frame declared: nothing plays, and `armed.identity`
     /// is what Play would start (see `SourceMessage::armed`). The slate
     /// follows the usual rule — kept for the identity already shown, reset
-    /// for another one.
-    ///
-    /// **A file mpv has not opened has its tags read here**, since nothing
-    /// else will: `media_path` names it, and a detached read under
-    /// `Health::bounded` brings back its tags and embedded cover (see
-    /// `armed_read_arrived`). Launched only when the slate knows no text yet
-    /// — a track Stop kept already shows what mpv read — and never twice for
-    /// the track already armed from the same file.
+    /// for another one — and the file `media_path` names is read exactly as
+    /// a playing one is (see `declare_media_path`).
     pub(super) fn arm(&mut self, armed: ritornello_proto::Armed) {
-        // Judged before `set_identity_state` moves anything: the same file,
-        // armed again for the same identity, has its read already launched
-        // (or landed). Its slate is kept, so is its read.
-        let rearmed = self.armed
-            && self.metadata.identity() == Some(&armed.identity)
-            && self.armed_path == armed.media_path;
         self.set_identity_state(Some(armed.identity), true);
-        self.armed_path = armed.media_path.clone();
         if let Some(path) = armed.media_path {
-            let known = self.metadata.known();
-            // A URL has nothing `lofty` can open, and a relative path names
-            // no file the core could find: the Source speaks absolute paths.
-            let readable = !path.contains("://") && std::path::Path::new(&path).is_absolute();
-            if readable && !rearmed && known.title.is_none() && known.artist.is_none() {
-                self.spawn_armed_read(path);
-            }
+            self.declare_media_path(path);
         }
         // Already published by `set_identity_state` on every path that
         // changed something; repeated so this function's contract does not
@@ -136,61 +128,133 @@ impl<P: Player> Core<P> {
         self.publish_state();
     }
 
-    /// The detached half of `arm`: `read_armed_file` is strictly blocking,
-    /// potentially on a share that never answers — the same reason, and the
-    /// same circuit breaker, as `handle_path`'s extraction.
-    fn spawn_armed_read(&self, path: String) {
-        let tx = self.armed_read_tx.clone();
+    /// The local file behind the identity just declared, armed or playing:
+    /// the core reads its tags, embedded lyrics and embedded cover itself,
+    /// through one detached, bounded read (`spawn_file_read`), whose result
+    /// `file_read_arrived` applies only while that identity and that file are
+    /// still the current ones.
+    ///
+    /// **Whoever knows declares.** mpv announces the file it opened on its own
+    /// channel (`path`, `metadata`), the Source declares the new identity on
+    /// another, and nothing orders the two: when mpv spoke first, an
+    /// extraction keyed on mpv's path saw the *previous* track's cover still
+    /// held, skipped, and the identity change then wiped that cover with
+    /// nothing left to relaunch the read — a new track shown without its
+    /// cover, and nothing in the log. Tied to the identity, the read cannot
+    /// race it.
+    ///
+    /// **Called after the identity is applied**, which is what makes the
+    /// comparison below mean "already declared for this identity":
+    /// `set_identity_state` forgets the path along with an identity that
+    /// changed. The same file declared again for the same identity — a frame
+    /// restated, Stop keeping the track armed, Play starting the armed track
+    /// — is neither forgotten nor read again: the slate was kept, and so is
+    /// the read already launched or landed.
+    ///
+    /// A URL has nothing `lofty` can open, and a relative path names no file
+    /// the core could find: either is ignored, as if nothing were declared,
+    /// and mpv's own tags keep describing what plays.
+    fn declare_media_path(&mut self, path: String) {
+        if self.media_path.as_deref() == Some(path.as_str()) {
+            return;
+        }
+        if path.contains("://") || !std::path::Path::new(&path).is_absolute() {
+            return;
+        }
+        let Some(identity) = self.metadata.identity().cloned() else {
+            return;
+        };
+        self.media_path = Some(path.clone());
+        self.spawn_file_read(identity, path);
+    }
+
+    /// The detached half of `declare_media_path`: `read_media_file` is
+    /// strictly blocking, potentially on a network share that may never
+    /// answer. Running it on this thread would freeze the entire core loop —
+    /// mpv, commands, HTTP — for the duration of the block. This project
+    /// already lived through that incident on a silent cifs mount (see
+    /// `health.rs`), hence `Health::bounded`: `spawn_blocking` to get off the
+    /// async thread, under a deadline, with a circuit breaker per mount point
+    /// so as not to lose a pool thread on every new track as long as the
+    /// share stays silent.
+    ///
+    /// **Every outcome without a cover says so in the log**, at `info`: "this
+    /// file has no embedded cover", "the file could not be read" and "the
+    /// share did not answer" give the same screen — no image — and must not
+    /// give the same trace, none. That was exactly what was missing to answer
+    /// "why was the cover not shown".
+    fn spawn_file_read(&self, identity: serde_json::Value, path: String) {
+        let tx = self.file_read_tx.clone();
         let health = self.health.clone();
         tokio::spawn(async move {
             let to_read = path.clone();
-            let (tags, cover) = match health
-                .bounded(std::path::Path::new(&path), move || mpv::read_armed_file(&to_read))
+            let file = match health
+                .bounded(std::path::Path::new(&path), move || mpv::read_media_file(&to_read))
                 .await
             {
-                // The circuit breaker handed back control. `debug` only:
-                // `Health::bounded` already warns on a real timeout, and on a
-                // mount it already holds unreachable it answers at once —
-                // a `warn` here would repeat the one or misname the other.
+                // The circuit breaker handed back control. `Health::bounded`
+                // already warns on a real timeout; on a mount it already holds
+                // unreachable it answers at once, without a word.
                 None => {
-                    tracing::debug!("armed file: {path} not read (share unavailable or too slow)");
-                    (None, None)
+                    tracing::info!("declared file: {path} not read (share unavailable or too slow)");
+                    None
                 }
-                // The file could not be read (gone, not audio): the armed
-                // track keeps whatever the slate already shows.
+                // The file could not be read (gone, not audio).
                 Some(None) => {
-                    tracing::info!("armed file: {path} could not be read");
-                    (None, None)
+                    tracing::info!("declared file: {path} could not be read");
+                    None
                 }
-                Some(Some(found)) => found,
+                Some(Some(found)) => {
+                    if found.cover.is_none() {
+                        tracing::info!("no embedded cover in {path}");
+                    }
+                    Some(found)
+                }
             };
-            let _ = tx.send(ArmedRead { path, tags, cover }).await;
+            let _ = tx.send(FileRead { identity, path, file }).await;
         });
     }
 
-    /// The detached read of an armed file (`arm`) has finished.
+    /// The detached read of a declared file (`declare_media_path`) has
+    /// finished.
     ///
-    /// Judged on arrival, like `extraction_arrived`: kept only while that
-    /// very file is still the one armed. A slow share answering after the
-    /// Source moved to the next entry, after Play started it, or after
-    /// standby must not paint the old file's tags over what the screen now
-    /// describes. Play especially: mpv's own tags (`handle_file_tags`) are
-    /// then the layer, and a late read would only repeat or contradict them.
+    /// Judged on arrival: kept only while the identity it was launched for is
+    /// still the current one **and** still declares that very file. A slow
+    /// share answering after the Source moved to the next track, or after
+    /// standby, must not paint the old file's tags or picture over what the
+    /// screen now describes. Play starting the armed track keeps both, and
+    /// the read is then welcome: mpv's tags no longer describe a declared
+    /// file (`handle_file_tags`), this read is the one that does.
     ///
-    /// The core completes, it does not overwrite: the embedded cover is
-    /// taken only when no cover is held — a Source's `folder.jpg` declared
-    /// with the armed frame keeps priority by construction.
-    pub async fn armed_read_arrived(&mut self, read: ArmedRead) {
-        if self.standby || !self.armed || self.armed_path.as_deref() != Some(read.path.as_str()) {
+    /// The core completes, it does not overwrite: the embedded cover is taken
+    /// only when no cover is held — a Source's `folder.jpg`, declared with the
+    /// identity, keeps priority by construction, and a cover already shown
+    /// does not blink off while a second fetch of another image runs.
+    pub async fn file_read_arrived(&mut self, read: FileRead) {
+        if self.standby
+            || self.metadata.identity() != Some(&read.identity)
+            || self.media_path.as_deref() != Some(read.path.as_str())
+        {
+            tracing::debug!("declared file: read of {} dropped, it no longer describes what is current", read.path);
             return;
         }
+        let Some(file) = read.file else {
+            return;
+        };
         let mut changed = false;
-        if let Some(tags) = read.tags {
+        if let Some(tags) = file.tags {
             changed |= self.metadata.set_tags(tags);
         }
-        if !self.metadata.known().cover && read.cover.is_some() && self.metadata.set_cover_tags(read.cover) {
-            self.start_cover_fetch();
-            changed = true;
+        if file.lyrics.is_some() {
+            changed |= self.metadata.set_lyrics_tags(file.lyrics);
+        }
+        if file.cover.is_some() {
+            if self.metadata.known().cover {
+                tracing::debug!("embedded cover of {} not shown: another cover is held", read.path);
+            } else if self.metadata.set_cover_tags(file.cover) {
+                self.start_cover_fetch();
+                changed = true;
+            }
         }
         if changed {
             self.publish_state();
@@ -210,11 +274,6 @@ impl<P: Player> Core<P> {
         let armed = armed && identity.is_some();
         let was = self.armed;
         self.armed = armed;
-        // The armed file goes with the armed state; `arm` sets it again
-        // right after this call when the frame names one.
-        if !armed {
-            self.armed_path = None;
-        }
         // "Nothing is playing anymore" takes the current selection with it:
         // the highlighted key designates **what is playing**, not the last
         // press. An armed identity keeps it: the key then designates what
@@ -226,6 +285,7 @@ impl<P: Player> Core<P> {
             self.preset = None;
             self.preset_name = None;
             self.location = None;
+            self.media_path = None;
         }
         if !self.metadata.set_identity(identity) {
             if was != armed {
@@ -233,9 +293,11 @@ impl<P: Player> Core<P> {
             }
             return;
         }
-        // A different identity: the location described the previous one. The
-        // frame's own declaration, if any, is applied after this call.
+        // A different identity: the location and the file described the
+        // previous one. The frame's own declaration, if any, is applied after
+        // this call.
         self.location = None;
+        self.media_path = None;
         self.publish_fresh_slate();
     }
 
@@ -402,12 +464,21 @@ impl<P: Player> Core<P> {
     /// place, the last song's words would stay up under every song after it.
     /// Each frame describes the whole tag set, so its absence of lyrics is a
     /// fact, not silence.
+    ///
+    /// **Ignored while the Source has declared the file it plays**
+    /// (`media_path`): the core reads that file itself, tied to the identity
+    /// (`declare_media_path`), and mpv's tags travel on another channel than
+    /// the Source's identity — nothing orders the two, so tags of the next
+    /// file could land on the track still declared, then be wiped by its
+    /// identity change. What has no declared file — an Ogg stream's Vorbis
+    /// comments, a Source that predates source 1.4 — keeps this layer as it
+    /// always was.
     pub(super) fn handle_file_tags(
         &mut self,
         track: Option<ritornello_proto::Track>,
         lyrics: Option<ritornello_proto::Lyrics>,
     ) {
-        if self.standby || !self.playback {
+        if self.standby || !self.playback || self.media_path.is_some() {
             return;
         }
         let title_before = self.title_before_frame();
@@ -422,114 +493,6 @@ impl<P: Player> Core<P> {
         // track only through them. On finite content `TrackChanged` has
         // already said so; this second boundary finds nothing waiting.
         self.sleep_on_title_change(title_before);
-        self.publish_state();
-    }
-
-    /// Path of the file mpv actually opened (`path` property), to pull the
-    /// embedded cover out of it. Only arms a **detached** extraction: see
-    /// `extraction_arrived` for the follow-up, when the result arrives.
-    ///
-    /// Same "something is playing" guard as the tags (`playback`, not
-    /// `expecting_stream`, for the same reason): `path` is republished for a
-    /// stream just as for a file.
-    ///
-    /// **The core completes, it does not overwrite**: if a cover is already
-    /// held — a Source's `folder.jpg`, notably — the extraction is not even
-    /// launched, which saves a pointless file read and preserves the
-    /// precedence `Metadata::selected_cover` intends.
-    ///
-    /// **Always detached, never run on this thread.** `mpv::
-    /// embedded_cover` opens and walks the file with `lofty`, a strictly
-    /// blocking call, potentially on a network share that may never answer.
-    /// Running it here would freeze the entire core loop — mpv, commands,
-    /// HTTP — for the duration of the block, not just this extraction. This
-    /// project already lived through that incident on a silent cifs mount
-    /// (see `health.rs`), hence `Health::bounded`: `spawn_blocking` to get
-    /// off the async thread, under a deadline, with a circuit breaker per
-    /// mount point so as not to lose a pool thread on every new track as
-    /// long as the share stays silent.
-    pub(super) fn handle_path(&mut self, path: String) {
-        // Retained before every guard below: it is what `extraction_arrived`
-        // compares on arrival to reject a late reply for a track already
-        // replaced, including when `standby`/`playback` changed in the
-        // meantime.
-        self.current_path = Some(path.clone());
-        if self.standby || !self.playback {
-            return;
-        }
-        if self.metadata.known().cover {
-            return;
-        }
-        // A stream has no tags, and `lofty` has nothing to open on a URL:
-        // no point paying the task + channel round trip for a case that can
-        // never succeed (`embedded_cover` would refuse it anyway).
-        if path.contains("://") {
-            return;
-        }
-        if self.extraction_in_flight.as_deref() == Some(path.as_str()) {
-            return;
-        }
-        self.extraction_in_flight = Some(path.clone());
-        let tx = self.extraction_tx.clone();
-        let health = self.health.clone();
-        tokio::spawn(async move {
-            let to_read = path.clone();
-            // **The two `None`s are distinguished, and the previous
-            // `.flatten()` conflated them.** "This file has no embedded
-            // cover" and "the share did not answer within the timeout" give
-            // the same screen — no image — and used to give the same trace:
-            // none. That is exactly what was missing to answer "why was the
-            // cover not pushed".
-            let r = match health
-                .bounded(std::path::Path::new(&path), move || mpv::embedded_cover(&to_read))
-                .await
-            {
-                // The circuit breaker handed back control: a real incident
-                // (silent share), hence `warn` — it belongs in the map of
-                // recent errors.
-                None => {
-                    tracing::warn!("embedded cover: {path} did not answer in time");
-                    None
-                }
-                // Actual answer: this file carries no image. Ordinary case,
-                // hence `info`.
-                Some(None) => {
-                    tracing::info!("no embedded cover in {path}");
-                    None
-                }
-                Some(Some(c)) => Some(c),
-            };
-            let _ = tx.send((path, r)).await;
-        });
-    }
-
-    /// A detached embedded-cover extraction (`handle_path`) has finished.
-    /// Symmetric with `cover_arrived`: the staleness check happens here, on
-    /// arrival, not at launch.
-    pub async fn extraction_arrived(&mut self, path: String, r: Option<crate::cover::CoverSource>) {
-        // Released whatever the outcome and before any check below — same
-        // reason as `cover_in_flight` in `cover_arrived`: without this,
-        // this same track played again later would stay blocked for the
-        // rest of the process.
-        if self.extraction_in_flight.as_deref() == Some(path.as_str()) {
-            self.extraction_in_flight = None;
-        }
-        // mpv already moved on to another file: this reply describes a
-        // track that is no longer playing, and must not settle on the next
-        // one.
-        if self.current_path.as_deref() != Some(path.as_str()) {
-            return;
-        }
-        // Another channel provided a cover while this one was in flight
-        // (the Source, or a plugin): the core completes, it does not
-        // overwrite.
-        if self.metadata.known().cover {
-            return;
-        }
-        if !self.metadata.set_cover_tags(r) {
-            return;
-        }
-        self.start_cover_fetch();
         self.publish_state();
     }
 
@@ -1860,116 +1823,398 @@ mod tests {
         );
     }
 
-    /// The path announced by mpv (`Event::Path`) arms a **detached**
-    /// extraction: `handle_event` returns immediately, with nothing known
-    /// yet — the follow-up (`set_cover_tags` → `true`, `start_cover_fetch`,
-    /// `publish_state`) only happens once the result arrives on the
-    /// channel.
+    /// Ends a cover fetch the way `main` does: the bytes `cover::fetch`
+    /// yields are cached, and `cover_arrived` publishes the local URL. Returns
+    /// the key.
+    async fn settle_cover(core: &mut Core<FakePlayer>, r: &CoverSource) -> String {
+        let key = crate::cover::key(r);
+        let p = crate::cover::fetch(r, None, crate::cover::CoverSettings::default().download_max)
+            .await
+            .expect("the test file's picture must be readable");
+        core.app_covers().insert(key.clone(), p).await;
+        core.cover_arrived(key.clone(), true).await;
+        key
+    }
+
+    /// The Source declares a playing file: the core reads it through a
+    /// **detached** read — `handle_source_update` returns with nothing known
+    /// yet, and the follow-up (`set_cover_tags`, `start_cover_fetch`,
+    /// `publish_state`) only happens once the result arrives on the channel.
     ///
-    /// The real channel is drained here, rather than replayed by hand as
-    /// `cover_arrived` does elsewhere in this file: re-reading the tags a
-    /// second time to reconstruct the expected `CoverSource` used to write
-    /// concurrently with the detached task on the **same** temp file
-    /// (defect found in practice, see `test_core_with_extraction`). There is
-    /// no writer left to race today, but draining the real channel still
-    /// buys something a hand-reconstructed value cannot: proof that
-    /// production code, not a parallel computation believed to agree with
-    /// it, is what this assertion checks.
+    /// The real channel is drained here, rather than a read rebuilt by hand:
+    /// that is what proves production code, not a parallel computation
+    /// believed to agree with it, is what this assertion checks.
     #[tokio::test]
-    async fn the_mpv_path_triggers_extraction_and_arms_the_retrieval() {
-        let (mut core, mut state_rx, mut extraction_rx, tmp) = test_core_with_extraction();
+    async fn a_declared_file_is_read_detached_and_arms_the_retrieval() {
+        let (mut core, mut state_rx, mut rx, tmp) = test_core_with_file_read();
         let Some(f) = test_mp3_with_cover(tmp.path()) else {
             eprintln!("ffmpeg missing: skipping test");
             return;
         };
         let path = f.to_string_lossy().into_owned();
-
-        core.set_identity(Some(serde_json::json!({"kind": "file", "path": path})));
         core.playback = true;
         state_rx.borrow_and_update();
 
-        assert_eq!(
-            core.handle_event(Event::Path(path.clone())).await,
-            EventOutcome::Nothing,
-            "a path proves nothing about the stream's liveness"
-        );
+        core.handle_source_update("radio", plays_file(serde_json::json!({"kind": "file", "path": path}), &path));
 
-        // It is HERE, and only here, that the extraction is verified to be
-        // truly detached (ruling 1 of this task's review) — on a real mp3
-        // with an embedded cover, not on a nonexistent path that would
-        // fail just as fast synchronously or detached and would therefore
-        // prove nothing. `#[tokio::test]` runs on a **single-threaded**
-        // runtime (`current_thread`), and `handle_event`'s `Event::Path`
-        // arm contains no `.await` before returning: if `handle_path` were
-        // still running `embedded_cover` synchronously (a regression that
-        // would remove the `tokio::spawn` or the call to
-        // `Health::bounded`), `known().cover` would already be true at
-        // this exact instant, in the same poll as the `.await` above —
-        // there exists no execution universe, fast or slow, in which a
-        // synchronous extraction would let this assertion pass. Do not
-        // weaken or remove this line without replacing it with an
-        // equivalent proof.
-        assert!(!core.metadata.known().cover, "the extraction must be detached, never synchronous");
-        assert!(!state_rx.has_changed().unwrap_or(false));
+        // `#[tokio::test]` runs on a **single-threaded** runtime, and
+        // `handle_source_update` contains no `.await`: had the read run on
+        // this thread (the `tokio::spawn` or `Health::bounded` removed), the
+        // cover would already be known at this exact instant. Do not weaken
+        // or remove this line without replacing it with an equivalent proof.
+        assert!(!core.metadata.known().cover, "the read must be detached, never synchronous");
 
-        // Waits for the real result on the real channel — no clock here,
-        // this is a real async rendezvous on the task `handle_path`
-        // detached.
-        let (received_path, r) =
-            extraction_rx.recv().await.expect("the extraction channel must deliver a result");
-        assert_eq!(received_path, path);
-        let r = r.expect("the extraction must have succeeded on this test file");
-        core.extraction_arrived(received_path, Some(r.clone())).await;
+        let read = rx.recv().await.expect("declaring a playing file must launch its read");
+        assert_eq!(read.path, path);
+        let r = read.file.as_ref().and_then(|f| f.cover.clone()).expect("this file carries a picture");
+        core.file_read_arrived(read).await;
 
         assert!(core.metadata.known().cover);
         let (retained, _, origin) = core.metadata.selected_cover().expect("a cover must be retained");
         assert_eq!(origin, crate::metadata::ORIGIN_TAGS);
         assert_eq!(retained, r);
-        assert!(state_rx.has_changed().unwrap(), "set_cover_tags returned true: a frame must come out");
-
-        // Replays the end of the detached retrieval by hand, like the
-        // other tests in this module: the key `start_cover_fetch` arms
-        // must be the one for the temp file the extraction wrote.
+        // No frame is owed yet: nothing visible moved until the bytes land
+        // (the URL is published by `cover_arrived`, below).
         let key = crate::cover::key(&r);
         assert_eq!(core.cover_in_flight.as_deref(), Some(key.as_str()));
-        let p = crate::cover::fetch(&r, None, crate::cover::CoverSettings::default().download_max).await.expect("the temp file must be readable");
-        core.app_covers().insert(key.clone(), p).await;
-        core.cover_arrived(key.clone(), true).await;
-
+        settle_cover(&mut core, &r).await;
         let state = state_rx.borrow_and_update().clone();
         assert_eq!(state.track.cover_href.as_deref(), Some(&format!("/api/cover/{key}")[..]));
         assert_eq!(state.track.cover_origin.as_deref(), Some(crate::metadata::ORIGIN_TAGS));
     }
 
-    /// The core completes, it does not overwrite: a cover already held
-    /// (here a Source's, the highest priority) prevents the extraction,
-    /// even when mpv announces a file that itself carries a valid embedded
-    /// cover.
+    /// Two real files, two different embedded pictures: A green, B red.
+    fn two_covered_files(dir: &std::path::Path) -> Option<(String, String)> {
+        let a = test_mp3_with_cover(dir)?;
+        let b = dir.join("b.mp3");
+        if !retag_embedded_cover(&b, "red") {
+            return None;
+        }
+        Some((a.to_string_lossy().into_owned(), b.to_string_lossy().into_owned()))
+    }
+
+    /// Plays `a` with its embedded cover published, as the Source declares it
+    /// and as `main` feeds the read back. Returns A's cover key.
+    async fn playing_a_with_its_cover(
+        core: &mut Core<FakePlayer>,
+        rx: &mut mpsc::Receiver<FileRead>,
+        a: &str,
+    ) -> String {
+        core.playback = true;
+        core.handle_source_update("radio", plays_file(serde_json::json!({"kind": "file", "path": a}), a));
+        let read = rx.recv().await.expect("A's read");
+        let r = read.file.as_ref().and_then(|f| f.cover.clone()).expect("A carries a picture");
+        core.file_read_arrived(read).await;
+        let key = settle_cover(core, &r).await;
+        assert_eq!(
+            core.player_state().track.cover_href.as_deref(),
+            Some(&format!("/api/cover/{key}")[..]),
+            "A's cover must be shown before the race, or the race proves nothing"
+        );
+        key
+    }
+
+    /// **The defect measured on the device**: A plays with its embedded
+    /// cover shown; mpv announces the next file **before** the Source
+    /// declares the new identity — they speak on two channels, nothing
+    /// orders them. The core used to key the embedded-cover extraction on
+    /// mpv's announcement: it found A's cover still held, skipped, and the
+    /// identity change then wiped A's cover with nothing left to read B's.
+    /// B played under a placeholder, with nothing in the log.
+    ///
+    /// **[MUTATION]** `declare_playing` ignoring its `media_path` (B never
+    /// read, the old behaviour's outcome) → the `recv` below finds no read and
+    /// the cover assertion fires.
     #[tokio::test]
-    async fn a_cover_already_known_prevents_any_extraction() {
-        let (mut core, _np_rx, mut state_rx, tmp) = test_core();
-        let Some(f) = test_mp3_with_cover(tmp.path()) else {
+    async fn mpv_announcing_the_next_file_first_does_not_cost_its_cover() {
+        let (mut core, _state_rx, mut rx, tmp) = test_core_with_file_read();
+        let Some((a, b)) = two_covered_files(tmp.path()) else {
             eprintln!("ffmpeg missing: skipping test");
             return;
         };
-        let folder = tmp.path().join("folder.jpg");
-        std::fs::write(&folder, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
-        let r = ritornello_proto::CoverRef::Path { path: folder.to_string_lossy().into_owned() };
+        let key_a = playing_a_with_its_cover(&mut core, &mut rx, &a).await;
 
-        core.set_identity(Some(serde_json::json!({"kind": "file", "path": "/a.flac"})));
-        core.playback = true;
-        core.set_source_cover(Some(r.clone()), None, "files");
-        state_rx.borrow_and_update();
-
-        core.handle_event(Event::Path(f.to_string_lossy().into_owned())).await;
-
-        assert!(
-            !state_rx.has_changed().unwrap(),
-            "no extraction attempted, hence no extra frame"
+        // mpv first: it opened B, and says what B's tags hold.
+        let mpv_b = ritornello_proto::Track {
+            title: Some("B as mpv read it".into()),
+            origin: Some(crate::metadata::ORIGIN_TAGS.into()),
+            ..Default::default()
+        };
+        core.handle_event(Event::FileTags { track: Some(Box::new(mpv_b)), lyrics: None }).await;
+        assert_eq!(
+            core.player_state().track.cover_href.as_deref(),
+            Some(&format!("/api/cover/{key_a}")[..]),
+            "still A until the Source says otherwise"
         );
-        let (retained, _, origin) = core.metadata.selected_cover().unwrap();
-        assert_eq!(origin, "files", "the Source's folder.jpg keeps precedence");
-        assert_eq!(retained, CoverSource::Ref(r));
+
+        // Then the Source: B, and the file it plays.
+        core.handle_source_update("radio", plays_file(serde_json::json!({"kind": "file", "path": b}), &b));
+        // Bounded: a read never launched must fail this test, not hang it.
+        let read = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .ok()
+            .flatten();
+        if let Some(read) = read {
+            core.file_read_arrived(read).await;
+        }
+        let (selected, _, _) = core.metadata.selected_cover().expect("B's embedded cover must be held");
+        let key_b = crate::cover::key(&selected);
+        assert_ne!(key_b, key_a, "the two files carry two different pictures");
+        settle_cover(&mut core, &selected).await;
+        assert_eq!(
+            core.player_state().track.cover_href.as_deref(),
+            Some(&format!("/api/cover/{key_b}")[..]),
+            "B must show its own cover"
+        );
+    }
+
+    /// The other order: the Source first, mpv's tags for the same file after.
+    /// The declared read alone describes B; mpv's tags change nothing.
+    #[tokio::test]
+    async fn the_source_declaring_the_next_file_first_shows_its_cover_too() {
+        let (mut core, _state_rx, mut rx, tmp) = test_core_with_file_read();
+        let Some((a, b)) = two_covered_files(tmp.path()) else {
+            eprintln!("ffmpeg missing: skipping test");
+            return;
+        };
+        let key_a = playing_a_with_its_cover(&mut core, &mut rx, &a).await;
+
+        core.handle_source_update("radio", plays_file(serde_json::json!({"kind": "file", "path": b}), &b));
+        let mpv_b = ritornello_proto::Track {
+            title: Some("B as mpv read it".into()),
+            origin: Some(crate::metadata::ORIGIN_TAGS.into()),
+            ..Default::default()
+        };
+        core.handle_event(Event::FileTags { track: Some(Box::new(mpv_b)), lyrics: None }).await;
+        let read = rx.recv().await.expect("B's read");
+        core.file_read_arrived(read).await;
+
+        let (selected, _, _) = core.metadata.selected_cover().expect("B's embedded cover must be held");
+        let key_b = crate::cover::key(&selected);
+        assert_ne!(key_b, key_a);
+        settle_cover(&mut core, &selected).await;
+        let state = core.player_state();
+        assert_eq!(state.track.cover_href.as_deref(), Some(&format!("/api/cover/{key_b}")[..]));
+        assert_ne!(state.track.title.as_deref(), Some("B as mpv read it"), "mpv's tags do not describe a declared file");
+    }
+
+    /// The slow NAS: A's read answers after the Source declared B. It must
+    /// land on nothing — neither A's picture nor A's tags on B.
+    ///
+    /// **[MUTATION]** the identity comparison removed from
+    /// `file_read_arrived` (path comparison kept) → still dropped, by the
+    /// path; both removed → the cover assertion fires.
+    #[tokio::test]
+    async fn a_read_launched_for_the_previous_file_is_dropped() {
+        let (mut core, _state_rx, mut rx, tmp) = test_core_with_file_read();
+        let Some((a, b)) = two_covered_files(tmp.path()) else {
+            eprintln!("ffmpeg missing: skipping test");
+            return;
+        };
+        core.playback = true;
+        core.handle_source_update("radio", plays_file(serde_json::json!({"kind": "file", "path": a}), &a));
+        core.handle_source_update("radio", plays_file(serde_json::json!({"kind": "file", "path": b}), &b));
+        // Both reads were launched; their order of arrival is the runtime's.
+        let first = rx.recv().await.expect("a read");
+        let second = rx.recv().await.expect("another read");
+        let (read_a, read_b) = if first.path == a { (first, second) } else { (second, first) };
+        assert_eq!(read_a.path, a);
+        let cover_b = read_b.file.as_ref().and_then(|f| f.cover.clone()).expect("B carries a picture");
+
+        core.file_read_arrived(read_a).await;
+        assert!(!core.metadata.known().cover, "A's picture landed on B");
+        core.file_read_arrived(read_b).await;
+        let (selected, _, _) = core.metadata.selected_cover().expect("B's own read is welcome");
+        assert_eq!(selected, cover_b);
+    }
+
+    /// A read built by hand: what `file_read_arrived` judges is the identity
+    /// and the path, and these tests need no ffmpeg to prove it.
+    fn read_of(identity: serde_json::Value, path: &str, title: &str) -> FileRead {
+        FileRead {
+            identity,
+            path: path.to_string(),
+            file: Some(crate::player::mpv::MediaFile {
+                tags: Some(ritornello_proto::Track { title: Some(title.to_string()), ..Default::default() }),
+                lyrics: None,
+                cover: None,
+            }),
+        }
+    }
+
+    /// The same file declared for another identity (a playlist holding one
+    /// track twice): the read launched for the first identity describes the
+    /// right file, but not what plays now — the identity is compared too.
+    ///
+    /// **[MUTATION]** the identity comparison removed from
+    /// `file_read_arrived` → the assertion fires.
+    #[tokio::test]
+    async fn a_read_for_another_identity_of_the_same_file_is_dropped() {
+        let (mut core, _state_rx, _rx, _d) = test_core_with_file_read();
+        let a = "/music/a.mp3";
+        let first = serde_json::json!({"path": a, "entry": 1});
+        let second = serde_json::json!({"path": a, "entry": 2});
+        core.handle_source_update("radio", plays_file(first.clone(), a));
+        core.handle_source_update("radio", plays_file(second, a));
+        core.file_read_arrived(read_of(first, a, "Alpha")).await;
+        assert_ne!(core.player_state().track.title.as_deref(), Some("Alpha"), "a read landed on another identity");
+    }
+
+    /// The Source's `folder.jpg`, declared in the very frame that declares the
+    /// playing file: the picture embedded in the file must not displace it.
+    #[tokio::test]
+    async fn a_source_cover_keeps_priority_over_the_embedded_one_when_playing() {
+        let (mut core, _state_rx, _rx, tmp) = test_core_with_file_read();
+        let audio = "/music/a.mp3";
+        let identity = serde_json::json!({"path": audio});
+        let image = tmp.path().join("cover.jpg");
+        std::fs::write(&image, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
+        let declared = ritornello_proto::CoverRef::Path { path: image.to_string_lossy().into_owned() };
+        let mut update = plays_file(identity.clone(), audio);
+        update.cover = Some(declared.clone());
+        core.handle_source_update("radio", update);
+        let mut read = read_of(identity, audio, "Alpha");
+        read.file.as_mut().unwrap().cover = Some(CoverSource::Embedded { audio: audio.into(), content: "embedded".into() });
+        core.file_read_arrived(read).await;
+        assert_eq!(core.player_state().track.title.as_deref(), Some("Alpha"), "otherwise the read was dropped and proves nothing");
+        let (selected, _, origin) = core.metadata.selected_cover().expect("a cover is held");
+        assert_eq!(origin, "radio", "the Source's folder.jpg keeps precedence");
+        assert_eq!(selected, CoverSource::Ref(declared));
+    }
+
+    /// mpv's tags describe nothing the Source declared a file for — that
+    /// file is read by the core, tied to its identity — but still describe a
+    /// stream, which has no file to declare: an Ogg stream's Vorbis comments
+    /// are its only song titles.
+    ///
+    /// **[MUTATION]** the `media_path` guard removed from `handle_file_tags`
+    /// → the first assertion fires.
+    #[tokio::test]
+    async fn mpv_tags_are_ignored_for_a_declared_file_but_kept_for_a_stream() {
+        let (mut core, _np_rx, _state_rx, _d) = setup_metadata(vec![]);
+        core.playback = true;
+        let song = |title: &str| ritornello_proto::Track { title: Some(title.into()), ..Default::default() };
+        core.handle_source_update("radio", plays_file(serde_json::json!({"path": "/music/a.mp3"}), "/music/a.mp3"));
+        core.handle_file_tags(Some(song("From mpv")), Some(lrc("[00:01.00]From mpv")));
+        let state = core.player_state();
+        assert_eq!(state.track.title, None, "mpv's tags landed on a declared file");
+        assert_eq!(state.track.lyrics_href, None, "mpv's lyrics landed on a declared file");
+
+        core.handle_source_update("radio", plays(serde_json::json!({"kind": "stream", "url": "http://ogg"})));
+        core.handle_file_tags(Some(song("On air")), None);
+        assert_eq!(core.player_state().track.title.as_deref(), Some("On air"), "a stream keeps mpv's tags");
+    }
+
+    /// A URL, or a relative path, names nothing the core can read: ignored,
+    /// as if nothing were declared — no read, and mpv's tags still apply.
+    #[tokio::test]
+    async fn a_media_path_that_is_not_a_local_absolute_path_is_ignored() {
+        let (mut core, _state_rx, mut rx, _d) = test_core_with_file_read();
+        core.playback = true;
+        core.handle_source_update("radio", plays_file(serde_json::json!({"n": 1}), "http://x/a.mp3"));
+        core.handle_source_update("radio", plays_file(serde_json::json!({"n": 2}), "music/a.mp3"));
+        core.handle_file_tags(Some(ritornello_proto::Track { title: Some("T".into()), ..Default::default() }), None);
+        assert_eq!(core.player_state().track.title.as_deref(), Some("T"));
+        drop(core);
+        assert!(rx.recv().await.is_none(), "nothing to read");
+    }
+
+    /// The lyrics a file carries in its own tags come with the declared read,
+    /// since mpv's — which used to bring them — no longer describe that file.
+    #[tokio::test]
+    async fn a_declared_file_s_embedded_lyrics_reach_the_state() {
+        let (mut core, _state_rx, mut rx, tmp) = test_core_with_file_read();
+        let Some(f) = test_mp3_with_lyrics(tmp.path()) else {
+            eprintln!("ffmpeg missing: skipping test");
+            return;
+        };
+        let path = f.to_string_lossy().into_owned();
+        core.playback = true;
+        core.handle_source_update("radio", plays_file(serde_json::json!({"path": path}), &path));
+        let read = rx.recv().await.expect("the declared file's read");
+        core.file_read_arrived(read).await;
+        let state = core.player_state();
+        assert_eq!(state.track.title.as_deref(), Some("Title"));
+        let words = lrc(EMBEDDED_LRC);
+        assert_eq!(state.track.lyrics_href.as_deref(), Some(lyrics_href(&words).as_str()));
+        assert!(state.track.lyrics_synced);
+        assert_eq!(state.track.lyrics_origin.as_deref(), Some(crate::metadata::ORIGIN_TAGS));
+    }
+
+    /// The two readers of a file's words agree: what `read_media_file` finds
+    /// with `lofty` is what `file_lyrics` read from FFmpeg's view of the same
+    /// tags — the reader mpv is built on, and the one that read a file's
+    /// lyrics before the Source declared its files. One file per shape a
+    /// tagger or ffmpeg writes: a real ID3v2 `USLT` frame, ffmpeg's own mp3
+    /// `TXXX`, flac's `LYRICS` and `UNSYNCEDLYRICS`, m4a's `©lyr`.
+    #[tokio::test]
+    async fn the_declared_read_finds_the_lyrics_ffmpeg_finds() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(uslt) = test_mp3_with_lyrics(dir.path()) else {
+            eprintln!("ffmpeg absent: test skipped");
+            return;
+        };
+        let lrc_text = "[00:01.00]First line\n[00:02.50]Second line";
+        let tagged = |name: &str, codec: &str, key: &str, value: &str| {
+            let out = dir.path().join(name);
+            std::process::Command::new("ffmpeg")
+                .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1"])
+                .args(["-c:a", codec, "-metadata"])
+                .arg(format!("{key}={value}"))
+                .arg(&out)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+                .then_some(out)
+        };
+        let files = [
+            Some(uslt),
+            tagged("txxx.mp3", "libmp3lame", "lyrics", lrc_text),
+            tagged("synced.flac", "flac", "LYRICS", lrc_text),
+            tagged("plain.flac", "flac", "UNSYNCEDLYRICS", "Just words"),
+            tagged("atom.m4a", "aac", "lyrics", lrc_text),
+        ];
+        for f in files {
+            let f = f.expect("ffmpeg must write each fixture");
+            let Ok(out) = std::process::Command::new("ffprobe")
+                .args(["-loglevel", "error", "-show_entries", "format_tags", "-of", "json"])
+                .arg(&f)
+                .output()
+            else {
+                eprintln!("ffprobe absent: test skipped");
+                return;
+            };
+            let probed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+            let ffmpeg = crate::player::mpv::file_lyrics(&probed["format"]["tags"]);
+            assert!(ffmpeg.is_some(), "the fixture {} carries no lyrics FFmpeg sees", f.display());
+            let lofty = crate::player::mpv::read_media_file(f.to_str().unwrap()).and_then(|m| m.lyrics);
+            assert_eq!(lofty, ffmpeg, "the two readers disagree on {}", f.display());
+        }
+    }
+
+    /// Armed, then playing, the same track from the same file: Play on the
+    /// track the screen shows keeps its slate, and its read — read once, not
+    /// once per declaration. Counted to the end: once the core is dropped,
+    /// the channel closes when the last detached read has sent.
+    ///
+    /// **[MUTATION]** the "already declared" guard removed from
+    /// `declare_media_path` → two reads, the count assertion fires.
+    #[tokio::test]
+    async fn playing_the_armed_file_reads_it_once() {
+        let (mut core, _state_rx, mut rx, _d) = test_core_with_file_read();
+        let a = "/music/a.mp3";
+        let identity = serde_json::json!({"path": a});
+        core.handle_source_update("radio", arms_file(identity.clone(), a));
+        core.handle_source_update("radio", plays_file(identity.clone(), a));
+        core.handle_source_update("radio", plays_file(identity, a));
+        let first = rx.recv().await.expect("the first declaration must launch a read");
+        assert_eq!(first.path, a);
+        drop(core);
+        let mut more = 0;
+        while rx.recv().await.is_some() {
+            more += 1;
+        }
+        assert_eq!(more, 0, "the same file for the same identity must not be read again");
     }
 
     #[tokio::test]
@@ -2020,6 +2265,19 @@ mod tests {
         );
     }
 
+    /// The Source declares `path` playing, and the read of its file comes
+    /// back as `main` feeds it — read here on the test's side, since this
+    /// rig keeps the cover channel rather than the file-read one. Returns the
+    /// embedded cover the read found.
+    async fn play_declared(core: &mut Core<FakePlayer>, path: &str) -> CoverSource {
+        let identity = serde_json::json!({"kind": "file", "path": path});
+        core.handle_source_update("radio", plays_file(identity.clone(), path));
+        let file = crate::player::mpv::read_media_file(path);
+        let cover = file.as_ref().and_then(|f| f.cover.clone()).expect("the file carries a cover");
+        core.file_read_arrived(FileRead { identity, path: path.to_string(), file }).await;
+        cover
+    }
+
     /// Face 1 of the stale-embedded-path bug: `cover::key` is derived from
     /// the picture's **content**, so every track of an album shares one
     /// cache entry — but the payload behind that entry used to keep naming
@@ -2046,11 +2304,8 @@ mod tests {
         std::fs::copy(&track1, &track2).unwrap();
 
         let path1 = track1.to_string_lossy().into_owned();
-        core.set_identity(Some(serde_json::json!({"kind": "file", "path": path1})));
-        core.current_path = Some(path1.clone());
-        let r1 = crate::player::mpv::embedded_cover(&path1).expect("track1 carries a cover");
+        let r1 = play_declared(&mut core, &path1).await;
         let key = crate::cover::key(&r1);
-        core.extraction_arrived(path1.clone(), Some(r1)).await;
         let (k, ok) = cover_rx.recv().await.expect("the first probe must trigger a real fetch");
         assert_eq!(k, key);
         assert!(ok, "an unseen key must be fetched successfully");
@@ -2067,11 +2322,8 @@ mod tests {
         // the entry must therefore be refreshed to name what is playing
         // *now*, not merely confirmed as already known.
         let path2 = track2.to_string_lossy().into_owned();
-        core.set_identity(Some(serde_json::json!({"kind": "file", "path": path2})));
-        core.current_path = Some(path2.clone());
-        let r2 = crate::player::mpv::embedded_cover(&path2).expect("track2 carries the same cover");
+        let r2 = play_declared(&mut core, &path2).await;
         assert_eq!(crate::cover::key(&r2), key, "both tracks must share one cache entry");
-        core.extraction_arrived(path2.clone(), Some(r2)).await;
         // A message comes back **either way** — the short-circuit branch
         // reports `(key, true)` just as a real fetch does — so this `recv`
         // proves only that a task ran to completion, never that the entry
@@ -2128,11 +2380,8 @@ mod tests {
         let old_picture = embedded_picture_bytes(&track7);
 
         let path1 = track1.to_string_lossy().into_owned();
-        core.set_identity(Some(serde_json::json!({"kind": "file", "path": path1})));
-        core.current_path = Some(path1.clone());
-        let r1 = crate::player::mpv::embedded_cover(&path1).expect("track1 carries a cover");
+        let r1 = play_declared(&mut core, &path1).await;
         let key = crate::cover::key(&r1);
-        core.extraction_arrived(path1.clone(), Some(r1)).await;
         let (k, ok) = cover_rx.recv().await.expect("the first probe must trigger a real fetch");
         // Fed back for the same reason as in the test above: `cover_arrived`
         // is what releases `cover_in_flight`, and without it track 7's fetch
@@ -2149,11 +2398,8 @@ mod tests {
         // Track 7 starts playing. It still carries the OLD picture, so it
         // recomputes the very same key `K`.
         let path7 = track7.to_string_lossy().into_owned();
-        core.set_identity(Some(serde_json::json!({"kind": "file", "path": path7})));
-        core.current_path = Some(path7.clone());
-        let r7 = crate::player::mpv::embedded_cover(&path7).expect("track7 carries the old cover");
+        let r7 = play_declared(&mut core, &path7).await;
         assert_eq!(crate::cover::key(&r7), key, "track7 must recompute the same content-addressed key");
-        core.extraction_arrived(path7.clone(), Some(r7)).await;
         // Same reading as in the test above: this only says a task ran —
         // the short-circuit reports success too. What it buys is ordering:
         // the insert precedes the send, so the request below sees a settled
@@ -2393,7 +2639,7 @@ mod tests {
     /// ever opening it.
     #[tokio::test]
     async fn an_armed_file_shows_its_own_tags_while_stopped() {
-        let (mut core, _state_rx, mut rx, tmp) = test_core_with_armed_read();
+        let (mut core, _state_rx, mut rx, tmp) = test_core_with_file_read();
         let Some(f) = crate::player::mpv::tests::tagged_mp3(tmp.path()) else {
             eprintln!("ffmpeg missing: skipping test");
             return;
@@ -2402,7 +2648,7 @@ mod tests {
         core.handle_source_update("radio", arms_file(serde_json::json!({"path": path}), &path));
         let read = rx.recv().await.expect("arming a file must launch its read");
         assert_eq!(read.path, path);
-        core.armed_read_arrived(read).await;
+        core.file_read_arrived(read).await;
         let state = core.player_state();
         assert_eq!(state.track.title.as_deref(), Some("Alpha"));
         assert_eq!(state.track.artist.as_deref(), Some("Beta"));
@@ -2410,52 +2656,46 @@ mod tests {
         assert_eq!(state.playback, ritornello_proto::Playback::Stopped, "reading the tags plays nothing");
     }
 
-    /// A read built by hand: the path is all `armed_read_arrived` judges, and
-    /// these tests need no ffmpeg to prove it.
-    fn read_of(path: &str, title: &str) -> ArmedRead {
-        ArmedRead {
-            path: path.to_string(),
-            tags: Some(ritornello_proto::Track { title: Some(title.to_string()), ..Default::default() }),
-            cover: None,
-        }
-    }
-
     /// The slow NAS: the read of the file armed first answers after the
-    /// Source has moved on — to the next entry, to playing it, to standby.
-    /// Its tags must land on none of them.
+    /// Source has moved on — to the next entry, to standby. Its tags must
+    /// land on neither. Play starting the armed track before the read came
+    /// back is the opposite case: same identity, same file, and the read is
+    /// the one description of that file now that mpv's tags are not.
     ///
-    /// **[MUTATION]** the `armed_path` comparison removed from
-    /// `armed_read_arrived` → the "next entry" assertion fires. `!self.armed`
-    /// removed → the "Play" assertion fires (a `Play` action unarms without
-    /// re-declaring the identity, so the armed path is still the read's
-    /// own: only the armed flag tells the two apart).
+    /// **[MUTATION]** the `media_path` comparison removed from
+    /// `file_read_arrived` (identity comparison kept) → the "next entry"
+    /// assertion still holds by the identity; both removed → it fires.
     #[tokio::test]
-    async fn a_late_armed_read_is_dropped() {
+    async fn a_late_armed_read_is_dropped_unless_the_track_still_stands() {
         let a = "/music/a.mp3";
         let b = "/music/b.mp3";
+        let id_a = serde_json::json!({"path": a});
+        let id_b = serde_json::json!({"path": b});
 
         // The Source moved to the next entry.
-        let (mut core, _state_rx, _rx, _d) = test_core_with_armed_read();
-        core.handle_source_update("radio", arms_file(serde_json::json!({"path": a}), a));
-        core.handle_source_update("radio", arms_file(serde_json::json!({"path": b}), b));
-        core.armed_read_arrived(read_of(a, "Alpha")).await;
+        let (mut core, _state_rx, _rx, _d) = test_core_with_file_read();
+        core.handle_source_update("radio", arms_file(id_a.clone(), a));
+        core.handle_source_update("radio", arms_file(id_b.clone(), b));
+        core.file_read_arrived(read_of(id_a.clone(), a, "Alpha")).await;
         assert_ne!(core.player_state().track.title.as_deref(), Some("Alpha"), "A's tags landed on B");
         // The read of B itself is welcome: the guard is not a closed door.
-        core.armed_read_arrived(read_of(b, "Bravo")).await;
+        core.file_read_arrived(read_of(id_b, b, "Bravo")).await;
         assert_eq!(core.player_state().track.title.as_deref(), Some("Bravo"));
 
-        // Play started the armed file before its read came back.
-        let (mut core, _state_rx, _rx, _d) = test_core_with_armed_read();
-        core.handle_source_update("radio", arms_file(serde_json::json!({"path": a}), a));
+        // Play started the armed file before its read came back, and the
+        // Source confirmed it plays that very file.
+        let (mut core, _state_rx, _rx, _d) = test_core_with_file_read();
+        core.handle_source_update("radio", arms_file(id_a.clone(), a));
         core.apply(SourceAction::play(a).finite()).await.unwrap();
-        core.armed_read_arrived(read_of(a, "Alpha")).await;
-        assert_ne!(core.player_state().track.title.as_deref(), Some("Alpha"), "a read landed on a track that plays");
+        core.handle_source_update("radio", plays_file(id_a.clone(), a));
+        core.file_read_arrived(read_of(id_a.clone(), a, "Alpha")).await;
+        assert_eq!(core.player_state().track.title.as_deref(), Some("Alpha"), "the playing file lost its own read");
 
         // Standby came first.
-        let (mut core, _state_rx, _rx, _d) = test_core_with_armed_read();
-        core.handle_source_update("radio", arms_file(serde_json::json!({"path": a}), a));
+        let (mut core, _state_rx, _rx, _d) = test_core_with_file_read();
+        core.handle_source_update("radio", arms_file(id_a.clone(), a));
         core.handle_command(Command::Power).await.unwrap();
-        core.armed_read_arrived(read_of(a, "Alpha")).await;
+        core.file_read_arrived(read_of(id_a, a, "Alpha")).await;
         assert_ne!(core.player_state().track.title.as_deref(), Some("Alpha"), "a read landed in standby");
     }
 
@@ -2463,18 +2703,18 @@ mod tests {
     /// the track: the picture embedded in the file must not displace it.
     #[tokio::test]
     async fn a_source_cover_keeps_priority_over_the_embedded_one_when_armed() {
-        let (mut core, _state_rx, _rx, tmp) = test_core_with_armed_read();
+        let (mut core, _state_rx, _rx, tmp) = test_core_with_file_read();
         let audio = "/music/a.mp3";
+        let identity = serde_json::json!({"path": audio});
         let image = tmp.path().join("cover.jpg");
         std::fs::write(&image, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
         let declared = ritornello_proto::CoverRef::Path { path: image.to_string_lossy().into_owned() };
-        let mut update = arms_file(serde_json::json!({"path": audio}), audio);
+        let mut update = arms_file(identity.clone(), audio);
         update.cover = Some(declared.clone());
         core.handle_source_update("radio", update);
-        let embedded = CoverSource::Embedded { audio: audio.into(), content: "embedded".into() };
-        let mut read = read_of(audio, "Alpha");
-        read.cover = Some(embedded);
-        core.armed_read_arrived(read).await;
+        let mut read = read_of(identity, audio, "Alpha");
+        read.file.as_mut().unwrap().cover = Some(CoverSource::Embedded { audio: audio.into(), content: "embedded".into() });
+        core.file_read_arrived(read).await;
         assert_eq!(core.player_state().track.title.as_deref(), Some("Alpha"), "otherwise the read was dropped and proves nothing");
         let (selected, _, _) = core.metadata.selected_cover().expect("a cover is held");
         assert_eq!(selected, CoverSource::Ref(declared), "the Source's cover must stay the one shown");
@@ -2487,11 +2727,11 @@ mod tests {
     /// channel closes when the last detached read has sent, so the count
     /// does not hang on when a task happened to run.
     ///
-    /// **[MUTATION]** the `rearmed` guard removed from `arm` → two reads, the
-    /// count assertion fires.
+    /// **[MUTATION]** the "already declared" guard removed from
+    /// `declare_media_path` → two reads, the count assertion fires.
     #[tokio::test]
     async fn rearming_the_same_track_reads_nothing_again() {
-        let (mut core, _state_rx, mut rx, _d) = test_core_with_armed_read();
+        let (mut core, _state_rx, mut rx, _d) = test_core_with_file_read();
         let a = "/music/a.mp3";
         core.handle_source_update("radio", arms_file(serde_json::json!({"path": a}), a));
         core.handle_source_update("radio", arms_file(serde_json::json!({"path": a}), a));
@@ -2505,22 +2745,23 @@ mod tests {
         assert_eq!(more, 0, "the same track armed again must not be read again");
     }
 
-    /// The Source's `cover.jpg`, already fetched and shown, then the armed
+    /// The Source's `cover.jpg`, already fetched and shown, then the declared
     /// file's read arriving with its embedded picture: the screen must not
     /// move. Taking the picture anyway is not merely a wasted fetch —
     /// `set_cover_tags` drops the published cover key, so the state goes out
     /// with no `cover_href` until a second fetch of the very same image
     /// returns, and the cover blinks.
     ///
-    /// **[MUTATION]** the `!known().cover` check removed from
-    /// `armed_read_arrived` → the `cover_href` assertion fires.
+    /// **[MUTATION]** the `known().cover` check removed from
+    /// `file_read_arrived` → the `cover_href` assertion fires.
     #[tokio::test]
     async fn an_embedded_cover_read_after_the_source_cover_does_not_blink() {
         let (mut core, _state_rx, mut cover_rx, tmp) = test_core_with_cover_channel();
         let audio = "/music/a.mp3";
+        let identity = serde_json::json!({"path": audio});
         let image = tmp.path().join("cover.jpg");
         std::fs::write(&image, [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).unwrap();
-        let mut update = arms_file(serde_json::json!({"path": audio}), audio);
+        let mut update = arms_file(identity.clone(), audio);
         update.cover = Some(ritornello_proto::CoverRef::Path { path: image.to_string_lossy().into_owned() });
         core.handle_source_update("radio", update);
         let (key, ok) = cover_rx.recv().await.expect("the Source's cover must be fetched");
@@ -2529,9 +2770,9 @@ mod tests {
         let href = format!("/api/cover/{key}");
         assert_eq!(core.player_state().track.cover_href.as_deref(), Some(&href[..]), "otherwise nothing could blink");
 
-        let mut read = read_of(audio, "Alpha");
-        read.cover = Some(CoverSource::Embedded { audio: audio.into(), content: "embedded".into() });
-        core.armed_read_arrived(read).await;
+        let mut read = read_of(identity, audio, "Alpha");
+        read.file.as_mut().unwrap().cover = Some(CoverSource::Embedded { audio: audio.into(), content: "embedded".into() });
+        core.file_read_arrived(read).await;
         assert_eq!(core.player_state().track.title.as_deref(), Some("Alpha"), "otherwise the read was dropped and proves nothing");
         assert_eq!(core.player_state().track.cover_href.as_deref(), Some(&href[..]), "the shown cover must not blink");
         assert_eq!(core.cover_in_flight, None, "no second fetch of a cover already shown");

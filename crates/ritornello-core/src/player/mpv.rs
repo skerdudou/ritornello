@@ -159,9 +159,6 @@ impl MpvIpc {
                         (Some("metadata"), data) => icy_title(data)
                             .map(Event::IcyTitle)
                             .or_else(|| file_tags_event(data)),
-                        // The path mpv actually opened, never inferred from
-                        // the Source's opaque identity (see `OBSERVED`).
-                        (Some("path"), Value::String(p)) => Some(Event::Path(p.clone())),
                         // The observation's initial value is swallowed (see
                         // `first_idle`); the following ones follow a
                         // playback and are true stops, including the end
@@ -751,25 +748,34 @@ pub fn file_tags_event(data: &Value) -> Option<Event> {
     (track.is_some() || lyrics.is_some()).then_some(Event::FileTags { track, lyrics })
 }
 
-/// Probes the played file for an embedded cover, without writing anything.
-///
-/// **Strictly blocking** (file playback via `lofty`, potentially on a
-/// network share): call only under `Health::bounded`, never directly from
-/// an async task — see `Core::handle_path` and `health.rs` for why.
+/// What the core reads, itself, from a local file a Source declared
+/// (`SourceMessage::media_path` while it plays, `Armed::media_path` while it
+/// is armed): its tags, its embedded lyrics and its embedded cover. See
+/// `read_media_file`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MediaFile {
+    pub tags: Option<Track>,
+    pub lyrics: Option<Lyrics>,
+    pub cover: Option<crate::cover::CoverSource>,
+}
+
+/// The tag a reader of `file` consults: the format's primary one, or the
+/// first it carries. One choice for the cover, the text and the lyrics alike.
+fn tag_of(file: &lofty::file::TaggedFile) -> Option<&lofty::tag::Tag> {
+    lofty::file::TaggedFileExt::primary_tag(file).or_else(|| lofty::file::TaggedFileExt::first_tag(file))
+}
+
+/// The embedded picture, as a cover the core can serve.
 ///
 /// **Symmetrical with a Source's `folder.jpg`, and that symmetry is the whole
-/// rework.** A local cover — wherever it lives — costs the core only a path:
+/// design.** A local cover — wherever it lives — costs the core only a path:
 /// `CoverPayload::File` re-reads a `folder.jpg` from its path on every
-/// request, and `CoverPayload::Embedded` now does the same for a picture
-/// inside the audio file, re-opening it through `read_embedded_bounded`
-/// rather than keeping a copy anywhere. Nothing here loads the picture's
-/// bytes into a `CoverPayload`, and nothing here touches the disk to produce
-/// one: this function's only output is `cover::CoverSource::Embedded { audio,
-/// content }`, the audio file's own path plus a fingerprint of the picture's
-/// bytes.
-///
-/// Only attempted on a path **with no scheme**: a stream has no tag, and
-/// `lofty` has nothing to open on a URL.
+/// request, and `CoverPayload::Embedded` does the same for a picture inside
+/// the audio file, re-opening it through `read_embedded_bounded` rather than
+/// keeping a copy anywhere. Nothing here loads the picture's bytes into a
+/// `CoverPayload`, and nothing here writes to the disk: the only output is
+/// `cover::CoverSource::Embedded { audio, content }`, the audio file's own
+/// path plus a fingerprint of the picture's bytes.
 ///
 /// `content` (see `cover::content_key`) is what a fifteen-track album needs
 /// to collapse onto a single cache entry: two tracks sharing one embedded
@@ -777,36 +783,6 @@ pub fn file_tags_event(data: &Value) -> Option<Event> {
 /// and `cover::key` hashes only the latter — see its doc. Computing it still
 /// costs one `lofty` read per track, that part is irreducible: the bytes must
 /// be in hand to be hashed, whether or not they end up written anywhere.
-///
-/// **This function used to write a temp file here, named after that same
-/// `content`, and no longer does.** The write bought nothing this task's
-/// symmetry does not already give for free — the local-file path never
-/// needed to copy a `folder.jpg` into `/tmp` before serving it, and once the
-/// core stopped needing a filesystem path *distinct from the audio file* to
-/// name a `CoverPayload`, there was nothing left for the write to buy. What
-/// it used to cost is gone with it, and so has the machinery that only
-/// existed to bound that cost: a write per newly-seen track, the startup
-/// sweep that a killed-mid-write truncation made necessary for correctness,
-/// and the accumulation — one file per distinct embedded picture ever
-/// played — on a `tmpfs` that only a reboot clears. None of `cover.rs` still
-/// names or sweeps such a file; there is nothing left to name.
-pub fn embedded_cover(path: &str) -> Option<crate::cover::CoverSource> {
-    if path.contains("://") {
-        return None;
-    }
-    let file = lofty::probe::Probe::open(path).ok()?.read().ok()?;
-    cover_of(path, &file)
-}
-
-/// The tag a reader of `file` consults: the format's primary one, or the
-/// first it carries. One choice for the cover and the text alike.
-fn tag_of(file: &lofty::file::TaggedFile) -> Option<&lofty::tag::Tag> {
-    lofty::file::TaggedFileExt::primary_tag(file).or_else(|| lofty::file::TaggedFileExt::first_tag(file))
-}
-
-/// The picture lookup itself, shared by `embedded_cover` and
-/// `read_armed_file`: one function, so the cover shown while a track is
-/// armed can never be another picture than the one shown once it plays.
 fn cover_of(path: &str, file: &lofty::file::TaggedFile) -> Option<crate::cover::CoverSource> {
     let image = tag_of(file)?.pictures().first()?;
     Some(crate::cover::CoverSource::Embedded {
@@ -815,20 +791,50 @@ fn cover_of(path: &str, file: &lofty::file::TaggedFile) -> Option<crate::cover::
     })
 }
 
-/// Tags and embedded cover of a file mpv has not opened (an armed track).
-/// **Strictly blocking**: only under `Health::bounded`. `None` when the
-/// path has a scheme or the file cannot be read.
+/// The lyrics embedded in `tag`, read with the grammar `file_lyrics` applies
+/// to what FFmpeg exposes of the same tags, so a file's words read the same
+/// as they did when mpv was the reader: the words — LRC if they parse, plain
+/// text otherwise, `Lyrics::validated` deciding — and, beside them, text a
+/// tagger marked as unsynchronised.
 ///
-/// What `file_tags` reads from mpv once the file plays, read here with
-/// `lofty` because nothing plays: the same three fields, trimmed, empty →
-/// `None`, the year through the same `valid_year`, the same `ORIGIN_TAGS`
-/// — so when Play replaces this layer with mpv's own, the text reads the
-/// same. Not guaranteed identical: `lofty` and FFmpeg are two readers, and
-/// a tag one of them reads differently (an odd encoding, a second artist
-/// frame) can still differ once the track plays.
-/// One parse of the container for both halves: on a share, every open is
-/// the expensive part.
-pub fn read_armed_file(path: &str) -> Option<(Option<Track>, Option<crate::cover::CoverSource>)> {
+/// How `lofty` names what `file_lyrics` reads, format by format (lofty
+/// 0.25, its `ItemKey` mappings):
+///
+/// - mp3: a real ID3v2 `USLT` frame and ffmpeg's own `TXXX` frame described
+///   `USLT` (`-metadata lyrics=…`, see `test_mp3_with_lyrics`) both become
+///   `UnsyncLyrics`. FFmpeg exposes them as `lyrics-<lang>` and `lyrics`,
+///   which `file_lyrics` reads as the words, so `UnsyncLyrics` is the words
+///   here (lofty has no `Lyrics` for ID3v2);
+/// - flac/ogg/opus: the Vorbis comment `LYRICS` is `Lyrics` (the words),
+///   `UNSYNCEDLYRICS` is `UnsyncLyrics`, the plain text beside them, as
+///   `file_lyrics` reads `unsyncedlyrics`;
+/// - m4a: the iTunes atom `©lyr` is `Lyrics` (the words).
+fn lyrics_of(tag: &lofty::tag::Tag) -> Option<Lyrics> {
+    use lofty::tag::{ItemKey, TagType};
+    let text = |key: ItemKey| tag.get_string(key).map(str::to_string);
+    let (words, plain) = if tag.tag_type() == TagType::Id3v2 {
+        (text(ItemKey::Lyrics).or_else(|| text(ItemKey::UnsyncLyrics)), None)
+    } else {
+        (text(ItemKey::Lyrics), text(ItemKey::UnsyncLyrics))
+    };
+    Lyrics { plain, synced: words }.validated()
+}
+
+/// Tags, embedded lyrics and embedded cover of a local file, read with
+/// `lofty` in a single parse of the container: on a share, every open is the
+/// expensive part. **Strictly blocking**, potentially on a network share
+/// that never answers: only under `Health::bounded`, never directly from an
+/// async task — see `Core::spawn_file_read` and `health.rs` for why. `None`
+/// when the path has a scheme or the file cannot be read.
+///
+/// The one reader of a file a Source declares, armed or playing. mpv's own
+/// announcements no longer describe a local file: they travel on another
+/// channel than the Source's, and could arrive before the Source said which
+/// track plays — the race that left a new track without its cover. The text
+/// follows what `file_tags` reads from mpv for a stream: the same three
+/// fields, trimmed, empty → `None`, the year through the same `valid_year`,
+/// the same `ORIGIN_TAGS`.
+pub fn read_media_file(path: &str) -> Option<MediaFile> {
     use lofty::file::AudioFile;
     use lofty::tag::Accessor;
     if path.contains("://") {
@@ -873,7 +879,11 @@ pub fn read_armed_file(path: &str) -> Option<(Option<Track>, Option<crate::cover
         lyrics_origin: None,
         provenance: Default::default(),
     };
-    Some(((!track.is_empty()).then_some(track), cover_of(path, &file)))
+    Some(MediaFile {
+        tags: (!track.is_empty()).then_some(track),
+        lyrics: tag.and_then(lyrics_of),
+        cover: cover_of(path, &file),
+    })
 }
 
 pub struct MpvPlayer {
@@ -1117,11 +1127,12 @@ pub const YTDL_NOWHERE: &str = "/bin/false";
 
 /// Properties the core asks mpv to push. `metadata` carries the ICY header
 /// received from the station (key `icy-title`), the only title source
-/// available for a radio with no dedicated `metadata` plugin. `path` is the
-/// only way the core learns which file is playing: it made a principle of
-/// **never** interpreting the opaque identity produced by the Source to
-/// derive a path from it — it is mpv, which actually opened the file, that
-/// says so. `paused-for-cache` only feeds the journal (see `Stall`).
+/// available for a radio with no dedicated `metadata` plugin. `path` and
+/// `paused-for-cache` only feed the journal (see `Stall`): which file or
+/// stream stalled. mpv's `path` no longer tells the core which local file to
+/// describe — the Source declares it with the identity
+/// (`SourceMessage::media_path`), and the core never interprets the opaque
+/// identity to derive one.
 const OBSERVED: [&str; 7] = [
     "media-title",
     "metadata",
@@ -1941,19 +1952,21 @@ pub(crate) mod tests {
 
     #[test]
     fn the_path_property_is_observed() {
-        // Without it, the core never knows which file mpv is playing, and
-        // the embedded cover is never read. The core does not read the
-        // path from the identity: it made a principle of never
-        // interpreting it.
-        assert!(OBSERVED.contains(&"path"), "without it, no embedded cover ever");
+        // Without it, the stall journal could not name what stalled.
+        assert!(OBSERVED.contains(&"path"), "without it, a stall names nothing");
     }
 
     #[test]
-    fn a_stream_triggers_no_extraction() {
+    fn a_stream_is_never_read_as_a_file() {
         // Only attempted on a path with no scheme.
-        assert!(embedded_cover("https://icecast.radiofrance.fr/fip-midfi.mp3").is_none());
-        assert!(embedded_cover("http://ouifm3.ice.infomaniak.ch/ouifm3.mp3").is_none());
-        assert!(embedded_cover("/does/not/exist.flac").is_none());
+        assert!(read_media_file("https://icecast.radiofrance.fr/fip-midfi.mp3").is_none());
+        assert!(read_media_file("http://ouifm3.ice.infomaniak.ch/ouifm3.mp3").is_none());
+        assert!(read_media_file("/does/not/exist.flac").is_none());
+    }
+
+    /// The embedded cover of a local file, as `read_media_file` finds it.
+    fn embedded_cover(path: &str) -> Option<crate::cover::CoverSource> {
+        read_media_file(path).and_then(|m| m.cover)
     }
 
     /// Builds a real mp3 with an embedded cover, via ffmpeg, or returns
@@ -1964,7 +1977,7 @@ pub(crate) mod tests {
     /// missing — it is a development tool, not a core dependency.
     ///
     /// `source_image` is an `lavfi` filter, hence the embedded image.
-    /// `embedded_cover` no longer writes anything to a shared location, so
+    /// `read_media_file` writes anything to a shared location, so
     /// two parallel tests embedding the same image can no longer collide the
     /// way an earlier version of this fixture had to guard against; callers
     /// nonetheless still pass their own filter, which is convenient to keep
@@ -2021,13 +2034,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_armed_file_yields_the_tags_mpv_would_have_read() {
+    fn a_declared_file_yields_the_tags_mpv_would_have_read() {
         let dir = tempfile::tempdir().unwrap();
         let Some(f) = tagged_mp3(dir.path()) else {
             eprintln!("ffmpeg missing: skipping test");
             return;
         };
-        let (tags, cover) = read_armed_file(f.to_str().unwrap()).expect("a readable file must answer");
+        let MediaFile { tags, lyrics, cover } = read_media_file(f.to_str().unwrap()).expect("a readable file must answer");
         let tags = tags.expect("the file carries tags");
         assert_eq!(tags.title.as_deref(), Some("Alpha"));
         assert_eq!(tags.artist.as_deref(), Some("Beta"));
@@ -2036,43 +2049,29 @@ pub(crate) mod tests {
         assert!(tags.duration_s.is_some(), "the container's duration is known without playing it");
         assert_eq!(tags.origin.as_deref(), Some(crate::metadata::ORIGIN_TAGS));
         assert_eq!(cover, None, "no picture in this file");
-    }
-
-    /// The armed read and the playing read pick the same picture: Play must
-    /// not swap the cover the stopped track showed.
-    #[test]
-    fn an_armed_file_yields_the_cover_embedded_cover_yields() {
-        let dir = tempfile::tempdir().unwrap();
-        let Some(f) = mp3_with_cover(dir.path()) else {
-            eprintln!("ffmpeg missing: skipping test");
-            return;
-        };
-        let path = f.to_str().unwrap();
-        let (_, cover) = read_armed_file(path).expect("a readable file must answer");
-        assert!(cover.is_some(), "the file carries a picture");
-        assert_eq!(cover, embedded_cover(path));
+        assert_eq!(lyrics, None, "no words in this file");
     }
 
     #[test]
-    fn an_armed_read_refuses_what_lofty_cannot_open() {
-        assert!(read_armed_file("http://x/y.mp3").is_none(), "a URL is not a file to read");
+    fn a_file_read_refuses_what_lofty_cannot_open() {
+        assert!(read_media_file("http://x/y.mp3").is_none(), "a URL is not a file to read");
         let dir = tempfile::tempdir().unwrap();
         let text = dir.path().join("notes.mp3");
         std::fs::write(&text, b"not audio at all, only words").unwrap();
-        assert!(read_armed_file(text.to_str().unwrap()).is_none(), "a file that is not audio has nothing to say");
-        assert!(read_armed_file("/does/not/exist.flac").is_none());
-        assert!(read_armed_file(dir.path().to_str().unwrap()).is_none(), "a directory is not a track");
+        assert!(read_media_file(text.to_str().unwrap()).is_none(), "a file that is not audio has nothing to say");
+        assert!(read_media_file("/does/not/exist.flac").is_none());
+        assert!(read_media_file(dir.path().to_str().unwrap()).is_none(), "a directory is not a track");
     }
 
     /// A FIFO named as the armed file: opening it would block until a writer
     /// came, under `Health::bounded`, which would then mark the whole mount
     /// unreachable. The read must refuse it at once.
     ///
-    /// **[MUTATION]** the `is_file()` guard removed from `read_armed_file` →
+    /// **[MUTATION]** the `is_file()` guard removed from `read_media_file` →
     /// the `recv_timeout` assertion fires (the open blocks).
     #[cfg(unix)]
     #[test]
-    fn an_armed_read_refuses_a_fifo_without_blocking() {
+    fn a_file_read_refuses_a_fifo_without_blocking() {
         let dir = tempfile::tempdir().unwrap();
         let fifo = dir.path().join("track.flac");
         let made = std::process::Command::new("mkfifo").arg(&fifo).status();
@@ -2083,7 +2082,7 @@ pub(crate) mod tests {
         let path = fifo.to_str().unwrap().to_string();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(read_armed_file(&path).is_none());
+            let _ = tx.send(read_media_file(&path).is_none());
         });
         let refused = rx
             .recv_timeout(std::time::Duration::from_secs(2))
@@ -2662,14 +2661,12 @@ pub(crate) mod tests {
         w.write_all(b"{\"event\":\"property-change\",\"id\":6,\"name\":\"path\",\"data\":\"/m/a.flac\"}\n").await.unwrap();
         w.write_all(b"{\"event\":\"file-loaded\"}\n").await.unwrap();
         let mut got = Vec::new();
-        for _ in 0..4 {
+        for _ in 0..3 {
             let ev = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await;
             got.push(ev.expect("an event within 2 s").unwrap());
         }
-        assert_eq!(
-            got,
-            vec![Event::FileStarting, Event::TrackChanged(0), Event::Path("/m/a.flac".into()), Event::PlaybackActive]
-        );
+        // The `path` line feeds the stall journal only: no event.
+        assert_eq!(got, vec![Event::FileStarting, Event::TrackChanged(0), Event::PlaybackActive]);
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert!(rx.try_recv().is_err());
     }

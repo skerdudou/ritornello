@@ -78,10 +78,6 @@ impl<P: Player> Core<P> {
             // Same status as ICY with respect to `retry_count`: metadata does
             // not prove that playback is alive.
             Event::FileTags { track, lyrics } => self.handle_file_tags(track.map(|t| *t), lyrics),
-            // Same status as the tags with respect to `retry_count`: the path
-            // attests nothing about the liveness of the stream, it only
-            // serves the embedded cover.
-            Event::Path(path) => self.handle_path(path),
             // The player changed track on its own: end of a disc track, no
             // key pressed. The core knows it (mpv tells it) but cannot fix
             // the identity — it is opaque to it. So it tells the Source,
@@ -348,7 +344,7 @@ mod tests {
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
         let (covers, cover_tx) = test_covers();
         let manifest_order = declared_order(&sources);
-        let mut core = Core::new(player, Wiring { sources, persisted, state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0, plugin_data_root: std::path::PathBuf::from("/root") }, covers, cover_tx, mpsc::channel(4).0, mpsc::channel(4).0);
+        let mut core = Core::new(player, Wiring { sources, persisted, state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0, plugin_data_root: std::path::PathBuf::from("/root") }, covers, cover_tx, mpsc::channel(4).0);
         core.resume().await.unwrap();
         assert_eq!(core.handle_event(Event::PlaybackIdle).await, EventOutcome::Nothing);
     }
@@ -464,7 +460,7 @@ mod tests {
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
         let (covers, cover_tx) = test_covers();
         let manifest_order = declared_order(&sources);
-        let mut core = Core::new(player, Wiring { sources, persisted, state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0, plugin_data_root: std::path::PathBuf::from("/root") }, covers, cover_tx, mpsc::channel(4).0, mpsc::channel(4).0);
+        let mut core = Core::new(player, Wiring { sources, persisted, state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0, plugin_data_root: std::path::PathBuf::from("/root") }, covers, cover_tx, mpsc::channel(4).0);
         // Single source: SourceCycle re-activates "cd", which answers `Play cdda://`.
         core.handle_command(Command::SourceCycle).await.unwrap();
         assert!(player_calls.lock().unwrap().contains(&"play cdda://".to_string()));

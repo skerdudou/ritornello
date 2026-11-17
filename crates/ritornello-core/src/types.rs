@@ -9,7 +9,10 @@ pub enum Event {
     /// actually emitted.
     IcyTitle(String),
     /// Tags carried by the **file** currently playing, as mpv exposes them in
-    /// that same `metadata` property.
+    /// that same `metadata` property. Ignored by the core while the Source has
+    /// declared the local file it plays (`SourceMessage::media_path`): the
+    /// core then reads that file itself, tied to the identity. What remains is
+    /// what has no declared file — an Ogg stream's Vorbis comments, notably.
     ///
     /// Distinct from `IcyTitle`, and mutually exclusive with it: one describes a
     /// stream, the other a file. The track's `origin` field is already filled at
@@ -24,14 +27,6 @@ pub enum Event {
     /// `mpv::file_lyrics`). Emitted when either half is present; `track`
     /// may then be `None` for a file whose only tag is its lyrics.
     FileTags { track: Option<Box<ritornello_proto::Track>>, lyrics: Option<ritornello_proto::Lyrics> },
-    /// Path of the file mpv actually opened (`path` property).
-    ///
-    /// The only way the core learns this detail: it never extracts it from the
-    /// Source's opaque identity, on principle (see `OBSERVED` in
-    /// `player::mpv`). Used solely to attempt extracting the embedded cover — a
-    /// stream has no usable path, and mpv then republishes it as is (its URL),
-    /// without consequence: the extraction attempt stops by itself on a scheme.
-    Path(String),
     /// mpv's `file-loaded` IPC event: documented (read from mpv's own
     /// manual, not measured against a real running mpv — no session
     /// available to confirm it) as sent "after a file has been loaded and

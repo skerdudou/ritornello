@@ -1,11 +1,11 @@
-//! Circuit breaker for embedded cover extraction: bounds the `lofty` call,
+//! Circuit breaker for the read of a declared file: bounds the `lofty` call,
 //! which may never return on a silent network share, and remembers the mount
 //! points that no longer answer.
 //!
 //! # Why this bound exists
 //!
-//! `player::mpv::embedded_cover` opens and walks the file **currently
-//! playing** with `lofty`, a strictly blocking call. That file may come from a
+//! `player::mpv::read_media_file` opens and walks the file **a Source
+//! declared**, armed or playing, with `lofty`, a strictly blocking call. That file may come from a
 //! network share, and this project has already lived through the incident this
 //! causes without a bound: a sleeping cifs mount made a whole admin page
 //! disappear, an IO that never completes holding the loop that should have

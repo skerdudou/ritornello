@@ -206,8 +206,8 @@ pub enum CoverPayload {
     /// cover that lives on a share costs a path, whether it sits beside the
     /// track or inside it.
     ///
-    /// Deposited by `player::mpv::embedded_cover` through
-    /// `Core::extraction_arrived` and `cover::fetch`, exactly as `File` is
+    /// Deposited by `player::mpv::read_media_file` through
+    /// `Core::file_read_arrived` and `cover::fetch`, exactly as `File` is
     /// deposited through `Core::set_source_cover` and `fetch` — a probe, never
     /// a copy: nothing is written to disk to produce this variant.
     Embedded(PathBuf),
@@ -285,7 +285,7 @@ fn payload_cost(p: &CoverPayload) -> usize {
 /// `ritornello_proto::CoverRef` — the protocol has exactly two variants,
 /// `Url` and `Path`, and this task changes neither. `Embedded` is what the
 /// core itself produces when it probes the played file's own tags
-/// (`player::mpv::embedded_cover`): there is nothing to name on the wire for
+/// (`player::mpv::read_media_file`): there is nothing to name on the wire for
 /// it, since no Source declares it and no protocol message carries it. This
 /// type is therefore internal to the core, one layer above `CoverRef`, not a
 /// third protocol variant in disguise.
@@ -295,8 +295,8 @@ fn payload_cost(p: &CoverPayload) -> usize {
 pub enum CoverSource {
     /// Declared by a Source or a `metadata` plugin, the wire form unchanged.
     Ref(CoverRef),
-    /// Found embedded in the currently playing audio file, by
-    /// `player::mpv::embedded_cover`. `audio` is what a later read reopens to
+    /// Found embedded in the audio file a Source declared, by
+    /// `player::mpv::read_media_file`. `audio` is what a later read reopens to
     /// extract the picture again (`read_embedded_bounded`); `content` is the
     /// fingerprint of the picture's own bytes, computed once at probe time so
     /// that `key`, below, need not reopen the file to deduplicate.
@@ -2582,7 +2582,7 @@ const FILE_TIMEOUT: std::time::Duration = crate::health::TIMEOUT;
 /// **silent**: the device simply displays no image.
 ///
 /// **`Embedded` costs nothing here.** By the time a `CoverSource::Embedded`
-/// reaches this function, `player::mpv::embedded_cover` has already probed
+/// reaches this function, `player::mpv::read_media_file` has already probed
 /// the container and found a picture — that is precisely what let it exist.
 /// There is therefore no IO left to attempt, unlike `Ref(CoverRef::Path)`
 /// just below, which still has to open the file once to check its header:
@@ -5490,7 +5490,7 @@ mod tests {
     #[tokio::test]
     async fn fetching_an_embedded_source_touches_no_disk() {
         // The whole point of the probe: by the time a `CoverSource::Embedded`
-        // exists, `player::mpv::embedded_cover` has already established that a
+        // exists, `player::mpv::read_media_file` has already established that a
         // picture is there. `fetch` must therefore neither open nor even stat
         // the audio file — a nonexistent path is the proof: any attempt to
         // touch it would make this fail, where the real production path only
