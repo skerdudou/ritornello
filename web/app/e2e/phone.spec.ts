@@ -291,7 +291,8 @@ test('on a phone: a drag at the end of the presets list frame scrolls the page',
     await touchDrag(page, from, { x: from.x, y: from.y - 200 }, { steps: 12 })
     await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(before)
   } finally {
-    // The layout is shared server-side state: leave it as pages.
+    // The layout is kept in this browser context's localStorage
+    // (presetLayout.ts): leave it as pages for the rest of the context.
     if ((await grid.getAttribute('data-preset-layout')) === 'list') await toggle.click()
   }
 })

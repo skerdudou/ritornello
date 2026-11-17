@@ -52,7 +52,9 @@ const rootAttrs = computed(() => Object.fromEntries(
 // area, its `before:` pseudo-element: 24 x 40 px
 // around the 16 px dot, no wider than the narrowest equalizer column (24 px
 // on a phone), so it never reaches a neighbour's thumb. A mouse and the
-// keyboard are untouched. When the finger lands on the root's own
+// keyboard are untouched. A pen (on a touch laptop, say) is held to the
+// finger's rule on purpose: it scrolls the page too, so tapping a vertical
+// slider's track with it no longer sets a value. When the finger lands on the root's own
 // padding, the event is at its target, where reka-ui's listener sits too: the
 // capture pass runs first there, and stopping propagation keeps the bubble
 // pass (reka-ui's) from running; `stopImmediatePropagation` also keeps out
