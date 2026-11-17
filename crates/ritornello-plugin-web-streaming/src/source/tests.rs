@@ -354,14 +354,14 @@ fn fixtures() -> PathBuf {
 /// each run in `bin/calls`.
 fn install_counting_tool(data: &Path) {
     let body = format!(
-        "echo \"$4\" >> \"$(dirname \"$0\")/calls\"\nsleep 0.4\ncat '{}'",
+        "echo \"$6\" >> \"$(dirname \"$0\")/calls\"\nsleep 0.4\ncat '{}'",
         fixtures().join("playlist.json").display()
     );
     install_tool(data, &body);
 }
 
 /// The refreshes of a playlist the tool ran. Counted by the address probed
-/// (`-J --flat-playlist -- <url>`): a single video's page is also probed
+/// (`-J --flat-playlist … -- <url>`): a single video's page is also probed
 /// once, for its cover, and is not a refresh.
 fn calls(data: &Path) -> usize {
     probes_of(data, "playlist?list=")
@@ -829,7 +829,10 @@ async fn a_web_playlist_is_refreshed_from_its_own_link_under_its_own_key() {
     let o = f.source.select(3).await; // not cached
     assert_eq!(catalogue_knows(&o), "list_not_cached");
     settle(&f.source).await;
-    assert_eq!(std::fs::read_to_string(&args).unwrap(), format!("-J\n--flat-playlist\n--\n{ALBUM}\n"));
+    assert_eq!(
+        std::fs::read_to_string(&args).unwrap(),
+        format!("-J\n--flat-playlist\n--extractor-args\nyoutube:player_client=default,web_music\n--\n{ALBUM}\n")
+    );
     assert_eq!(ListCache::new(f.dir.path()).load(&album_key()).unwrap().len(), 22);
     assert!(is_play(&f.source.select(3).await.action));
 }

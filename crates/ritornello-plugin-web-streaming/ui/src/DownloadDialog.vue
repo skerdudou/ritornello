@@ -116,7 +116,8 @@ watch(
     if (!open) return
     step.value = 'where'
     format.value = props.lastFormat === 'mp3' && !props.ffmpeg ? 'original' : props.lastFormat
-    cover.value = props.lastCover
+    // The folder's picture is a playlist's choice: offered with one only.
+    cover.value = props.lastCover === 'folder' && !hasPlaylist.value ? 'separate' : props.lastCover
     names.value = Object.fromEntries(props.items.map((i) => [String(i.preset), props.defaultNames[String(i.preset)] ?? '']))
     // A cut is one video's, never remembered: each download starts whole.
     cuts.value = Object.fromEntries(props.items.map((i) => [String(i.preset), { start: '', end: '' }]))
@@ -190,7 +191,19 @@ function confirm(): void {
 }
 
 const FORMATS: Format[] = ['original', 'm4a', 'mp3']
-const COVERS: CoverMode[] = ['embedded', 'separate']
+/** A playlist may also leave its tracks to its folder's picture. */
+const covers = computed<CoverMode[]>(() => (hasPlaylist.value ? ['embedded', 'separate', 'folder'] : ['embedded', 'separate']))
+
+function coverLabel(c: CoverMode): string {
+  switch (c) {
+    case 'embedded':
+      return props.t('cover_embedded')
+    case 'folder':
+      return props.t('cover_folder')
+    default:
+      return props.t('cover_separate')
+  }
+}
 
 function formatLabel(f: Format): string {
   switch (f) {
@@ -328,9 +341,10 @@ function formatLabel(f: Format): string {
 
         <section class="space-y-2" data-cover-choice>
           <h3 class="text-sm font-medium">{{ t('cover_label') }}</h3>
-          <div class="grid grid-cols-2 gap-2">
+          <!-- Three choices are stacked: side by side their labels would not fit. -->
+          <div class="grid gap-2" :class="covers.length > 2 ? 'grid-cols-1' : 'grid-cols-2'" data-cover-choices>
             <Button
-              v-for="c in COVERS"
+              v-for="c in covers"
               :key="c"
               size="sm"
               class="w-full max-md:h-auto max-md:min-h-9 max-md:whitespace-normal"
@@ -339,11 +353,14 @@ function formatLabel(f: Format): string {
               :data-cover="c"
               @click="cover = c"
             >
-              {{ c === 'embedded' ? t('cover_embedded') : t('cover_separate') }}
+              {{ coverLabel(c) }}
             </Button>
           </div>
           <p class="text-xs text-muted-foreground" data-cover-help>
             {{ hasPlaylist ? t('cover_help_playlist') : t('cover_help') }}
+          </p>
+          <p v-if="cover === 'folder' && videos.length" class="text-xs text-muted-foreground" data-cover-folder-video>
+            {{ t('cover_help_folder_video') }}
           </p>
         </section>
 

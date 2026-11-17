@@ -1,0 +1,99 @@
+{
+ "id": "OLAK5uy_lSJ0FKs6xyxFGj-i7CQOt4sncnPuvnTCA",
+ "title": "Da Coconut Nut (The Coconut Song)",
+ "availability": "public",
+ "channel_follower_count": null,
+ "description": "",
+ "tags": [],
+ "thumbnails": [
+  {
+   "url": "https://i9.ytimg.com/s_p/OLAK5uy_lSJ0FKs6xyxFGj-i7CQOt4sncnPuvnTCA/mqdefault.jpg?sqp=CLDn8NcGir7X7AMICMyt0b0GEAE=&rs=AOn4CLBK51XaHQjZQLnJq68TcXfiGPwo3A&v=1739871948",
+   "height": 180,
+   "width": 180,
+   "id": "0",
+   "resolution": "180x180"
+  },
+  {
+   "url": "https://i9.ytimg.com/s_p/OLAK5uy_lSJ0FKs6xyxFGj-i7CQOt4sncnPuvnTCA/sddefault.jpg?sqp=CLDn8NcGir7X7AMICMyt0b0GEAE=&rs=AOn4CLA3_TTP4jIqGSlpHOnIxxS2YZwP0g&v=1739871948",
+   "height": 640,
+   "width": 640,
+   "id": "1",
+   "resolution": "640x640"
+  },
+  {
+   "url": "https://i9.ytimg.com/s_p/OLAK5uy_lSJ0FKs6xyxFGj-i7CQOt4sncnPuvnTCA/maxresdefault.jpg",
+   "height": 1200,
+   "width": 1200,
+   "id": "2",
+   "resolution": "1200x1200"
+  }
+ ],
+ "modified_date": "20250924",
+ "view_count": 2274,
+ "playlist_count": 1,
+ "channel": null,
+ "channel_id": null,
+ "uploader_id": null,
+ "uploader": null,
+ "channel_url": null,
+ "uploader_url": null,
+ "_type": "playlist",
+ "entries": [
+  {
+   "title": "Da Coconut Nut (The Coconut Song)",
+   "thumbnails": [
+    {
+     "url": "https://i.ytimg.com/vi/0k2Di6QqqEA/hqdefault.jpg?sqp=-oaymwEbCKgBEF5IVfKriqkDDggBFQAAiEIYAXABwAEG&rs=AOn4CLCuDfx4Wm7D53TZbD8lKKPzoKFmcA",
+     "height": 94,
+     "width": 168
+    },
+    {
+     "url": "https://i.ytimg.com/vi/0k2Di6QqqEA/hqdefault.jpg?sqp=-oaymwEbCMQBEG5IVfKriqkDDggBFQAAiEIYAXABwAEG&rs=AOn4CLCNnB_gat7fVhRdfRFNg8EOu-qArg",
+     "height": 110,
+     "width": 196
+    },
+    {
+     "url": "https://i.ytimg.com/vi/0k2Di6QqqEA/hqdefault.jpg?sqp=-oaymwEcCPYBEIoBSFXyq4qpAw4IARUAAIhCGAFwAcABBg==&rs=AOn4CLB4VpC_KVAEKU2wSG71j1UxySkYIQ",
+     "height": 138,
+     "width": 246
+    },
+    {
+     "url": "https://i.ytimg.com/vi/0k2Di6QqqEA/hqdefault.jpg?sqp=-oaymwEcCNACELwBSFXyq4qpAw4IARUAAIhCGAFwAcABBg==&rs=AOn4CLA2tgMCzHDXvAUSSoJMd9KKkT5G4g",
+     "height": 188,
+     "width": 336
+    }
+   ],
+   "duration": 214,
+   "view_count": 2600000,
+   "timestamp": null,
+   "live_status": null,
+   "availability": null,
+   "channel_url": "https://www.youtube.com/channel/UCu2W8q3tTxqr_1aDkm9ym7w",
+   "uploader_url": null,
+   "creators": null,
+   "channel": "The San Miguel Master Chorale - Topic",
+   "channel_id": "UCu2W8q3tTxqr_1aDkm9ym7w",
+   "uploader": "The San Miguel Master Chorale - Topic",
+   "ie_key": "Youtube",
+   "id": "0k2Di6QqqEA",
+   "_type": "url",
+   "url": "https://www.youtube.com/watch?v=0k2Di6QqqEA",
+   "__x_forwarded_for_ip": null
+  }
+ ],
+ "extractor_key": "YoutubeTab",
+ "extractor": "youtube:tab",
+ "webpage_url": "https://www.youtube.com/playlist?list=OLAK5uy_lSJ0FKs6xyxFGj-i7CQOt4sncnPuvnTCA",
+ "original_url": "https://www.youtube.com/playlist?list=OLAK5uy_lSJ0FKs6xyxFGj-i7CQOt4sncnPuvnTCA",
+ "webpage_url_basename": "playlist",
+ "webpage_url_domain": "youtube.com",
+ "release_year": null,
+ "epoch": 1794913294,
+ "__files_to_move": {},
+ "_version": {
+  "version": "2026.10.26",
+  "current_git_head": null,
+  "release_git_head": "c91f8de0bfb3577894abad716eaaa01659e6bd14",
+  "repository": "yt-dlp/yt-dlp"
+ }
+}

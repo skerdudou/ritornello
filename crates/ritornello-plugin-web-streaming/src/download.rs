@@ -65,7 +65,9 @@
 //! ogg) or, as the operator chose or when the container takes none (webm),
 //! beside it as `<stem>.jpg`, never over an existing one. `files` reads a
 //! track's own picture before the folder's, so each track of a playlist
-//! shows its own and the folder keeps a face of its own.
+//! shows its own and the folder keeps a face of its own. The operator may
+//! instead choose the folder's picture alone ([`CoverMode::Folder`]): a
+//! playlist's tracks then get none, and all show its `cover.jpg`.
 //! A missing or failed cover is never a failure of the download.
 //!
 //! **A spawn is a process group**, and cancelling or running out of time kills
@@ -320,6 +322,10 @@ pub enum CoverMode {
     /// `<stem>.jpg` beside the track: read by `files` whatever the container.
     #[default]
     Separate,
+    /// No picture of its own: a playlist's tracks all show their folder's
+    /// `cover.jpg`. A single video, which has no folder of its own, takes
+    /// it as [`Separate`](Self::Separate).
+    Folder,
 }
 
 /// What the operator chose for one preset.
@@ -768,9 +774,12 @@ async fn convert(ctx: &Ctx, ffmpeg: &Path, dir: &Path, stem: &str, from: &str, f
 }
 
 /// A track's own cover: into the file, or beside it as `<stem>.jpg`, never
-/// over an existing one. What did not go as asked is said.
+/// over an existing one. What did not go as asked is said. `url` is `None`
+/// for a playlist's track when the folder's picture was chosen, so
+/// [`CoverMode::Folder`] only reaches here for a single video: beside it.
 async fn place_track_cover(ctx: &Ctx, dir: &Path, stem: &str, ext: &str, mode: CoverMode, url: Option<&str>) -> Vec<Note> {
     let Some(url) = url else { return Vec::new() };
+    let mode = if mode == CoverMode::Folder { CoverMode::Separate } else { mode };
     let mut notes = Vec::new();
     let embeddable = EMBEDDABLE.contains(&ext.to_ascii_lowercase().as_str());
     let beside = dir.join(format!("{stem}.jpg"));
@@ -1156,9 +1165,16 @@ pub async fn download_preset(
     // Each track's cover is its own thumbnail, never the folder's
     // `cover.jpg`: every other track of the folder would then show it. A
     // playlist's entries carry theirs, and `plan` keeps their order, one line
-    // per entry.
+    // per entry. When the folder's picture was chosen, a playlist's tracks
+    // get none of their own and `files` shows the folder's for each.
     let track_cover = |i: usize| {
-        if playlist { probe.entries.get(i).and_then(|v| v.thumbnail_jpg.as_deref()) } else { probe.thumbnail_jpg.as_deref() }
+        if !playlist {
+            probe.thumbnail_jpg.as_deref()
+        } else if choices.cover == CoverMode::Folder {
+            None
+        } else {
+            probe.entries.get(i).and_then(|v| v.thumbnail_jpg.as_deref())
+        }
     };
 
     for (i, p) in planned.iter().enumerate() {

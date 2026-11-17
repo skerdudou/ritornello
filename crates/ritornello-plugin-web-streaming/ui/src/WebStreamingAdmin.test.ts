@@ -333,6 +333,46 @@ describe('WebStreamingAdmin', () => {
     expect(inDialog('[data-cover-help]')!.textContent).not.toContain('cover.jpg')
   })
 
+  it('offers a playlist its folder\'s picture alone, never a single video, and says where a video\'s goes then', async () => {
+    const coversOffered = () => [...document.querySelectorAll('[data-cover]')].map((b) => b.getAttribute('data-cover'))
+    // A playlist with a video: three choices, the folder's sent as chosen.
+    const { w, s } = await mountAdmin({ entries: [list(1), video(2)], targets: ['nas'], last_cover: 'separate' })
+    await w.findAll('[data-entry-select]')[0]!.setValue(true)
+    await w.findAll('[data-entry-select]')[1]!.setValue(true)
+    await w.find('[data-download]').trigger('click')
+    await flushPromises()
+    await clickDialog('[data-next]')
+    expect(coversOffered()).toEqual(['embedded', 'separate', 'folder'])
+    expect(inDialog('[data-cover="folder"]')!.textContent).toContain(CATALOG.cover_folder)
+    expect(inDialog('[data-cover-folder-video]')).toBeNull()
+    await clickDialog('[data-cover="folder"]')
+    expect(inDialog('[data-cover="folder"]')!.getAttribute('aria-pressed')).toBe('true')
+    // The video of the batch has no folder: where its picture goes is said.
+    expect(inDialog('[data-cover-folder-video]')!.textContent).toContain(CATALOG.cover_help_folder_video)
+    await clickDialog('[data-download-here]')
+    expect(s.putsOf('download')[0]).toMatchObject({ presets: [1, 2], cover: 'folder' })
+    cleanup()
+    // A playlist alone: nothing to say about a video.
+    const alone = await mountAdmin({ entries: [list(1)], targets: ['nas'], last_cover: 'folder' })
+    await alone.w.findAll('[data-entry-select]')[0]!.setValue(true)
+    await alone.w.find('[data-download]').trigger('click')
+    await flushPromises()
+    await clickDialog('[data-next]')
+    expect(inDialog('[data-cover="folder"]')!.getAttribute('aria-pressed')).toBe('true')
+    expect(inDialog('[data-cover-folder-video]')).toBeNull()
+    cleanup()
+    // Videos only, the last choice the folder's: not offered, beside instead.
+    const videos = await mountAdmin({ entries: [video(1)], targets: ['nas'], last_cover: 'folder' })
+    await videos.w.findAll('[data-entry-select]')[0]!.setValue(true)
+    await videos.w.find('[data-download]').trigger('click')
+    await flushPromises()
+    await clickDialog('[data-next]')
+    expect(coversOffered()).toEqual(['embedded', 'separate'])
+    expect(inDialog('[data-cover="separate"]')!.getAttribute('aria-pressed')).toBe('true')
+    await clickDialog('[data-download-here]')
+    expect(videos.s.putsOf('download')[0]).toMatchObject({ cover: 'separate' })
+  })
+
   it('separates where from how: two steps, the destination in sight, nothing lost going back', async () => {
     const { w, s } = await mountAdmin({
       entries: [video(1)],
