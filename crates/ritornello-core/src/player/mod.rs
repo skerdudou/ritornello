@@ -146,7 +146,8 @@ pub trait Player: Send + Sync + 'static {
     ///
     /// **Whatever this returns, `end_sound_while_paused` must follow**: an
     /// error may come after mpv applied the chain, and the music would stay
-    /// at gain 0.
+    /// at gain 0. Bounded in time as a whole (mpv's: 1.5 s), never mpv's 5 s
+    /// per command: it runs on the core loop.
     async fn sound_while_paused(&self, chain: &str, resume_at: Option<f64>) -> Result<()>;
     /// Ends a paused chime: pauses again, writes `chain` (the plain chain
     /// mpv held before the chime), waits (bounded) for mpv to rebuild it,
@@ -157,6 +158,8 @@ pub trait Player: Send + Sync + 'static {
     /// never reaches the core either, unless a new file starts first; and
     /// when the file was put back, `progress` stays at the pause's until the
     /// user's next transport call (pause toggle, seek, next, prev, chapter,
-    /// stop, a load) or a file start.
+    /// stop, a load) or a file start. Bounded in time as a whole too (mpv's:
+    /// 1.5 s); on an error, `af` is unknown and the caller must rewrite it
+    /// before the music resumes.
     async fn end_sound_while_paused(&self, chain: &str, resume_at: Option<f64>) -> Result<()>;
 }

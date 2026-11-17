@@ -389,6 +389,16 @@ impl<P: Player> Core<P> {
         // An alarm's Play comes here from no command: a paused chime has
         // mpv unpaused, and the toggle would pause it (`lock_sound.rs`).
         self.finish_paused_chime().await;
+        // Resuming over an unknown `af` — a paused chime's end that mpv did
+        // not confirm may have left the chime's chain, the music held at
+        // gain 0 — writes the setting's chain whole first, while the file
+        // is still paused: no click, and never music resumed silent.
+        if self.paused
+            && self.eq_chain_written.is_none()
+            && let Err(e) = self.write_chain().await
+        {
+            tracing::warn!("chain rewrite before resuming: {e}");
+        }
         self.player.toggle_pause().await?;
         self.paused = !self.paused;
         Ok(())

@@ -62,9 +62,15 @@
 //! device); when the end comes before the flush's `playback-restart`, mpv's
 //! gate counts that one as the restore's, and the restore's own reaches the
 //! core when the user resumes — `equalizer_live` then finds nothing to
-//! send. And the two calls run on the core loop: at worst (every IPC step
-//! timing out, 5 s each, plus the bounded wait for the chain rebuild) about
-//! 25 s to start and 16 s to end, the same order as `load_list`. And when
+//! send. The route, the start and the end run on the core loop, each within
+//! a total budget of its own (`player::mpv`: 1 s, 1.5 s, 1.5 s), never mpv's
+//! 5 s per command: on an mpv that stops answering, a lock press holds the
+//! loop at most about 4 s (route, start, then the end the failed start
+//! calls), and the end at its deadline 1.5 s. A start that gave up is ended
+//! at once; an end that gave up has still written each of its steps, which
+//! an mpv answering late applies in order, and leaves `af` unknown, so the
+//! resume (`toggle_pause`) or a file start writes the setting's chain
+//! before the music can be heard — never resumed at gain 0. And when
 //! mpv goes on to the next file by itself and a lock change is handled
 //! before that `FileStarting`, the second-chime path reads the new file's
 //! progress and flushes it to the old pause point; the `FileStarting` that
@@ -233,23 +239,19 @@ impl<P: Player> Core<P> {
                 self.eq_chain_written = Some(chime.plain.clone());
                 self.eq_plain_written = Some(chime.plain);
             }
-            // Every step was tried, but which one failed is not known, so
-            // neither is `af`: it may still hold the chime's chain, the
-            // music at gain 0 — and nothing else rewrites `af` before the
-            // user resumes (`toggle_pause` does not, `equalizer_live` only
-            // sends `af-command`s), only a file start: on a disc, whose
-            // tracks are chapters of one file, silence to its end. So the
-            // setting's chain is written whole once more, now — the file is
-            // paused (or mpv idle), nothing sounds to click. Should that
-            // fail too, `af` stays unknown: the next file start writes it,
-            // and the next chime first.
+            // Every step was tried (and written, even past the end's
+            // budget), but which one failed is not known, so neither is
+            // `af`: it may still hold the chime's chain, the music at gain
+            // 0. Marked unknown, it is repaired before the music can be
+            // heard: the resume writes the setting's chain whole first
+            // (`toggle_pause`, paused: no click), a file start writes it
+            // anyway, and the next chime writes it before itself. Not
+            // rewritten here: an mpv that did not answer the end would hold
+            // the core loop for the whole of a write's 5 s.
             Err(e) => {
                 tracing::warn!("lock sound end while paused: {e}");
                 self.eq_chain_written = None;
                 self.eq_plain_written = None;
-                if let Err(e) = self.write_chain().await {
-                    tracing::warn!("lock sound end while paused, plain chain rewrite: {e}");
-                }
             }
         }
     }
@@ -758,33 +760,66 @@ mod tests {
         assert_eq!(chime_calls(&pc), Vec::<String>::new(), "the end put the setting's chain back");
     }
 
-    /// A failed end may leave the chime's chain in `af` — the music at gain
-    /// 0 — and nothing but a file start would rewrite it: on a disc, whose
-    /// tracks are chapters of one file, silence to its end. The setting's
-    /// chain is written whole at once (the file is paused: no click).
+    /// A failed end (mpv not answering within its budget, or refusing a
+    /// step) may leave the chime's chain in `af` — the music at gain 0. It
+    /// is not rewritten on the spot, which would hold the core loop for a
+    /// whole write's timeout on an mpv that does not answer: `af` is marked
+    /// unknown, and the resume writes the setting's chain whole first, the
+    /// file still paused (no click), so the music never comes back silent.
+    /// A file start writes it too.
     #[tokio::test]
-    async fn a_failed_paused_chime_end_writes_the_setting_chain_at_once() {
+    async fn a_failed_paused_chime_end_is_repaired_before_the_music_resumes() {
         let eq = enabled();
-        let (mut core, pc, _sc, _rx, _d) = chiming_while_paused(eq.clone()).await;
+        let (mut core, pc, _sc, rx, _d) = chiming_while_paused(eq.clone()).await;
         core.player.paused_chime_end_fails.store(true, Ordering::SeqCst);
         core.expire_lock_sound().await;
-        assert_eq!(chime_calls(&pc), vec![paused_chime_end(&af_chain(&eq), Some(AT)), format!("af {}", af_chain(&eq))]);
+        assert_eq!(calls_of(&pc), vec![paused_chime_end(&af_chain(&eq), Some(AT))], "nothing more on the loop");
         assert!(core.lock_sound_deadline().is_none());
-        // `af` is known again: the next file start writes nothing.
+        assert!(core.paused);
         pc.lock().unwrap().clear();
-        core.handle_event(Event::FileStarting).await;
-        assert_eq!(chime_calls(&pc), Vec::<String>::new());
+        core.handle_command(Command::PlayPause).await.unwrap();
+        assert_eq!(calls_of(&pc), vec![format!("af {}", af_chain(&eq)), "pause".to_string()], "the chain, then the resume");
+        assert_eq!(rx.borrow().playback, Playback::Playing);
+        // Known again: the next resume writes nothing more.
+        core.handle_command(Command::PlayPause).await.unwrap();
+        pc.lock().unwrap().clear();
+        core.handle_command(Command::PlayPause).await.unwrap();
+        assert_eq!(calls_of(&pc), vec!["pause".to_string()]);
 
-        // The rewrite failing too leaves `af` unknown: the next file start
-        // writes the setting's chain.
+        // An alarm resumes through the same toggle.
         let (mut core, pc, _sc, _rx, _d) = chiming_while_paused(eq.clone()).await;
         core.player.paused_chime_end_fails.store(true, Ordering::SeqCst);
-        core.player.af_fails.store(true, Ordering::SeqCst);
         core.expire_lock_sound().await;
-        core.player.af_fails.store(false, Ordering::SeqCst);
+        pc.lock().unwrap().clear();
+        core.play().await.unwrap();
+        assert_eq!(calls_of(&pc), vec![format!("af {}", af_chain(&eq)), "pause".to_string()]);
+
+        // Or a file start, if one comes first.
+        let (mut core, pc, _sc, _rx, _d) = chiming_while_paused(eq.clone()).await;
+        core.player.paused_chime_end_fails.store(true, Ordering::SeqCst);
+        core.expire_lock_sound().await;
         pc.lock().unwrap().clear();
         core.handle_event(Event::FileStarting).await;
         assert_eq!(chime_calls(&pc), vec![format!("af {}", af_chain(&eq))]);
+    }
+
+    /// The start failing too (mpv gone silent on the chime): the end is
+    /// tried at once, and the resume repairs the chain all the same.
+    #[tokio::test]
+    async fn a_paused_chime_whose_start_and_end_both_fail_is_repaired_at_the_resume() {
+        let eq = enabled();
+        let (mut core, pc, _sc, _rx, _d) = paused_with(eq.clone()).await;
+        core.player.paused_chime_fails.store(true, Ordering::SeqCst);
+        core.player.paused_chime_end_fails.store(true, Ordering::SeqCst);
+        core.handle_command(Command::SetInputLock(true)).await.unwrap();
+        assert_eq!(
+            chime_calls(&pc),
+            vec![paused_chime(&af_chain(&eq), Motif::Lock, Some(AT)), paused_chime_end(&af_chain(&eq), Some(AT))]
+        );
+        assert!(core.lock_sound_deadline().is_none());
+        pc.lock().unwrap().clear();
+        core.handle_command(Command::PlayPause).await.unwrap();
+        assert_eq!(calls_of(&pc), vec![format!("af {}", af_chain(&eq)), "pause".to_string()]);
     }
 
     /// The user's command applies to the paused file the user saw: the
