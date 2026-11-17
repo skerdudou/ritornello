@@ -244,6 +244,58 @@ test('on a phone: the presets card toggles list and pages, and a vertical drag o
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(before)
 })
 
+/**
+ * The list frame scrolls on its own, but once it is at its end the gesture
+ * must chain to the page: `overscroll-contain` on a frame up to 60 % of the
+ * viewport high would pin the finger on a list that has nothing left to give.
+ * The frame is shrunk inline so that its content overflows whatever the
+ * fixture holds; the class under test is left alone.
+ */
+test('on a phone: a drag at the end of the presets list frame scrolls the page', async ({ page }) => {
+  await page.setViewportSize({ width: 412, height: 500 })
+  await page.goto('/')
+  const grid = page.locator('[data-preset-grid]')
+  await expect(grid.locator('[data-preset-button]').first()).toBeVisible()
+  const toggle = page.locator('[data-preset-layout-toggle]')
+  try {
+    await toggle.click()
+    await expect(grid).toHaveAttribute('data-preset-layout', 'list')
+    const frame = page.locator('[data-preset-list]')
+    await frame.evaluate((el) => {
+      el.style.maxHeight = '40px'
+      el.scrollTop = el.scrollHeight
+    })
+    expect(await frame.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true)
+    expect(await frame.evaluate((el) => Math.ceil(el.scrollTop + el.clientHeight) >= el.scrollHeight)).toBe(true)
+    // Let the page height settle, then put the frame in the middle of the view.
+    await expect.poll(async () => {
+      const h = await page.evaluate(() => document.documentElement.scrollHeight)
+      await page.waitForTimeout(300)
+      return h === (await page.evaluate(() => document.documentElement.scrollHeight))
+    }).toBe(true)
+    await page.evaluate(() => {
+      // Shrinking the frame shortened the page: give it room below again.
+      const spacer = document.createElement('div')
+      spacer.style.height = '800px'
+      document.body.appendChild(spacer)
+      const top = document.querySelector('[data-preset-list]')!.getBoundingClientRect().top + window.scrollY
+      window.scrollTo(0, Math.max(0, top - 250))
+    })
+    expect(await page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight - window.scrollY)).toBeGreaterThan(0)
+    const box = await frame.boundingBox()
+    if (!box) throw new Error('presets list frame not visible')
+    const from = { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+    expect(await page.evaluate(([px, py]) => document.elementFromPoint(px!, py!)?.closest('[data-preset-list]') != null, [from.x, from.y])).toBe(true)
+    const before = await page.evaluate(() => window.scrollY)
+    // The frame is at its end already: only the page can move.
+    await touchDrag(page, from, { x: from.x, y: from.y - 200 }, { steps: 12 })
+    await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(before)
+  } finally {
+    // The layout is shared server-side state: leave it as pages.
+    if ((await grid.getAttribute('data-preset-layout')) === 'list') await toggle.click()
+  }
+})
+
 test('on a phone: a station takes two lines, its name then its address, each wide enough to read', async ({ page }) => {
   await page.goto('/plugins/radio/')
   const row = page.locator('[data-station-row]').first()
