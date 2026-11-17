@@ -2591,7 +2591,7 @@ Presets work like the radio's: numbered **by position** (1 to 99),
 reordered by dragging a row by its ⠿ handle, with a finger or a mouse (or with
 the ▲▼ arrows, the keyboard path), announced to the core as
 `preset_count`, listed by name for `list_presets`. They are kept in
-`entries.toml`. As on the radio, a save that moves or renames the preset
+`entries.toml`. A change that moves or renames the preset
 that plays (or is armed) corrects its number and name on the card and in
 `state.json`, found again by its link; one deleted while it plays keeps
 playing with no number.
@@ -2613,8 +2613,10 @@ dismissed. The plugin asks yt-dlp about the links in the background, one
 queue for all of them (title, channel, the videos of a playlist), and the
 page follows the progress. A link the plugin recognises for what it is is
 **added by the plugin itself** and becomes a numbered preset; only the
-choice of a video or a playlist waits for the operator. A link is either a
-**video** or a **playlist**:
+choice of a video or a playlist waits for the operator. These lines live
+only in the plugin's memory: a restart of the plugin forgets them (a link
+still waiting or a choice not made is lost; the presets already added are
+on disk). A link is either a **video** or a **playlist**:
 
 - a YouTube link is recognised for what it is (`watch?v=`, `playlist?list=`,
   `shorts/`, `embed/`, `youtu.be/`; any other shape or host of the YouTube
@@ -2633,7 +2635,7 @@ Hosts apart from YouTube are known by `extractor:id` (yt-dlp's own fields);
 a YouTube entry keeps its 11-character id and its rebuilt `watch` address. A
 playlist's videos are cached in `lists/` and refreshed in the background
 when it is played; playback starts from the cache without waiting, and a
-failed refresh keeps the old list. Saving a playlist writes its freshly
+failed refresh keeps the old list. Adding a playlist writes its freshly
 probed videos to that cache when it is added. Shuffle and repeat are not
 supported by this source yet (the order of `files` is private to its
 binary).
