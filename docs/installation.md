@@ -2284,6 +2284,21 @@ holds, not the setting's, so the equalizer's entries are written with the
 arguments they already had; that mpv then keeps those entries — and the live
 gains in them — rather than rebuilding them is inferred from the spike's
 clean add/remove with the equalizer on, not measured after a live change.
+**The chime while paused** was measured on the same machine only (mpv 0.37,
+`ao=pcm`), never heard on the Pi. A seekable file at 48 kHz with the equalizer
+was clean 20/20: no music in the chime section (1 kHz energy 0 against a 3e-4
+threshold), the chime bit-identical to a pure render, the position restored to
+0 or -1 sample; 44.1 kHz with the equalizer off and unlock sound C, 5/5 each.
+That needed a flush seek (`absolute+keyframes`) before unpausing and waiting for
+the restored chain's `audio-reconfig` before the exact seek back; without the
+wait the restore seek was lost once in about 49, and the guard is reasoned, not
+proven. A non-seekable stream (radio) is not seeked: the listener may hear about
+one audio buffer of music (about 0.2 s on the device, unverified) at the unpause
+before the chime, and the stream ends up about 1.4 s further behind live. Each
+step of a paused chime is synchronous on the core loop (worst case about 25 s,
+or 16 s, under the IPC timeouts), not measured on the Pi. A chime mixed into
+playback is built on the filter chain mpv actually holds (rebuilding the
+equalizer entries after a live band change clicked 20/20).
 A second chime during an idle one replaces it
 (the core does not ask mpv, which answers then as for a real file); that was
 run on WSL against mpv 0.37 with the timed `ao=null` output only, and a chime

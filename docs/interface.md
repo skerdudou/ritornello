@@ -328,9 +328,18 @@ the Player card (below): the chosen sound, with its locking or its unlocking
 motif. It is
 mixed into what plays — the music is never lowered — or plays alone when
 nothing is playing, standby included, without waking anything. It follows the
-volume and the mute, and is silent while the music is paused or while a file
-is still loading. The setting `lock_sound` is `none` or one of five sounds
-`a` to `e` (default `a`), part of `GET`/`PUT /api/settings`.
+volume and the mute, and is silent while a file is still loading. While the
+music is **paused** it plays too: the music branch is held at gain 0 in mpv's
+filter chain, mpv is unpaused for the chime and paused again, and a seekable
+file is put back at its exact position. A live stream is not seeked, so it
+ends up about 1.5 s further behind live, and the listener may hear about one
+audio buffer of music at the unpause. Near the end of a seekable file
+(remaining less than the chime plus 1 s) no chime is played, since it would end
+the file and advance the playlist. A user command during a paused chime (play,
+pause, next, seek, stop, source, power…) first ends the chime and puts the file
+back, then applies; volume, mute, +10 and the lock commands do not. The
+setting `lock_sound` is `none` or one of five sounds `a` to `e` (default `a`),
+part of `GET`/`PUT /api/settings`.
 
 The padlock counts in the header's width budget (`headerMode`), like the
 sleep timer and standby keys it closes the row with: a header too narrow for
@@ -1662,8 +1671,9 @@ the other player settings. Beside it, a play button (▶, "Play on the device")
 plays the sound **on the device**, not in the browser, so what is heard is what
 a lock change will sound like; it plays the value on screen, saved or not, and
 is disabled for None. Under them, a note explains why nothing will be heard
-when the player is muted ("Muted: nothing will be heard.") or paused ("Paused:
-nothing will be heard."), read from the same player stream as the Home page.
+when the player is muted ("Muted: nothing will be heard."), read from the same
+player stream as the Home page; a paused player plays the sound, so it has no
+note.
 
 The button posts `POST /api/lock-sound/preview` with `{"sound": "<value>"}`:
 `204` when the preview is queued (also for `none`, where nothing is), `422`
