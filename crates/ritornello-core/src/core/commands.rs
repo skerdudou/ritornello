@@ -9,7 +9,8 @@ impl<P: Player> Core<P> {
         // a source on the page, the remote or an MPD client turns the device
         // on there instead of doing nothing. The remote lock is the other
         // exception: it must be lockable and unlockable while the device
-        // sleeps, or a locked remote could never be freed in standby.
+        // sleeps, or a locked remote could never be freed in standby — and a
+        // key it refuses still says LOCKED on the console.
         // Everything else, presets and volume included, is still ignored.
         if self.standby
             && !matches!(
@@ -19,6 +20,7 @@ impl<P: Player> Core<P> {
                     | Command::SelectSource(_)
                     | Command::ToggleInputLock
                     | Command::SetInputLock(_)
+                    | Command::InputLockRefused
             )
         {
             return Ok(());
@@ -62,6 +64,20 @@ impl<P: Player> Core<P> {
         self.show_message(text);
         let motif = if locked { crate::lock_sound::Motif::Lock } else { crate::lock_sound::Motif::Unlock };
         self.play_lock_sound(self.settings.lock_sound, motif).await;
+    }
+
+    /// A key refused by a locked remote: the LOCKED message again, so the key
+    /// gets an answer — and nothing else. No chime (it belongs to a lock
+    /// change, and a remote pressed in a child's hands would ring on every
+    /// key), no write, no change of the lock. Only while locked: a refusal
+    /// sent just before an unlock reached the plugin must not claim LOCKED
+    /// over the UNLOCKED just shown. The plugin throttles what it sends.
+    pub(super) async fn say_input_locked(&mut self) {
+        if !self.input_locked {
+            return;
+        }
+        let text = self.catalog.read().await.get("overlay_input_locked").to_string();
+        self.show_message(text);
     }
 
     /// Absolute volume, the only way in for a setting that comes from no key:
@@ -710,6 +726,7 @@ impl<P: Player> Core<P> {
             Command::CancelSleepTimer => self.cancel_sleep_timer().await,
             Command::ToggleInputLock => self.set_input_lock(!self.input_locked).await,
             Command::SetInputLock(locked) => self.set_input_lock(locked).await,
+            Command::InputLockRefused => self.say_input_locked().await,
         }
         Ok(())
     }
@@ -1892,6 +1909,56 @@ mod tests {
             .await
             .unwrap();
         assert!(!again.player_state().input_locked);
+    }
+
+    /// What a lock chime leaves in the player's calls (`lock_sound.rs`):
+    /// played aside when idle, mixed into `af` while playing.
+    fn chime_calls(calls: &Mutex<Vec<String>>) -> Vec<String> {
+        calls.lock().unwrap().iter().filter(|c| c.starts_with("aside ") || c.starts_with("af")).cloned().collect()
+    }
+
+    #[tokio::test]
+    async fn a_refused_key_says_locked_without_a_chime_or_a_change() {
+        let (mut core, pc, _sc, rx, d) = setup();
+        core.handle_command(Command::SetInputLock(true)).await.unwrap();
+        assert!(!chime_calls(&pc).is_empty(), "otherwise the silence below proves nothing");
+        core.overlay = None;
+        pc.lock().unwrap().clear();
+        let path = d.path().join("state.json");
+        std::fs::remove_file(&path).unwrap();
+
+        core.handle_command(Command::InputLockRefused).await.unwrap();
+
+        assert_eq!(overlay_text(&core).as_deref(), Some("LOCKED"));
+        assert_eq!(chime_calls(&pc), Vec::<String>::new(), "a refused key never chimes");
+        assert!(core.lock_sound_deadline().is_none());
+        assert!(rx.borrow().input_locked, "still locked");
+        assert!(rx.borrow().overlay.is_some(), "and published");
+        assert!(!path.exists(), "nothing changed, nothing written");
+    }
+
+    #[tokio::test]
+    async fn a_refused_key_never_locks_an_unlocked_device() {
+        // A refusal that crosses an unlock (sent by the plugin before the new
+        // value reached it) must neither relock nor claim LOCKED.
+        let (mut core, pc, _sc, rx, _d) = setup();
+        core.handle_command(Command::InputLockRefused).await.unwrap();
+        assert!(!rx.borrow().input_locked);
+        assert_eq!(overlay_text(&core), None);
+        assert_eq!(chime_calls(&pc), Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn a_refused_key_answers_in_standby() {
+        let (mut core, pc, _sc, rx, _d) = setup();
+        core.start_in_standby().await.unwrap();
+        core.handle_command(Command::SetInputLock(true)).await.unwrap();
+        core.overlay = None;
+        pc.lock().unwrap().clear();
+        core.handle_command(Command::InputLockRefused).await.unwrap();
+        assert_eq!(overlay_text(&core).as_deref(), Some("LOCKED"), "the console still answers in standby");
+        assert!(rx.borrow().standby, "without waking the device");
+        assert_eq!(chime_calls(&pc), Vec::<String>::new());
     }
 
     #[tokio::test]

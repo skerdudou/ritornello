@@ -117,6 +117,7 @@ Command::ExtendSleepTimer = {"cmd":"ExtendSleepTimer","arg":15}
 Command::CancelSleepTimer = {"cmd":"CancelSleepTimer"}
 Command::ToggleInputLock = {"cmd":"ToggleInputLock"}
 Command::SetInputLock = {"cmd":"SetInputLock","arg":true}
+Command::InputLockRefused = {"cmd":"InputLockRefused"}
 InputMessage = {"cmd":"Next"}
 InputMessage::held = {"cmd":"VolumeUp","held":true}
 InputFrame::Lock = {"frame":"lock","locked":true}

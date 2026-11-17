@@ -109,6 +109,12 @@ pub enum Command {
     /// cross a toggle must not undo each other's intent. Same scope as
     /// `ToggleInputLock`: only plugins announcing `input_lock` honour it.
     SetInputLock(bool),
+    /// A key was pressed and refused because the remote is locked: the core
+    /// says LOCKED on the displays, and nothing else — no lock change, no
+    /// chime. Sent by a plugin that honours the lock, so that a refused key
+    /// gets an answer; throttling it is the sender's business. Passes the
+    /// core's standby gate, like the two lock commands.
+    InputLockRefused,
 }
 
 /// A line the core writes to an input plugin, the opposite direction to
@@ -171,6 +177,7 @@ mod tests {
             (Command::ToggleInputLock, r#"{"cmd":"ToggleInputLock"}"#),
             (Command::SetInputLock(true), r#"{"cmd":"SetInputLock","arg":true}"#),
             (Command::SetInputLock(false), r#"{"cmd":"SetInputLock","arg":false}"#),
+            (Command::InputLockRefused, r#"{"cmd":"InputLockRefused"}"#),
         ] {
             assert_eq!(serde_json::to_string(&cmd).unwrap(), expected);
             assert_eq!(serde_json::from_str::<Command>(expected).unwrap(), cmd);

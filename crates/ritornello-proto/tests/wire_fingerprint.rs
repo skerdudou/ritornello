@@ -93,6 +93,7 @@ fn command_label(c: &Command) -> &'static str {
         Command::CancelSleepTimer => "CancelSleepTimer",
         Command::ToggleInputLock => "ToggleInputLock",
         Command::SetInputLock(_) => "SetInputLock",
+        Command::InputLockRefused => "InputLockRefused",
     }
 }
 
@@ -630,6 +631,7 @@ fn input_section() -> Vec<String> {
         Command::CancelSleepTimer,
         Command::ToggleInputLock,
         Command::SetInputLock(true),
+        Command::InputLockRefused,
     ];
     for c in &commands {
         l.add(&format!("Command::{}", command_label(c)), c);

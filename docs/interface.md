@@ -11,7 +11,7 @@ and a single set of components; the difference between the phone and the
 desktop arrangement is Tailwind breakpoints, not two separate views (see
 "Layout" below).
 
-The page embeds buttons for 11 of the protocol's 26 commands: standby,
+The page embeds buttons for 11 of the protocol's 27 commands: standby,
 source switch, mute, previous/next, play/pause, stop, eject, the two
 play modes, random and repeat (see "Transport" below), and the remote
 lock's padlock (see "The remote lock" below). Three more
@@ -19,7 +19,7 @@ commands are sent by controls that are not buttons — the preset tiles send
 `Select`, the progress bar sends `SeekTo`, the volume slider sends
 `SetVolume`. Three are the sleep timer's menu — `SetSleepTimer`,
 `ExtendSleepTimer`, `CancelSleepTimer` (see [Sleep timer and
-alarms](#sleep-timer-and-alarms)). The remaining nine belong elsewhere: `VolumeUp`/`VolumeDown`
+alarms](#sleep-timer-and-alarms)). The remaining ten belong elsewhere: `VolumeUp`/`VolumeDown`
 and `SeekForward`/`SeekBackward` are the physical remote's hold-to-repeat
 and step keys (see "Physical remote" below) — the web page dropped its own
 ±5%-volume and ±`seek_step_s`-seek buttons in this refonte, in favour of
@@ -35,7 +35,8 @@ web page's absolute `SetRandom`/`SetRepeat` because a physical key does
 not know the current value of the mode it moves — see "Physical remote";
 and `ToggleInputLock` is the same story for the remote lock, sent by a
 physical key's long press where the page's padlock sends the absolute
-`SetInputLock`.
+`SetInputLock`; and `InputLockRefused` is the physical remote's answer to a
+key it refuses while locked (see "Locking the remote" below).
 
 `Next`/`Prev` are interpreted by the active source: preset for the radio,
 track for the CD player — these are not two distinct command pairs, only a
@@ -301,7 +302,10 @@ the remote moves the padlock too.
 What the lock does is ignore the keys of the input plugins that **honour**
 it: `generic-input` does (the infrared or keyboard device), `mpd` does not
 (a client of the network protocol is not a hand on the remote), and the page
-is never locked — otherwise nobody could unlock it. The padlock is therefore
+is never locked — otherwise nobody could unlock it. A key `generic-input`
+refuses still gets an answer: its press shows LOCKED on the displays, at most
+once every 3 seconds and without the lock sound (see "Locking the remote"
+below). The padlock is therefore
 never greyed: both lock commands pass the core's standby gate, so a locked
 remote can be unlocked whatever the device is doing. The lock is held in
 memory only: **a core restart forgets it**, and the device comes back
@@ -775,7 +779,11 @@ picks the key with "Learn" like any other. While locked, the plugin ignores
 every other key; only this long press still gets through, so the remote can
 always be unlocked from where it is held. The device answers on the
 displays with a LOCKED / UNLOCKED message (the console's included), and on the web page with the padlock (see "The
-remote lock" above). The lock is forgotten when the core restarts, except for the
+remote lock" above). A key refused while locked is not met with silence
+either: its press shows LOCKED again (the plugin sends `InputLockRefused`, at
+most once every 3 seconds, whatever the device, so a remote drummed on does
+not keep the message up), in standby too, without the lock sound and without
+changing anything; its autorepeats and its release say nothing. The lock is forgotten when the core restarts, except for the
 restart an update provokes, which keeps it (the core writes it to `state.json`
 on every change and reads it back only then, as it does for the sleep timer);
 a power cut or a manual restart unlocks.

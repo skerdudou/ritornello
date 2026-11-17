@@ -2042,8 +2042,13 @@ physical key for the timer is out of scope — but any input plugin may send
 them; the web page's menu does (see [Sleep timer and
 alarms](interface.md#sleep-timer-and-alarms)).
 
-`input` contract 1.2 adds the **remote lock**: two commands, `ToggleInputLock`
-and `SetInputLock(bool)`, and a plugin-side opt-in. A plugin that honours the
+`input` contract 1.2 adds the **remote lock**: three commands, `ToggleInputLock`,
+`SetInputLock(bool)` and `InputLockRefused`, and a plugin-side opt-in.
+`InputLockRefused` is what a plugin that honours the lock sends when it refuses
+a key: the core shows the LOCKED message on the displays (standby included) and
+does nothing else — no lock change, no lock sound — and only while the lock is
+on, so a refusal crossing an unlock says nothing. Throttling it is the sender's
+business. A core older than 1.2 logs it as an unknown command and skips it. A plugin that honours the
 lock overrides `InputPlugin::input_lock`, returning the sender of a `watch`
 channel it reads; the SDK announces that as `input_lock` (omitted from the
 announcement when false). Only such a plugin ever receives anything from the
@@ -2071,7 +2076,11 @@ pressed again to toggle back. The lock key never sends anything on a plain
 press, and it keeps working while locked, since it is the way out. While
 locked, **every other key is ignored — Power included**, and so are their
 autorepeats; the core applies whatever it receives, so this is the only place
-that stays silent. Learning is unaffected: a key being learned is captured, not
+that stays silent. Silent toward the music, not toward the owner: the press of
+an ignored key sends `InputLockRefused`, so the displays say LOCKED, at most
+once every 3 seconds counted from the last one sent and shared by every device
+(a remote drummed on does not keep the message up); autorepeats, releases and
+the lock key itself never send it. Learning is unaffected: a key being learned is captured, not
 interpreted, locked or not. The state belongs to the core: the plugin only
 mirrors the `lock` frames the SDK feeds its `watch`, so a restarted plugin
 comes back locked if the core still is (it is told at connection), and a core

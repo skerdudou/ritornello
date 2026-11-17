@@ -1,6 +1,8 @@
 use crate::bindings::Bindings;
 use crate::learn::LearnState;
-use crate::lock::{LONG_PRESS, LockKeyPress};
+use crate::lock::{LONG_PRESS, LockKeyPress, Refusals};
+#[cfg(test)]
+use crate::lock::REFUSAL_INTERVAL;
 use evdev::{Device, EventType};
 use ritornello_proto::{Command, InputMessage};
 use std::collections::{BTreeMap, BTreeSet};
@@ -148,6 +150,10 @@ pub enum Outcome {
     LockPress,
     /// The lock key went up: disarm it.
     LockRelease,
+    /// Another key went down while locked: refused, which the core is told
+    /// (`InputLockRefused`, throttled by `key_loop`) so the press gets an
+    /// answer on the displays.
+    Refused,
     Nothing,
 }
 
@@ -161,7 +167,10 @@ pub enum Outcome {
 ///   press (it is a *long* press, timed by `key_loop`) and works whether the
 ///   remote is locked or not, since it is the way out; every other key, Power
 ///   included, is ignored while `locked`. The core applies every command it
-///   receives, so this is the only place that decides to stay silent.
+///   receives, so this is the only place that decides to stay silent. A
+///   press of such a key is `Refused` rather than `Nothing`, so that
+///   `key_loop` can tell the core (LOCKED on the displays); its autorepeats
+///   and its release are `Nothing`.
 ///
 /// Pure function, testable without hardware.
 pub fn key_outcome_event(
@@ -183,7 +192,10 @@ pub fn key_outcome_event(
         };
     }
     if locked {
-        return Outcome::Nothing;
+        return match edge {
+            KeyEdge::Press => Outcome::Refused,
+            KeyEdge::Repeat | KeyEdge::Release => Outcome::Nothing,
+        };
     }
     match edge {
         KeyEdge::Press => Outcome::Send(InputMessage { cmd, held: false }),
@@ -268,6 +280,14 @@ pub(crate) async fn key_loop(mut events: mpsc::Receiver<(u16, i32)>, name: Strin
                     Outcome::Nothing if is_lock_key && edge == KeyEdge::Repeat => {
                         press.due(Instant::now())
                     }
+                    Outcome::Refused => {
+                        let say = hub.refusals.lock().unwrap().say(Instant::now());
+                        if say {
+                            tracing::debug!("{name}: key {code} refused, remote locked");
+                            let _ = hub.tx.send(InputMessage::from(Command::InputLockRefused)).await;
+                        }
+                        false
+                    }
                     Outcome::Nothing => false,
                 }
             }
@@ -295,6 +315,9 @@ pub struct Hub {
     /// The remote lock, as the core last told the SDK. Read per event, never
     /// across an `.await`.
     pub locked: watch::Receiver<bool>,
+    /// When a refused key was last answered, for every device at once.
+    /// `std::sync::Mutex`, never held across an `.await`.
+    pub refusals: Arc<Mutex<Refusals>>,
 }
 
 impl Hub {
@@ -310,6 +333,7 @@ impl Hub {
             reported: Arc::new(Mutex::new(Reported::default())),
             tx,
             locked,
+            refusals: Arc::new(Mutex::new(Refusals::default())),
         }
     }
 
@@ -692,7 +716,14 @@ mod tests {
     fn every_other_key_is_ignored_while_locked() {
         let t = lock_table();
         for (code, cmd) in [(116, Command::Power), (2, Command::Select(3)), (115, Command::VolumeUp)] {
-            for edge in [KeyEdge::Press, KeyEdge::Repeat] {
+            // A press is refused (the loop says so, throttled); its
+            // autorepeats and its release say nothing at all.
+            assert_eq!(
+                key_outcome_event(&t, None, "eHome", code, KeyEdge::Press, true),
+                Outcome::Refused,
+                "{cmd:?}"
+            );
+            for edge in [KeyEdge::Repeat, KeyEdge::Release] {
                 assert_eq!(
                     key_outcome_event(&t, None, "eHome", code, edge, true),
                     Outcome::Nothing,
@@ -828,10 +859,94 @@ mod tests {
         ev.send((116, 1)).await.unwrap(); // Power
         ev.send((116, 0)).await.unwrap();
         advance(10).await;
+        expect_refusal(&mut rx).await;
+        ev.send((LOCK_CODE, 1)).await.unwrap();
+        advance(2000).await;
+        expect_toggle(&mut rx).await;
+    }
+
+    async fn expect_refusal(rx: &mut mpsc::Receiver<InputMessage>) {
+        let m = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("a refusal was expected")
+            .unwrap();
+        assert_eq!(m, InputMessage::from(Command::InputLockRefused));
+        nothing(rx);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_press_says_so_at_most_once_per_interval() {
+        let (ev, mut rx, _lock) = loop_fixture(true);
+        ev.send((116, 1)).await.unwrap(); // Power, refused
+        advance(10).await;
+        expect_refusal(&mut rx).await;
+        // Its autorepeats and its release say nothing.
+        ev.send((116, 2)).await.unwrap();
+        ev.send((116, 2)).await.unwrap();
+        ev.send((116, 0)).await.unwrap();
+        advance(10).await;
+        nothing(&mut rx);
+        // Another key, pressed within the interval: still nothing.
+        ev.send((2, 1)).await.unwrap();
+        ev.send((2, 0)).await.unwrap();
+        advance(REFUSAL_INTERVAL.as_millis() as u64 - 30).await;
+        ev.send((115, 1)).await.unwrap();
+        advance(10).await;
+        nothing(&mut rx);
+        // Once the interval has passed since the last refusal said, the next
+        // press says it again.
+        ev.send((115, 0)).await.unwrap();
+        advance(20).await;
+        ev.send((116, 1)).await.unwrap();
+        advance(10).await;
+        expect_refusal(&mut rx).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_lock_key_is_never_refused() {
+        let (ev, mut rx, _lock) = loop_fixture(true);
+        // A short press of the lock key, then a hold that toggles: no refusal.
+        ev.send((LOCK_CODE, 1)).await.unwrap();
+        advance(500).await;
+        ev.send((LOCK_CODE, 0)).await.unwrap();
+        advance(10).await;
         nothing(&mut rx);
         ev.send((LOCK_CODE, 1)).await.unwrap();
         advance(2000).await;
         expect_toggle(&mut rx).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unlocked_a_press_sends_its_own_command() {
+        let (ev, mut rx, _lock) = loop_fixture(false);
+        ev.send((116, 1)).await.unwrap();
+        advance(10).await;
+        let m = rx.try_recv().expect("Power was expected");
+        assert_eq!(m, InputMessage::from(Command::Power));
+        nothing(&mut rx);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_refusal_interval_is_shared_by_every_device() {
+        // Two receivers of the same remote (or two remotes): one refusal per
+        // interval in all, not one per device.
+        let (tx, mut rx) = mpsc::channel(8);
+        let (_lock_tx, lock_rx) = watch::channel(true);
+        let mut t = lock_table();
+        let mut other = t.devices[0].clone();
+        other.name = "Other".into();
+        t.devices.push(other);
+        let hub = Hub::new(t, tx, lock_rx);
+        let (ev1, ev1_rx) = mpsc::channel(64);
+        let (ev2, ev2_rx) = mpsc::channel(64);
+        tokio::spawn(key_loop(ev1_rx, "eHome".into(), hub.clone()));
+        tokio::spawn(key_loop(ev2_rx, "Other".into(), hub));
+        ev1.send((116, 1)).await.unwrap();
+        advance(10).await;
+        expect_refusal(&mut rx).await;
+        ev2.send((116, 1)).await.unwrap();
+        advance(10).await;
+        nothing(&mut rx);
     }
 
     /// The `warn` lines `f` emits on this thread, as text.

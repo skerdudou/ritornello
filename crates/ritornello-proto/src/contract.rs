@@ -138,7 +138,8 @@ mod tests {
             //   `Known::measured_duration_s`);
             // - input: 1.1 for the sleep timer commands (`SetSleepTimer`,
             //   `ExtendSleepTimer`, `CancelSleepTimer`), 1.2 for the remote lock
-            //   (`ToggleInputLock`, `SetInputLock`, `InputFrame::Lock`);
+            //   (`ToggleInputLock`, `SetInputLock`, `InputLockRefused`,
+            //   `InputFrame::Lock`);
             // - every other one: still 1.0.
             let expected = match c {
                 Contract::Source => ContractVersion::new(1, 3),
