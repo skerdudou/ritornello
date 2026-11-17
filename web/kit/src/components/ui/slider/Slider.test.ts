@@ -51,6 +51,22 @@ const pointerdown = (target: Element, pointerType: string) => pointer('pointerdo
  * the whole track.
  */
 describe('Slider: what a pointerdown on the track starts', () => {
+  // Vue's listener wrapper ignores an event stamped no later than its own
+  // attachment, and the stamp is taken by the first Vue listener that sees
+  // the event. A Vue capture listener on the root stamped it before reka-ui's
+  // listener did, so a pointerdown in the same tick as the mount (Vue caches
+  // its clock for a tick) was dropped: a progress-bar test missed its seek
+  // about once in fifteen runs. The clock is frozen so that the mount and the
+  // pointerdown share one millisecond every time, not by chance.
+  it('a pointerdown in the millisecond of the mount still reaches reka-ui', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000)
+    const { w, root } = mountSlider('horizontal')
+    pointerdown(root, 'mouse')
+    now.mockRestore()
+    await flushPromises()
+    expect(w.emitted('update:modelValue')?.[0]).toEqual([[-12]])
+  })
+
   it('a touch on the track of a vertical slider changes nothing', async () => {
     const { w } = mountSlider('vertical')
     await flushPromises()
