@@ -25,6 +25,25 @@ impl<P: Player> Core<P> {
         {
             return Ok(());
         }
+        // The user's intent wins over a lock chime sounding over the paused
+        // file: it is ended first (mpv paused again, the file put back), so
+        // that the command applies to the paused file the user saw — a
+        // play/pause toggled on mpv unpaused for the chime would pause it
+        // for good. Only the commands that never touch the transport let it
+        // sound on: the volume, the mute, `+10`, and the lock itself, whose
+        // chime replaces it (`lock_sound.rs`).
+        if !matches!(
+            cmd,
+            Command::VolumeUp
+                | Command::VolumeDown
+                | Command::SetVolume(_)
+                | Command::Mute
+                | Command::Plus10
+                | Command::ToggleInputLock
+                | Command::SetInputLock(_)
+        ) {
+            self.finish_paused_chime().await;
+        }
         // Pause and Stop during a sleep fade, or while it waits for the end
         // of the track, end it at once: the device goes to standby at the
         // volume to restore (see `ends_sleep_wind_down`).
@@ -302,6 +321,9 @@ impl<P: Player> Core<P> {
     /// What entering standby does to the flags, the Source and the player —
     /// `Command::Power`'s own sequence, moved here unchanged.
     async fn enter_standby_flags_and_player(&mut self) -> Result<()> {
+        // The sleep timer's standby comes from no command: a paused chime
+        // ends here before the stop (`lock_sound.rs`).
+        self.finish_paused_chime().await;
         self.standby = true;
         // Persist **before** notifying the Source, for the same
         // reason as `leave_standby`'s: an unreachable Source
@@ -361,6 +383,10 @@ impl<P: Player> Core<P> {
         // plays answers "paused" to a client whose music goes on,
         // and the following `pause 0` is then judged a no-op and
         // ignored.
+        //
+        // An alarm's Play comes here from no command: a paused chime has
+        // mpv unpaused, and the toggle would pause it (`lock_sound.rs`).
+        self.finish_paused_chime().await;
         self.player.toggle_pause().await?;
         self.paused = !self.paused;
         Ok(())

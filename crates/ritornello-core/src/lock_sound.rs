@@ -213,7 +213,6 @@ pub fn mix_filter(sound: LockSound, motif: Motif, sample_rate: u32, channels: u3
 /// as the pure `aevalsrc` render. `amix duration=first` still follows the
 /// music, so the chime sounds only while mpv decodes the paused file — hence
 /// the end-of-file guard of `player::ChimeRoute::Paused`.
-#[cfg_attr(not(test), expect(dead_code, reason = "the core plays the paused chime in the next task"))]
 pub fn mix_filter_over_silence(sound: LockSound, motif: Motif, sample_rate: u32, channels: u32) -> Option<String> {
     chime_graph("volume=volume=0", sound, motif, sample_rate, channels)
 }

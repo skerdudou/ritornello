@@ -8,6 +8,9 @@ impl<P: Player> Core<P> {
     /// runtime), and nothing is recorded on disk — the same state as a fresh
     /// install, where `resume()` sends no device at all.
     pub async fn set_audio_device(&mut self, device: Option<String>) -> Result<()> {
+        // A paused chime has mpv unpaused, and the chain rewrite that
+        // follows an output change would bring the music back under it.
+        self.finish_paused_chime().await;
         match &device {
             Some(d) => self.player.set_audio_device(d).await?,
             None => self.player.set_audio_device("auto").await?,

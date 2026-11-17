@@ -53,6 +53,9 @@ impl<P: Player> Core<P> {
         let old_enabled = self.equalizer.enabled;
         self.equalizer = new;
         let result = if old_enabled != self.equalizer.enabled {
+            // Written over a paused chime, the plain chain would bring the
+            // music back at full gain under it, mpv unpaused: it ends first.
+            self.finish_paused_chime().await;
             self.write_chain().await
         } else if self.equalizer.enabled && self.eq_live {
             self.command_change().await
@@ -225,7 +228,7 @@ impl<P: Player> Core<P> {
 }
 
 /// `plain` with `extra` after it; either may be empty.
-fn with_extra(plain: &str, extra: Option<&str>) -> String {
+pub(super) fn with_extra(plain: &str, extra: Option<&str>) -> String {
     match extra {
         Some(extra) if !extra.is_empty() && !plain.is_empty() => format!("{plain},{extra}"),
         Some(extra) if !extra.is_empty() => extra.to_string(),

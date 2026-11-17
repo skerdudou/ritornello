@@ -131,7 +131,6 @@ pub trait Player: Send + Sync + 'static {
     /// **Whatever this returns, `end_sound_while_paused` must follow**: an
     /// error may come after mpv applied the chain, and the music would stay
     /// at gain 0.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the core plays the paused chime in the next task"))]
     async fn sound_while_paused(&self, chain: &str, resume_at: Option<f64>) -> Result<()>;
     /// Ends a paused chime: pauses again, writes `chain` (the plain chain
     /// mpv held before the chime), waits (bounded) for mpv to rebuild it,
@@ -143,6 +142,5 @@ pub trait Player: Send + Sync + 'static {
     /// when the file was put back, `progress` stays at the pause's until the
     /// user's next transport call (pause toggle, seek, next, prev, chapter,
     /// stop, a load) or a file start.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the core plays the paused chime in the next task"))]
     async fn end_sound_while_paused(&self, chain: &str, resume_at: Option<f64>) -> Result<()>;
 }

@@ -591,6 +591,10 @@ pub struct Core<P: Player> {
     /// back without (`lock_sound.rs`). Cleared by any other whole-chain
     /// write: that write already dropped the chime.
     lock_sound_mixed: Option<(String, Instant)>,
+    /// A lock chime sounding over the paused file, mpv unpaused for it
+    /// (`lock_sound.rs`): what to end it with and when. It must always be
+    /// ended (`finish_paused_chime`), except by a file start.
+    lock_sound_paused: Option<lock_sound::PausedChime>,
     /// mpv holds a live chain `af-command` can reach: set at
     /// `PlaybackRestarted`, cleared at `FileStarting` and `PlaybackIdle` (an
     /// idle or loading mpv refuses every `af-command`). False at launch: mpv
@@ -765,6 +769,7 @@ impl<P: Player> Core<P> {
             eq_plain_written: Some(crate::equalizer::af_chain(&persisted.equalizer)),
             eq_live: false,
             lock_sound_mixed: None,
+            lock_sound_paused: None,
         };
         // The sources wired at startup are already known: without this
         // publication, the channel would keep its blank

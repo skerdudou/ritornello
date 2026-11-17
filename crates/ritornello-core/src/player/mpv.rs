@@ -474,7 +474,6 @@ impl AsideGate {
 
     /// A paused chime is about to be written: `progress` is what the core
     /// reads until it ends. A second chime keeps the first one's.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the core plays the paused chime in the next task"))]
     pub(crate) fn begin_paused_chime(&mut self, progress: Progress) {
         self.paused_chime = true;
         self.frozen.get_or_insert(progress);
@@ -501,7 +500,6 @@ impl AsideGate {
     /// during the pause in some of those runs, while playback did resume at
     /// the restored point — a bar going back for nothing. Nothing but the
     /// user moves a paused file.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the core plays the paused chime in the next task"))]
     pub(crate) fn end_paused_chime(&mut self, restore_sent: bool) {
         self.paused_chime = false;
         self.restore_pending = restore_sent;
@@ -915,7 +913,6 @@ const PAUSED_CHIME_END_MARGIN_S: f64 = 1.0;
 /// 49 (the audio resumed 2.7 s off while `time-pos` claimed the restored
 /// position); with the wait, never in 50, and the wait itself took under
 /// 0.1 ms each time. The guard is reasoned from that one failure, not proven.
-#[cfg_attr(not(test), expect(dead_code, reason = "the core plays the paused chime in the next task"))]
 const RESTORE_RECONFIG_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Brings a `get_property` response down to a usable number.

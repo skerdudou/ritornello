@@ -462,6 +462,27 @@ mod tests {
         assert!(volumes(&calls).is_empty(), "no fade: {:?}", calls.lock().unwrap());
     }
 
+    /// A lock chime sounding over the paused file (mpv unpaused for it) is
+    /// ended before the timer's standby stops the player, like before a
+    /// user's command.
+    #[tokio::test(start_paused = true)]
+    async fn the_standby_of_the_timer_ends_a_paused_chime_first() {
+        let (mut core, calls, _sc, _rx, _d) = playing_at(40).await;
+        arm(&mut core, 1, SleepMode::Immediate).await;
+        core.handle_command(Command::PlayPause).await.unwrap();
+        *core.player.route.lock().unwrap() =
+            crate::player::ChimeRoute::Paused { sample_rate: 48000, channels: 2, resume_at: Some(4.0) };
+        core.handle_command(Command::SetInputLock(true)).await.unwrap();
+        calls.lock().unwrap().clear();
+        // The chime's own deadline is not reached first here: the timer's is.
+        after(&mut core, Duration::from_secs(60)).await;
+        assert!(core.standby);
+        let calls = calls.lock().unwrap().clone();
+        let end = calls.iter().position(|c| c.starts_with("paused-chime-end ")).expect("ended");
+        let stop = calls.iter().position(|c| c == "stop").expect("stopped");
+        assert!(end < stop, "{calls:?}");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn fade_steps_mpv_volume_down_and_restores_it() {
         let (mut core, calls, _sc, _rx, dir) = playing_at(40).await;

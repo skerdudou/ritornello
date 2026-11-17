@@ -101,6 +101,18 @@ impl<P: Player> Core<P> {
             // applied it, that action was silently dropped: the identity on
             // screen moved to the resumed track, but mpv itself stayed on
             // whatever it had opened, so the sound did not follow.
+            // During a paused chime, mpv plays on from the pause point for
+            // the chime's length: a track boundary it crosses (a disc paused
+            // just before a track's end — its tracks are chapters, which the
+            // end-of-file guard of `ChimeRoute::Paused` does not see) is the
+            // chime's, not the listener's, and the restore puts the file
+            // back on the track the core still holds. Every command of the
+            // user's ends the chime first, so none of theirs can be dropped
+            // here. A crossing still queued when the chime's end runs first
+            // gets through: rare, and the same as before this guard.
+            Event::TrackChanged(n) if self.lock_sound_paused.is_some() => {
+                tracing::debug!("track {n} crossed by a paused chime: not acted on");
+            }
             Event::TrackChanged(n) => {
                 if !self.standby {
                     // Judged before the request, whose answer may move the
@@ -120,11 +132,23 @@ impl<P: Player> Core<P> {
             }
             // mpv rebuilds the chain from `af` for every file, dropping the
             // gains `af-command` set: rewrite it now, while it costs no click.
-            Event::FileStarting => self.reapply_equalizer().await,
+            //
+            // A paused chime is dropped, never ended: mpv's gate let the new
+            // file through and ended the chime on its side, and ending it
+            // here would pause the new file. The rewrite below puts the plain
+            // chain back, since `af` still holds the chime's.
+            Event::FileStarting => {
+                self.lock_sound_paused = None;
+                self.reapply_equalizer().await
+            }
             // The chain takes `af-command` from here on (not from the file
             // start): send what changed while the file was loading.
             Event::PlaybackRestarted => self.equalizer_live().await,
             Event::PlaybackIdle => {
+                // A paused chime that mpv's idle cut short, no file start in
+                // between: ended all the same, so that the plain chain is
+                // what the next load finds and nothing of it stays pending.
+                self.finish_paused_chime().await;
                 // First, before any early return: whatever follows, nothing
                 // is loaded any more.
                 self.equalizer_idle();
