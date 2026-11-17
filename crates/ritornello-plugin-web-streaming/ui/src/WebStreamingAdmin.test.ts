@@ -1,5 +1,6 @@
 import { ReorderList } from '@ritornello/ui'
-import { flushPromises } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
+import AddLinksDialog from './AddLinksDialog.vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Entry, Job, ProbeLine } from './data'
 import {
@@ -308,6 +309,18 @@ describe('WebStreamingAdmin', () => {
     await w.findAll('[data-line-dismiss]')[1]!.trigger('click')
     await flushPromises()
     expect(s.putsOf('dismiss')).toEqual([{ op: 'dismiss', line: 8 }])
+  })
+
+  it('a frozen add dialog cannot submit', async () => {
+    // The page cannot reach this state (the button is gated), so the dialog is mounted on its own.
+    const w = mount(AddLinksDialog, {
+      props: { t: (k: string) => CATALOG[k] ?? k, open: true, busy: false, error: '', frozen: true },
+      attachTo: document.body,
+    })
+    await flushPromises()
+    await typeDialog('[data-links]', VIDEO_URL)
+    expect(inDialog('[data-add-submit]')!.hasAttribute('disabled')).toBe(true)
+    w.unmount()
   })
 
   it('has no "Add links" card any more', async () => {

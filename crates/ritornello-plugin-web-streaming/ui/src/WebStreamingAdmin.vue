@@ -178,6 +178,8 @@ function openAdd(): void {
 
 /** The links are queued by the plugin: on its `Ok` the dialog closes, on a refusal it stays open on the reason. */
 async function probe(text: string): Promise<void> {
+  // `send` answers null when it sent nothing (the page is inert): that is not an `Ok`.
+  if (loadFailed.value) return
   adding.value = true
   try {
     const err = await send({ op: 'probe', text })
@@ -346,6 +348,7 @@ async function recheck(): Promise<void> {
       :t="t"
       :open="addOpen"
       :busy="adding"
+      :frozen="loadFailed"
       :error="addError"
       @update:open="addOpen = $event"
       @submit="probe"

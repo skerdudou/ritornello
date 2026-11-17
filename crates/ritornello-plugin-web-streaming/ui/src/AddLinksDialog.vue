@@ -10,6 +10,8 @@ defineProps<{
   busy: boolean
   /** The plugin's refusal of the last submission: the dialog stays open on it. */
   error: string
+  /** The page could not read the table: nothing may be sent. */
+  frozen: boolean
 }>()
 
 const emit = defineEmits<{
@@ -40,7 +42,7 @@ const text = ref('')
       <p v-if="error" class="text-sm text-destructive" role="alert" data-add-error>{{ error }}</p>
       <div class="flex justify-end gap-2">
         <Button variant="ghost" data-add-cancel @click="emit('update:open', false)">{{ t('btn_cancel') }}</Button>
-        <Button data-add-submit :disabled="busy || !text.trim()" @click="emit('submit', text)">
+        <Button data-add-submit :disabled="frozen || busy || !text.trim()" @click="emit('submit', text)">
           {{ t('btn_add_submit') }}
         </Button>
       </div>

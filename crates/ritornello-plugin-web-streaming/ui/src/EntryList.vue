@@ -208,7 +208,7 @@ function onEnter(e: Entry, ev: KeyboardEvent): void {
                 {{ t('line_waiting') }}
               </p>
               <p v-else-if="l.state === 'probing'" class="text-xs text-muted-foreground" role="status" data-line-probing>
-                <span class="inline-block animate-spin" aria-hidden="true">↻</span>
+                <span class="inline-block animate-spin motion-reduce:animate-none" aria-hidden="true">↻</span>
                 {{ t('line_probing') }}
               </p>
               <div v-else-if="l.state === 'found'" class="mt-1 space-y-1">
