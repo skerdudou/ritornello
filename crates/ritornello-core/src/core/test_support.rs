@@ -50,6 +50,9 @@ pub(super) struct FakePlayer {
     /// When true, `sound_while_paused` fails after recording the call — an
     /// IPC timeout, which says nothing about whether mpv took the chain.
     pub(super) paused_chime_fails: Arc<std::sync::atomic::AtomicBool>,
+    /// When true, `end_sound_while_paused` fails after recording the call:
+    /// which of its steps failed is unknown, so is `af`.
+    pub(super) paused_chime_end_fails: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[async_trait::async_trait]
@@ -174,6 +177,9 @@ impl crate::player::Player for FakePlayer {
     }
     async fn end_sound_while_paused(&self, chain: &str, resume_at: Option<f64>) -> anyhow::Result<()> {
         self.calls.lock().unwrap().push(format!("paused-chime-end {chain} {resume_at:?}"));
+        if self.paused_chime_end_fails.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("mpv: command timeout");
+        }
         Ok(())
     }
 }

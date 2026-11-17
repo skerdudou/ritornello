@@ -30,8 +30,9 @@ impl<P: Player> Core<P> {
         // that the command applies to the paused file the user saw — a
         // play/pause toggled on mpv unpaused for the chime would pause it
         // for good. Only the commands that never touch the transport let it
-        // sound on: the volume, the mute, `+10`, and the lock itself, whose
-        // chime replaces it (`lock_sound.rs`).
+        // sound on: the volume, the mute, `+10`, the lock itself, whose
+        // chime replaces it (`lock_sound.rs`), and a key refused by the lock,
+        // which only says so on screen.
         if !matches!(
             cmd,
             Command::VolumeUp
@@ -41,6 +42,7 @@ impl<P: Player> Core<P> {
                 | Command::Plus10
                 | Command::ToggleInputLock
                 | Command::SetInputLock(_)
+                | Command::InputLockRefused
         ) {
             self.finish_paused_chime().await;
         }

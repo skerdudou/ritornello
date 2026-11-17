@@ -195,12 +195,22 @@ impl<P: Player> Core<P> {
                 self.eq_plain_written = Some(chime.plain);
             }
             // Every step was tried, but which one failed is not known, so
-            // neither is `af`: the next file start writes the setting's
-            // chain whole, and the next chime does so first.
+            // neither is `af`: it may still hold the chime's chain, the
+            // music at gain 0 — and nothing else rewrites `af` before the
+            // user resumes (`toggle_pause` does not, `equalizer_live` only
+            // sends `af-command`s), only a file start: on a disc, whose
+            // tracks are chapters of one file, silence to its end. So the
+            // setting's chain is written whole once more, now — the file is
+            // paused (or mpv idle), nothing sounds to click. Should that
+            // fail too, `af` stays unknown: the next file start writes it,
+            // and the next chime first.
             Err(e) => {
                 tracing::warn!("lock sound end while paused: {e}");
                 self.eq_chain_written = None;
                 self.eq_plain_written = None;
+                if let Err(e) = self.write_chain().await {
+                    tracing::warn!("lock sound end while paused, plain chain rewrite: {e}");
+                }
             }
         }
     }
@@ -709,6 +719,35 @@ mod tests {
         assert_eq!(chime_calls(&pc), Vec::<String>::new(), "the end put the setting's chain back");
     }
 
+    /// A failed end may leave the chime's chain in `af` — the music at gain
+    /// 0 — and nothing but a file start would rewrite it: on a disc, whose
+    /// tracks are chapters of one file, silence to its end. The setting's
+    /// chain is written whole at once (the file is paused: no click).
+    #[tokio::test]
+    async fn a_failed_paused_chime_end_writes_the_setting_chain_at_once() {
+        let eq = enabled();
+        let (mut core, pc, _sc, _rx, _d) = chiming_while_paused(eq.clone()).await;
+        core.player.paused_chime_end_fails.store(true, Ordering::SeqCst);
+        core.expire_lock_sound().await;
+        assert_eq!(chime_calls(&pc), vec![paused_chime_end(&af_chain(&eq), Some(AT)), format!("af {}", af_chain(&eq))]);
+        assert!(core.lock_sound_deadline().is_none());
+        // `af` is known again: the next file start writes nothing.
+        pc.lock().unwrap().clear();
+        core.handle_event(Event::FileStarting).await;
+        assert_eq!(chime_calls(&pc), Vec::<String>::new());
+
+        // The rewrite failing too leaves `af` unknown: the next file start
+        // writes the setting's chain.
+        let (mut core, pc, _sc, _rx, _d) = chiming_while_paused(eq.clone()).await;
+        core.player.paused_chime_end_fails.store(true, Ordering::SeqCst);
+        core.player.af_fails.store(true, Ordering::SeqCst);
+        core.expire_lock_sound().await;
+        core.player.af_fails.store(false, Ordering::SeqCst);
+        pc.lock().unwrap().clear();
+        core.handle_event(Event::FileStarting).await;
+        assert_eq!(chime_calls(&pc), vec![format!("af {}", af_chain(&eq))]);
+    }
+
     /// The user's command applies to the paused file the user saw: the
     /// chime is ended first (paused again, plain chain, put back), then the
     /// command runs. A play/pause sent to mpv still unpaused for the chime
@@ -785,7 +824,14 @@ mod tests {
     /// transport: the chime sounds on.
     #[tokio::test]
     async fn the_volume_and_plus_ten_leave_a_paused_chime_sounding() {
-        for cmd in [Command::VolumeUp, Command::VolumeDown, Command::SetVolume(30), Command::Mute, Command::Plus10] {
+        for cmd in [
+            Command::VolumeUp,
+            Command::VolumeDown,
+            Command::SetVolume(30),
+            Command::Mute,
+            Command::Plus10,
+            Command::InputLockRefused,
+        ] {
             let (mut core, pc, _sc, _rx, _d) = chiming_while_paused(EqualizerSettings::default()).await;
             core.handle_command(cmd.clone()).await.unwrap();
             assert!(!calls_of(&pc).iter().any(|c| c.starts_with("paused-chime")), "{cmd:?}: {:?}", calls_of(&pc));

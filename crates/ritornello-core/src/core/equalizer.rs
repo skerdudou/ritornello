@@ -142,7 +142,7 @@ impl<P: Player> Core<P> {
 
     /// Writes the whole chain of the current setting (empty when disabled)
     /// and records what mpv then holds. A failure leaves `af` unknown.
-    async fn write_chain(&mut self) -> Result<()> {
+    pub(super) async fn write_chain(&mut self) -> Result<()> {
         self.write_chain_with(None).await.map(|_| ())
     }
 
