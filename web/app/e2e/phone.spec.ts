@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type APIRequestContext } from '@playwright/test'
 import { sidewaysCulprits } from './overflow'
 import { pluginOrder, restoreOrder } from './plugin-order'
 import { touchDrag } from './touch'
@@ -451,5 +451,91 @@ test('on a phone: holding a dragged row near the edge scrolls the page', async (
     expect(down ? moved : -moved).toBeGreaterThanOrEqual(300)
   } finally {
     await restoreOrder(request, before, page)
+  }
+})
+
+// The equalizer's ten vertical sliders cover most of their card on a phone,
+// in the page's own scrolling direction. A swipe over a band used to start a
+// slide wherever the finger landed and rewrite that gain (up to 12 dB): on a
+// vertical slider a finger now moves the value by the thumb alone (see the
+// kit's Slider.vue). The equalizer is server state shared by every spec of
+// the run: it is put back through the API, whatever the page did.
+
+interface EqSettings {
+  enabled: boolean
+  auto_preamp: boolean
+  gains: number[]
+  preset: string | null
+  user_presets: { name: string; gains: number[] }[]
+}
+
+const eqSettings = async (request: APIRequestContext) =>
+  ((await (await request.get('/api/equalizer')).json()) as { settings: EqSettings }).settings
+
+/** Writes the whole equalizer state, retried until it holds: a change the
+ * page coalesced may still land after a first write. */
+async function putEq(request: APIRequestContext, settings: EqSettings) {
+  await expect(async () => {
+    const res = await request.put('/api/equalizer', { data: settings })
+    expect(res.ok()).toBe(true)
+    await new Promise((r) => setTimeout(r, 500))
+    expect(await eqSettings(request)).toEqual(settings)
+  }).toPass({ timeout: 15_000 })
+}
+
+test('on a phone: a swipe over an equalizer band scrolls the page; its thumb still moves the gain', async ({ page, request }) => {
+  const original = await eqSettings(request)
+  const band = 4
+  // Enabled (a disabled slider ignores any pointer, and the scroll check
+  // would pass on that alone), every gain at 0: the thumb sits mid-height.
+  await putEq(request, { ...original, enabled: true, gains: original.gains.map(() => 0), preset: null })
+
+  try {
+    await page.goto('/config')
+    const column = page.locator('[data-eq-band]').nth(band)
+    const slider = column.locator('[data-slot="slider"]')
+    const thumb = column.locator('[role="slider"]')
+    const value = column.locator('[data-eq-band-value]')
+    await expect(value).toHaveText('0')
+    await expect(slider).not.toHaveAttribute('data-disabled')
+    await settledHeight(page)
+    // The band in the middle of the viewport, with room left to scroll below.
+    const viewport = page.viewportSize()!
+    const first = (await slider.boundingBox())!
+    await page.evaluate((y) => window.scrollTo(0, Math.max(0, y)), first.y + (await scrollY(page)) - viewport.height / 2)
+    await page.waitForTimeout(100)
+
+    // On the track, 14 px below the slider's top: well clear of the thumb
+    // (mid-height, its hit area 20 px either side of its centre).
+    const box = (await slider.boundingBox())!
+    const track = { x: box.x + box.width / 2, y: box.y + 14 }
+    const onTrack = await page.evaluate(([x, y]) => {
+      const hit = document.elementFromPoint(x!, y!)
+      return hit?.closest('[data-slot="slider"]') != null && hit.closest('[role="slider"]') == null
+    }, [track.x, track.y])
+    expect(onTrack).toBe(true)
+    expect(await page.evaluate(() => document.documentElement.scrollHeight - window.innerHeight - window.scrollY))
+      .toBeGreaterThan(200)
+    const start = await scrollY(page)
+    await touchDrag(page, track, { x: track.x, y: track.y - 200 })
+    await expect.poll(() => scrollY(page)).toBeGreaterThan(start + 100)
+    // Past the card's coalescing window (300 ms): a change would be written.
+    await page.waitForTimeout(600)
+    await expect(value).toHaveText('0')
+    expect((await eqSettings(request)).gains[band]).toBe(0)
+
+    // The same finger on the thumb, 50 px down: the gain goes down, and the
+    // page does not move under it.
+    await page.waitForTimeout(300) // the swipe's momentum, if any, ends
+    const knob = centre((await thumb.boundingBox())!)
+    expect(await onHandle(page, knob, '[role="slider"]')).toBe(true)
+    const still = await scrollY(page)
+    expect(still).toBeGreaterThan(50)
+    await touchDrag(page, knob, { x: knob.x, y: knob.y + 50 })
+    await expect.poll(async () => (await eqSettings(request)).gains[band]!).toBeLessThan(0)
+    await expect(value).not.toHaveText('0')
+    expect(Math.abs((await scrollY(page)) - still)).toBeLessThanOrEqual(2)
+  } finally {
+    await putEq(request, original)
   }
 })
