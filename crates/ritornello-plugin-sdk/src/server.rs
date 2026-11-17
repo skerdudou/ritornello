@@ -27,6 +27,8 @@ pub struct SourceOutcome {
     pub preset_name: Option<String>,
     /// See `SourceMessage::location`. Set through `plays_at` only.
     pub location: Option<String>,
+    /// See `SourceMessage::media_path`. Set through `plays_file_at` only.
+    pub media_path: Option<String>,
     /// See `SourceMessage::status_text`.
     pub status_text: Option<Text>,
     /// See `SourceMessage::presets`.
@@ -46,6 +48,7 @@ impl SourceOutcome {
             preset_count: None,
             preset_name: None,
             location: None,
+            media_path: None,
             status_text: None,
             presets: None,
             armed: None,
@@ -124,6 +127,23 @@ impl SourceOutcome {
         self
     }
 
+    /// Same as `plays_at`, for a local file: also declares the absolute path
+    /// of the file playing, which the core reads tags, lyrics and embedded
+    /// cover from (see `SourceMessage::media_path`). The playing counterpart
+    /// of `armed_file_at`: all three in one call, since the path describes
+    /// that identity and no other.
+    pub fn plays_file_at(
+        mut self,
+        identity: serde_json::Value,
+        location: impl Into<String>,
+        media_path: impl Into<String>,
+    ) -> Self {
+        self.identity = Some(IdentityUpdate::Playing(identity));
+        self.location = Some(location.into());
+        self.media_path = Some(media_path.into());
+        self
+    }
+
     /// Declares that nothing is playing anymore.
     pub fn plays_nothing(mut self) -> Self {
         self.identity = Some(IdentityUpdate::Nothing);
@@ -173,6 +193,8 @@ pub struct Notification {
     pub preset_name: Option<String>,
     /// See `SourceMessage::location`. Set through `plays_at` only.
     pub location: Option<String>,
+    /// See `SourceMessage::media_path`. Set through `plays_file_at` only.
+    pub media_path: Option<String>,
     /// See `SourceOutcome::status_text`.
     pub status_text: Option<Text>,
     /// See `SourceMessage::presets`.
@@ -228,6 +250,19 @@ impl Notification {
     pub fn plays_at(mut self, identity: serde_json::Value, location: impl Into<String>) -> Self {
         self.identity = Some(IdentityUpdate::Playing(identity));
         self.location = Some(location.into());
+        self
+    }
+
+    /// See `SourceOutcome::plays_file_at`.
+    pub fn plays_file_at(
+        mut self,
+        identity: serde_json::Value,
+        location: impl Into<String>,
+        media_path: impl Into<String>,
+    ) -> Self {
+        self.identity = Some(IdentityUpdate::Playing(identity));
+        self.location = Some(location.into());
+        self.media_path = Some(media_path.into());
         self
     }
 
@@ -589,6 +624,7 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                     preset_count: outcome.preset_count,
                     preset_name: outcome.preset_name,
                     location: outcome.location,
+                    media_path: outcome.media_path,
                     status_text: outcome.status_text,
                     // Stamped here, once, rather than by a constructor call on
                     // each of a plugin's ten declaration paths: a capability
@@ -634,6 +670,7 @@ pub async fn serve_source(listener: UnixListener, mut plugin: impl SourcePlugin)
                             preset_count: n.preset_count,
                             preset_name: n.preset_name,
                             location: n.location,
+                            media_path: n.media_path,
                             status_text: n.status_text,
                             can_eject: Some(plugin.can_eject()),
                             // Same reason as the reply path above: stamped on
@@ -1546,6 +1583,92 @@ mod tests {
             "notification path: {line}"
         );
         assert_eq!(s.location.as_deref(), Some("smb://h/s/a.mp3"));
+    }
+
+    #[test]
+    fn the_file_builders_declare_the_media_path_with_a_playing_identity() {
+        // Both types: the path describes the identity declared in the same
+        // call, as `Playing` — never armed, never alone.
+        let id = serde_json::json!({"k": 1});
+        let o = SourceOutcome::new(SourceAction::Noop).plays_file_at(id.clone(), "smb://h/s/a.mp3", "/mnt/a.mp3");
+        assert_eq!(o.identity, Some(IdentityUpdate::Playing(id.clone())));
+        assert_eq!(o.location.as_deref(), Some("smb://h/s/a.mp3"));
+        assert_eq!(o.media_path.as_deref(), Some("/mnt/a.mp3"));
+        assert_eq!(o.armed, None);
+        let n = Notification::new().plays_file_at(id.clone(), "smb://h/s/a.mp3", "/mnt/a.mp3");
+        assert_eq!(n.identity, Some(IdentityUpdate::Playing(id.clone())));
+        assert_eq!(n.location.as_deref(), Some("smb://h/s/a.mp3"));
+        assert_eq!(n.media_path.as_deref(), Some("/mnt/a.mp3"));
+        assert_eq!(n.armed, None);
+        // `plays_at` declares none: a stream has no file.
+        assert_eq!(SourceOutcome::new(SourceAction::Noop).plays_at(id.clone(), "http://x").media_path, None);
+        assert_eq!(Notification::new().plays_at(id, "http://x").media_path, None);
+    }
+
+    #[tokio::test]
+    async fn the_media_path_is_written_on_both_frame_paths() {
+        // The reply path and the notification path are two separate literals in
+        // `serve_source`: each must copy `media_path`, or a file played from one
+        // of them reaches the core without the file to read.
+        struct FileSource {
+            announced: bool,
+        }
+        #[async_trait::async_trait]
+        impl SourcePlugin for FileSource {
+            async fn activate(&mut self) -> SourceOutcome {
+                SourceOutcome::new(SourceAction::Noop).plays_file_at(
+                    serde_json::json!({"via": "reply"}),
+                    "smb://h/s/r.mp3",
+                    "/mnt/r.mp3",
+                )
+            }
+            async fn deactivate(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn select(&mut self, _n: u8) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn next(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn prev(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn eject(&mut self) -> SourceOutcome { SourceOutcome::new(SourceAction::Noop) }
+            async fn poll_notification(&mut self) -> Option<Notification> {
+                if self.announced {
+                    std::future::pending().await
+                } else {
+                    self.announced = true;
+                    Some(Notification::new().plays_file_at(
+                        serde_json::json!({"via": "notification"}),
+                        "smb://h/s/n.mp3",
+                        "/mnt/n.mp3",
+                    ))
+                }
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("plugin.sock");
+        let socket_for_server = socket.clone();
+        tokio::spawn(async move {
+            run_source_plugin(FileSource { announced: false }, &socket_for_server).await.unwrap();
+        });
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&socket).await { client = Some(s); break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let (read, mut write) = client.expect("plugin connection").into_split();
+        let mut lines = BufReader::new(read).lines();
+        write.write_all(b"{\"id\":1,\"req\":\"Activate\"}\n").await.unwrap();
+
+        let mut correlated = None;
+        let mut spontaneous = None;
+        for _ in 0..2 {
+            let line = lines.next_line().await.unwrap().expect("two frames");
+            let msg: SourceMessage = serde_json::from_str(&line).unwrap();
+            if msg.id.is_some() { correlated = Some((msg, line)); } else { spontaneous = Some((msg, line)); }
+        }
+        let (c, line) = correlated.expect("the reply");
+        assert_eq!(c.identity, Some(IdentityUpdate::Playing(serde_json::json!({"via": "reply"}))), "{line}");
+        assert_eq!(c.media_path.as_deref(), Some("/mnt/r.mp3"), "reply path: {line}");
+        let (s, line) = spontaneous.expect("the notification");
+        assert_eq!(s.identity, Some(IdentityUpdate::Playing(serde_json::json!({"via": "notification"}))), "{line}");
+        assert_eq!(s.media_path.as_deref(), Some("/mnt/n.mp3"), "notification path: {line}");
     }
 
     #[test]

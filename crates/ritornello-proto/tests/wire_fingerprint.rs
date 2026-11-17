@@ -530,6 +530,7 @@ fn source_section() -> Vec<String> {
             preset_count: Some(10),
             preset_name: Some("Name".into()),
             location: Some("loc".into()),
+            media_path: Some("/m/p".into()),
             status_text: Some(Text::Verbatim("s".into())),
             can_eject: Some(true),
             has_finite_list: Some(true),

@@ -634,7 +634,9 @@ impl FilesSource {
         // order. One lock at a time, from the cloned entry.
         let location = location_of(&*self.roots.read().await, &entry.path);
         let mut outcome = SourceOutcome::new(action)
-            .plays_at(Self::identity(&entry.path), location)
+            // The file itself, so the core reads its tags, lyrics and
+            // embedded cover tied to this identity (source contract 1.4).
+            .plays_file_at(Self::identity(&entry.path), location, entry.path.to_string_lossy())
             .preset_name(entry.display_name())
             .preset_count(count)
             .status_text(self.status_text());
@@ -727,7 +729,7 @@ impl FilesSource {
             // before `playlist`, so the two are never held in the opposite
             // order.
             let location = location_of(&*self.roots.read().await, &file);
-            outcome = outcome.plays_at(Self::identity(&file), location);
+            outcome = outcome.plays_file_at(Self::identity(&file), location, file.to_string_lossy());
             self.arm_cover(&file);
         }
         outcome
@@ -1966,6 +1968,10 @@ mod tests {
             })))
         );
         assert_eq!(out.location.as_deref(), Some("/musique/03.mp3"));
+        // The file the core reads tags, lyrics and embedded cover from, with
+        // the identity it belongs to: mpv's own announcement of the next file
+        // races this frame, the declaration does not.
+        assert_eq!(out.media_path.as_deref(), Some("/musique/03.mp3"));
     }
 
     #[tokio::test]
@@ -2114,6 +2120,7 @@ mod tests {
         let out = s.activate().await;
         assert!(out.identity.is_some(), "the track must be declared as such");
         assert!(out.location.is_some(), "and say where it comes from");
+        assert_eq!(out.media_path.as_deref(), Some(dir.path().join("01 - piste.flac").to_str().unwrap()), "and which file the core reads");
         let n = s.poll_notification().await.expect("a notification expected");
         assert_eq!(
             n.cover,

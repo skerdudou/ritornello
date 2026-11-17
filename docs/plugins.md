@@ -810,6 +810,25 @@ identity plays, and forgets it the moment something else starts or playback
 stops, so a stale address can never be shown against a new track. It is
 absent, not empty, when a source declares none.
 
+**A source that plays local files declares the file too** (`source` contract
+1.4): `SourceMessage::media_path`, the absolute local path of the file the
+declared identity plays, set through `plays_file_at(identity, location,
+media_path)` on `SourceOutcome` and `Notification` — the playing counterpart
+of `armed_file_at`, and the same lifecycle as `location`. The core reads that
+file's tags, embedded lyrics and embedded cover itself, once per identity,
+through a detached, bounded read whose result it keeps only while that
+identity still declares that file. **Whoever knows declares**: mpv announces
+the file it opened on another channel than the source's identity, and nothing
+orders the two — a cover read keyed on mpv's announcement could find the
+previous track's cover still held, skip, and leave the new track with none.
+While a file is declared, mpv's own tags are held back for it; they describe
+the track only if the declared read fails (the share did not answer, the file
+could not be read), and a file armed then played is read again on Play when
+its first read failed. A source that
+declares no file (a stream, a disc, a source written before 1.4) keeps mpv's
+tags as before, but gets **no embedded cover**: the core reads a local file
+only when a source names it. A URL or a relative path is ignored.
+
 **It is also the only source that enumerates its presets by name.** The
 source protocol carries a request for it, `SourceReq::ListPresets`, served
 by `SourcePlugin::list_presets`; the radio answers its station table sorted
@@ -1555,8 +1574,9 @@ against symlink loops. The list is what the Pi's mpv was seen to play:
 not sweep music videos into a playlist. The constant in
 `crates/ritornello-plugin-files/src/scan.rs` says why each entry is there.
 
-Track titles need no plugin here: the core reads the file's own tags from
-mpv's `metadata` property (see the `metadata` section below), and the
+Track titles need no plugin here: the core reads the file's own tags,
+lyrics and embedded cover itself, from the path the source declares with
+the identity (`media_path`, see the `radio` section above), and the
 `preset_name` the source declares — the `#EXTINF` title, else the file
 name without its extension — makes sure the screen is never mute even
 with no tags at all.
@@ -3198,7 +3218,9 @@ nothing plays (`source` contract 1.2) says so beside `identity: Nothing`, in
 is the very value the source will declare as playing when Play starts it (the
 core compares them, so an armed track that then plays is not a change), and
 `media_path` is, for a source of files, the absolute local path the core reads
-the tags and the embedded cover from while nothing plays (the SDK builders are
+the tags, lyrics and embedded cover from while nothing plays — the same read as
+for a playing file's `SourceMessage::media_path`, kept when Play starts the
+same identity from the same file (the SDK builders are
 `SourceOutcome::armed`, `SourceOutcome::armed_file_at` and `Notification::armed`
 beside them). The core keeps that track's title, artist and cover on screen
 until the source clears it (`Nothing` without `armed`) or Play starts it. **A
@@ -3582,12 +3604,12 @@ intentions described above.
    rather than as part of its answer to `Play` — resolving a folder can
    mean a `readdir` on an SMB share, and playback must not wait on it.
 2. **The core** — a cover embedded in the file itself, read with
-   `lofty` once mpv names the path being played (the core never reads
-   the identity for this: it has made a principle of never interpreting
-   it). The core **completes** here rather than overwrites, which is
-   what gives the folder image its precedence without inverting any
-   convention: extraction is only attempted while the slot is still
-   empty.
+   `lofty` from the file the Source declares with the identity
+   (`media_path`; the core never reads the identity for this: it has
+   made a principle of never interpreting it). The core **completes**
+   here rather than overwrites, which is what gives the folder image its
+   precedence without inverting any convention: the embedded picture is
+   only taken while the slot is still empty.
 3. **`radiofrance-metas`** — the station's own image for the track,
    overwriting, from the same live feed it already reads for the text.
 4. **`ouifm-metas`** — the stream's own cover, overwriting, from the
@@ -3709,9 +3731,11 @@ fact. Each step now says what it did:
   directory memoised as coverless stays silent forever otherwise), or a **`warn`**
   when the share did not answer at all — the circuit breaker giving up is an
   incident, not an absence;
-- the core, on the embedded picture: "no embedded cover in …" against a **`warn`**
-  for a share that timed out. Those two used to be flattened into one `None`,
-  which is precisely why they could not be told apart;
+- the core, on the declared file: "no embedded cover in …", "declared file: …
+  could not be read" and "… not read (share unavailable or too slow)", beside the
+  circuit breaker's own **`warn`** for a share that timed out. Those used to be
+  flattened into one `None`, which is precisely why they could not be told apart;
+  a read that arrives for a track no longer current is dropped at `debug`;
 - `musicbrainz`, on its own search: when it starts, and on the answer, "cover
   found" / "no cover" / "unavailable" **with the elapsed time**. Between the
   throttler, three in-process attempts and their ten-second timeouts, tens of
@@ -3779,15 +3803,22 @@ tiers (`Metadata::selected_lyrics`):
    channel, `SourceMessage::lyrics` (`source` contract 1.3), as it announces
    a `folder.jpg`: in a notification once the listing has resolved, so
    playback never waits on a share. Credited to the Source's name.
-2. **The file's own tags**, read by the core from mpv's `metadata`
-   property, the same one the text tags come from (`player::mpv::file_lyrics`).
-   The keys were measured on 2026-11-03 with ffmpeg 6.1.1 and mpv 0.37:
-   an mp3's ID3v2 `USLT` frame surfaces as `lyrics-<language>` (or
-   `lyrics-<descriptor>-<language>`), never as plain `lyrics`; an mp3 tagged
-   by ffmpeg itself, a flac's Vorbis comment `LYRICS` and an m4a's `©lyr` atom
-   as `lyrics` (case aside); a flac's `UNSYNCEDLYRICS` (foobar2000, Mp3tag) as
-   itself. So the words are `lyrics`, else the first key starting with
-   `lyrics-`, and `unsyncedlyrics` is the plain text. Credited to `tags`.
+2. **The file's own tags.** For a file its source declares (`media_path`),
+   the core reads them itself with `lofty`, in the declared read that also
+   brings the text and the embedded cover (`player::mpv::read_media_file`):
+   an ID3v2 `TXXX:LYRICS` frame, else a `USLT` frame (or ffmpeg's own
+   `TXXX:USLT`), as the words and `TXXX:UNSYNCEDLYRICS` as the plain text;
+   a Vorbis comment `LYRICS` as the words and `UNSYNCEDLYRICS` as the plain
+   text; an m4a's `©lyr` atom as the words — looked up in the primary tag
+   first, then in any other tag the file carries. That mapping reproduces
+   what FFmpeg exposes, and a test holds the two readers to the same answer
+   on real files. For anything with no declared file — a stream, a source
+   predating `source` 1.4, a declared file whose read failed — the core keeps
+   reading them from mpv's `metadata` property (`player::mpv::file_lyrics`),
+   whose keys were measured on 2026-11-03 with ffmpeg 6.1.1 and mpv 0.37:
+   the words are `lyrics`, else the first key starting with `lyrics-` (a
+   `USLT` frame's `lyrics-<language>`), and `unsyncedlyrics` is the plain
+   text. Credited to `tags` either way.
 3. **The `metadata` plugins** — the overriding ones first, then the
    `fill_only` ones, each group in declaration order. `lrclib-lyrics` is the one
    shipped contributor, and it only completes.
