@@ -125,6 +125,53 @@ describe('WebStreamingAdmin', () => {
     expect(s.putsOf('rename'), 'nothing was sent for either').toEqual([])
   })
 
+  it('keeps the sent title on screen until the re-read lands, and shows the saved one when refused', async () => {
+    const { w, s } = await mountAdmin({ entries: [video(1, 'A')] })
+    // Hold every read back: the rename went out, its re-read has not landed.
+    let release: () => void = () => {}
+    const gate = new Promise<void>((r) => (release = r))
+    const answer = s.spy.getMockImplementation() as (u: string, init?: RequestInit) => Promise<Response>
+    s.spy.mockImplementation(async (u: string, init?: RequestInit) => {
+      if (init?.method === undefined) await gate
+      return answer(u, init)
+    })
+    const input = w.find('[data-entry-title]')
+    await input.trigger('focus')
+    await input.setValue('Alpha')
+    await input.trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect(s.putsOf('rename')).toHaveLength(1)
+    expect((input.element as HTMLInputElement).value, 'no flash back to the old title').toBe('Alpha')
+    s.data.entries = [video(1, 'Alpha')]
+    release()
+    await flushPromises()
+    expect((input.element as HTMLInputElement).value).toBe('Alpha')
+
+    // A refused rename: the re-read brings the saved title back.
+    s.spy.mockImplementation(answer)
+    s.refusal = 'the presets changed meanwhile'
+    await input.trigger('focus')
+    await input.setValue('Beta')
+    await input.trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect(s.putsOf('rename')).toHaveLength(2)
+    expect((input.element as HTMLInputElement).value).toBe('Alpha')
+  })
+
+  it('ignores the Enter that validates an IME composition', async () => {
+    const { w, s } = await mountAdmin({ entries: [video(1, 'A')] })
+    const input = w.find('[data-entry-title]')
+    await input.trigger('focus')
+    await input.setValue('かな')
+    await input.trigger('keydown', { key: 'Enter', isComposing: true })
+    await flushPromises()
+    expect(s.putsOf('rename'), 'composition still in progress').toEqual([])
+    expect((input.element as HTMLInputElement).value).toBe('かな')
+    await input.trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect(s.putsOf('rename')).toEqual([{ op: 'rename', preset: 1, url: videoUrl(1), title: 'かな' }])
+  })
+
   it('keeps the typed title while a poll arrives', async () => {
     const { w, s } = await mountAdmin({ entries: [video(1, 'A')], targets: ['nas'] })
     const input = w.find('[data-entry-title]')
@@ -152,7 +199,48 @@ describe('WebStreamingAdmin', () => {
 
   // ---- adding links ---------------------------------------------------------
 
-  it('sends the pasted lines as one probe, and shows one error line per refused link', async () => {
+  const found = (kind: 'video' | 'playlist', present = false) => ({
+    url: kind === 'video' ? VIDEO_URL : LIST_URL,
+    kind,
+    title: kind === 'video' ? 'The video' : 'The playlist',
+    channel: null,
+    count: kind === 'video' ? null : 12,
+    site: kind === 'video' ? 'Youtube' : 'YoutubeTab',
+    identity: null,
+    present,
+  })
+
+  async function openAdd(w: Awaited<ReturnType<typeof mountAdmin>>['w']): Promise<void> {
+    await w.find('[data-add-links]').trigger('click')
+    await flushPromises()
+  }
+
+  it('opens the add dialog from the presets card, sends the links as one probe, and closes', async () => {
+    const { w, s } = await mountAdmin()
+    expect(inDialog('[data-links]'), 'closed at first').toBeNull()
+    await openAdd(w)
+    expect(inDialog('[data-add-submit]')!.hasAttribute('disabled'), 'blank: nothing to send').toBe(true)
+    await typeDialog('[data-links]', `${VIDEO_URL}\nnot a link\n\n${OTHER_URL}`)
+    await clickDialog('[data-add-submit]')
+    expect(s.putsOf('probe')).toHaveLength(1)
+    expect((s.putsOf('probe')[0] as { text: string }).text).toBe(`${VIDEO_URL}\nnot a link\n\n${OTHER_URL}`)
+    expect(inDialog('[data-links]'), 'closed after Ok').toBeNull()
+    // Opened again, the field is empty.
+    await openAdd(w)
+    expect((inDialog('[data-links]') as HTMLTextAreaElement).value).toBe('')
+  })
+
+  it('keeps the dialog open with the refusal when the plugin refuses the links', async () => {
+    const { w, s } = await mountAdmin()
+    s.refusal = '50 links at most at a time'
+    await openAdd(w)
+    await typeDialog('[data-links]', VIDEO_URL)
+    await clickDialog('[data-add-submit]')
+    expect(inDialog('[data-add-error]')!.textContent).toContain('50 links at most at a time')
+    expect((inDialog('[data-links]') as HTMLTextAreaElement).value, 'what was pasted stays').toBe(VIDEO_URL)
+  })
+
+  it('shows waiting, reading and failed lines after the presets, without a number', async () => {
     const results: ProbeLine[] = [
       { id: 2, line: 'not a link', state: 'error', code: 'not_a_url' },
       { id: 3, line: 'https://www.youtube.com/live/jNQXAC9IVRw', state: 'error', code: 'live_stream' },
@@ -162,17 +250,17 @@ describe('WebStreamingAdmin', () => {
       { id: 7, line: 'https://x/y', state: 'error', code: 'table_full' },
       { id: 8, line: 'https://x/z', state: 'error', code: 'save_failed' },
       { id: 9, line: 'https://x/w', state: 'probing' },
+      { id: 10, line: 'https://x/v', state: 'pending' },
     ]
-    const { w, s } = await mountAdmin()
-    s.onPut = (p) => {
-      if (p.op === 'probe') s.data.probe = { running: false, results }
-    }
-    await w.find('[data-links]').setValue(`${VIDEO_URL}\nnot a link\n\nhttps://www.youtube.com/live/jNQXAC9IVRw\nhttps://studio.youtube.com/x\nhttp://192.168.1.1/x`)
-    await w.find('[data-probe]').trigger('click')
-    await flushPromises()
-
-    expect(s.putsOf('probe')).toHaveLength(1)
-    expect((s.putsOf('probe')[0] as { text: string }).text).toContain('not a link')
+    const { w } = await mountAdmin({ entries: [video(1)], probe: { running: true, results } })
+    const rows = w.findAll('[data-probe-line]')
+    expect(rows).toHaveLength(9)
+    // After the presets: the table's own rows come first in the document.
+    const preset = w.find('[data-entry-row]').element
+    expect(preset.compareDocumentPosition(rows[0]!.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(w.findAll('[data-entry-row]'), 'a line is not a preset row').toHaveLength(1)
+    expect(w.findAll('[data-entry-num]'), 'no number on a line').toHaveLength(1)
+    expect(w.findAll('[data-entry-select]'), 'no checkbox on a line').toHaveLength(1)
     const errors = w.findAll('[data-probe-error]').map((e) => e.text())
     expect(errors).toHaveLength(7)
     expect(errors[0]).toContain('not a link')
@@ -183,12 +271,56 @@ describe('WebStreamingAdmin', () => {
     expect(errors[4]).toContain(CATALOG.fault_already_present)
     expect(errors[5]).toContain(CATALOG.fault_table_full)
     expect(errors[6]).toContain(CATALOG.fault_save_failed)
+    expect(w.find('[data-line-probing]').text()).toContain(CATALOG.line_probing)
+    expect(w.find('[data-line-waiting]').text()).toContain(CATALOG.line_waiting)
+    expect(w.find('[data-line-probing]').attributes('role')).toBe('status')
   })
 
-  it('a probe is never refused while another runs: the button stays usable', async () => {
-    const { w } = await mountAdmin({ probe: { running: true, results: [{ id: 1, line: VIDEO_URL, state: 'probing' }] } })
-    await w.find('[data-links]').setValue(OTHER_URL)
-    expect(w.find('[data-probe]').attributes('disabled')).toBeUndefined()
+  it('offers both kinds for a two-choice line, the one already present greyed, and sends the choice by line and link', async () => {
+    const { w, s } = await mountAdmin({
+      probe: { running: false, results: [{ id: 4, line: `${VIDEO_URL}&list=PLx`, state: 'found', choices: [found('video', true), found('playlist')] }] },
+    })
+    const video = w.find('[data-add-choice="video"]')
+    const playlist = w.find('[data-add-choice="playlist"]')
+    expect(video.attributes('disabled')).toBeDefined()
+    expect(video.text()).toBe(CATALOG.fault_already_present)
+    expect(playlist.attributes('disabled')).toBeUndefined()
+    expect(playlist.text()).toBe(CATALOG.keep_playlist)
+    await video.trigger('click')
+    await flushPromises()
+    expect(s.putsOf('choose'), 'a greyed button sends nothing').toEqual([])
+    await playlist.trigger('click')
+    await flushPromises()
+    expect(s.putsOf('choose')).toEqual([{ op: 'choose', line: 4, url: LIST_URL }])
+  })
+
+  it('labels the video choice "Keep the video"', async () => {
+    const { w } = await mountAdmin({
+      probe: { running: false, results: [{ id: 4, line: VIDEO_URL, state: 'found', choices: [found('video'), found('playlist')] }] },
+    })
+    expect(w.find('[data-add-choice="video"]').text()).toBe(CATALOG.keep_video)
+  })
+
+  it('dismisses a line by its id', async () => {
+    const { w, s } = await mountAdmin({
+      probe: { running: false, results: [{ id: 3, line: 'x', state: 'error', code: 'not_a_url' }, { id: 8, line: 'y', state: 'pending' }] },
+    })
+    await w.findAll('[data-line-dismiss]')[1]!.trigger('click')
+    await flushPromises()
+    expect(s.putsOf('dismiss')).toEqual([{ op: 'dismiss', line: 8 }])
+  })
+
+  it('has no "Add links" card any more', async () => {
+    const { w } = await mountAdmin()
+    expect(w.find('[data-links]').exists()).toBe(false)
+    expect(w.find('[data-probe]').exists()).toBe(false)
+    expect(w.findAll('[data-add-links]')).toHaveLength(1)
+  })
+
+  it('shows the empty state only when there is neither a preset nor a line', async () => {
+    const { w } = await mountAdmin({ probe: { running: false, results: [{ id: 1, line: 'x', state: 'pending' }] } })
+    expect(w.find('[data-entries-empty]').exists()).toBe(false)
+    expect(w.find('[data-probe-line]').exists()).toBe(true)
   })
 
   it('shows the site of a preset', async () => {
@@ -202,32 +334,6 @@ describe('WebStreamingAdmin', () => {
     const { w } = await mountAdmin({ entries: [video(1)] })
     expect(w.find('[data-entry-site]').exists()).toBe(false)
     expect(w.find('[data-entry-detail]').text()).toMatch(/^video/)
-  })
-
-  it('asks which one when a link names a video and its playlist, and sends the choice', async () => {
-    const choices = [
-      { url: VIDEO_URL, kind: 'video' as const, title: 'The video', channel: null, count: null, site: 'Youtube', identity: null, present: false },
-      { url: LIST_URL, kind: 'playlist' as const, title: 'The playlist', channel: null, count: 12, site: 'YoutubeTab', identity: null, present: false },
-    ]
-    const { w, s } = await mountAdmin({
-      probe: { running: false, results: [{ id: 4, line: `${VIDEO_URL}&list=PLx`, state: 'found', choices }] },
-    })
-    expect(w.text()).toContain(CATALOG.choose_one)
-    await w.find('[data-add-choice="playlist"]').trigger('click')
-    await flushPromises()
-    expect(s.putsOf('choose')).toEqual([{ op: 'choose', line: 4, url: LIST_URL }])
-  })
-
-  it('does not offer a choice the table already holds', async () => {
-    const choices = [
-      { url: VIDEO_URL, kind: 'video' as const, title: 'The video', channel: null, count: null, site: 'Youtube', identity: null, present: true },
-      { url: LIST_URL, kind: 'playlist' as const, title: 'The playlist', channel: null, count: 12, site: 'YoutubeTab', identity: null, present: false },
-    ]
-    const { w } = await mountAdmin({
-      probe: { running: false, results: [{ id: 4, line: `${VIDEO_URL}&list=PLx`, state: 'found', choices }] },
-    })
-    expect(w.find('[data-add-choice="video"]').attributes('disabled')).toBeDefined()
-    expect(w.find('[data-add-choice="playlist"]').attributes('disabled')).toBeUndefined()
   })
 
   // ---- downloading ----------------------------------------------------------
@@ -806,10 +912,11 @@ describe('WebStreamingAdmin', () => {
     s.onPut = (p) => {
       if (p.op === 'probe') s.data.probe = { running: true, results: [{ id: 1, line: VIDEO_URL, state: 'pending' }] }
     }
-    await w.find('[data-links]').setValue(VIDEO_URL)
-    await w.find('[data-probe]').trigger('click')
+    await w.find('[data-add-links]').trigger('click')
     await flushPromises()
-    expect(w.text()).toContain(CATALOG.probing)
+    await typeDialog('[data-links]', VIDEO_URL)
+    await clickDialog('[data-add-submit]')
+    expect(w.text()).toContain(CATALOG.line_waiting)
     const before = s.gets()
     await vi.advanceTimersByTimeAsync(2100)
     expect(s.gets()).toBeGreaterThan(before)

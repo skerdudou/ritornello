@@ -3,7 +3,7 @@ import {
   api, Button, Card, CardAction, CardContent, CardHeader, CardTitle, createT, Skeleton, useSkeleton, type Catalog,
 } from '@ritornello/ui'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import AddLinks from './AddLinks.vue'
+import AddLinksDialog from './AddLinksDialog.vue'
 import CapabilitiesPanel from './CapabilitiesPanel.vue'
 import { emptyData, workInProgress, type Choices, type Data, type Entry, type Target } from './data'
 import DownloadDialog, { type Item } from './DownloadDialog.vue'
@@ -165,8 +165,32 @@ function toggle(url: string): void {
 
 // ---- links ------------------------------------------------------------------
 
-function probe(text: string): Promise<void> {
-  return act({ op: 'probe', text })
+const addOpen = ref(false)
+const adding = ref(false)
+const addError = ref('')
+/** Changed to empty the dialog's field once the links were accepted. */
+const addKey = ref(0)
+
+function openAdd(): void {
+  addError.value = ''
+  addOpen.value = true
+}
+
+/** The links are queued by the plugin: on its `Ok` the dialog closes, on a refusal it stays open on the reason. */
+async function probe(text: string): Promise<void> {
+  adding.value = true
+  try {
+    const err = await send({ op: 'probe', text })
+    if (err) {
+      addError.value = err
+      return
+    }
+    addOpen.value = false
+    addError.value = ''
+    addKey.value += 1
+  } finally {
+    adding.value = false
+  }
 }
 
 function choose(line: number, url: string): Promise<void> {
@@ -255,6 +279,11 @@ async function recheck(): Promise<void> {
       <Card>
         <CardHeader>
           <CardTitle>{{ t('entries_title') }}</CardTitle>
+          <CardAction>
+            <Button variant="outline" size="sm" data-add-links :disabled="loadFailed" @click="openAdd">
+              {{ t('btn_add_links') }}
+            </Button>
+          </CardAction>
         </CardHeader>
         <CardContent class="space-y-3">
           <EntryList
@@ -295,22 +324,6 @@ async function recheck(): Promise<void> {
 
       <Card>
         <CardHeader>
-          <CardTitle>{{ t('add_title') }}</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <AddLinks
-            :t="t"
-            :running="data.probe.running"
-            :lines="data.probe.results"
-            :frozen="loadFailed"
-            @probe="probe"
-            @choose="choose"
-          />
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
           <CardTitle>{{ t('tool_title') }}</CardTitle>
         </CardHeader>
         <CardContent class="space-y-4">
@@ -326,6 +339,17 @@ async function recheck(): Promise<void> {
         </CardContent>
       </Card>
     </template>
+
+    <AddLinksDialog
+      v-if="data"
+      :key="addKey"
+      :t="t"
+      :open="addOpen"
+      :busy="adding"
+      :error="addError"
+      @update:open="addOpen = $event"
+      @submit="probe"
+    />
 
     <DownloadDialog
       v-if="data"

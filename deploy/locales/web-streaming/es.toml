@@ -107,7 +107,7 @@ load_error = "Error: {cause}"
 
 # the presets
 entries_title = "Preajustes"
-entries_empty = "Aún no hay preajustes: pega enlaces más abajo."
+entries_empty = "Aún no hay preajustes: usa el botón Añadir para pegar enlaces."
 col_num = "N.º"
 col_title = "Título"
 reorder_hint = "Arrastra para reordenar"
@@ -123,15 +123,15 @@ btn_download = "Descargar…"
 no_writable_share = "No hay ningún recurso de red con escritura: declara uno en el complemento Archivos."
 
 # adding links
-add_title = "Añadir enlaces"
+btn_add_links = "Añadir"
+dlg_add_title = "Añadir enlaces"
+btn_add_submit = "Añadir"
+line_waiting = "en espera"
+line_probing = "leyendo…"
+keep_video = "Conservar el vídeo"
+keep_playlist = "Conservar la lista"
+dismiss_line = "Quitar esta línea"
 add_placeholder = "Un enlace por línea (YouTube, SoundCloud, Bandcamp…)"
-btn_probe = "Leer los enlaces"
-probing = "Leyendo los enlaces…"
-choose_one = "Este enlace designa un vídeo y su lista de reproducción:"
-btn_add_video = "Este vídeo"
-btn_add_playlist = "Toda la lista"
-btn_add = "Añadir"
-already_added = "Añadido"
 
 # the download dialog
 dlg_download_title = "Descargar en un recurso compartido"

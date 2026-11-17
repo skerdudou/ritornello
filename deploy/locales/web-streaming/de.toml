@@ -107,7 +107,7 @@ load_error = "Fehler: {cause}"
 
 # the presets
 entries_title = "Voreinstellungen"
-entries_empty = "Noch keine Voreinstellung: füge unten Links ein."
+entries_empty = "Noch keine Voreinstellung: füge mit der Schaltfläche Hinzufügen Links ein."
 col_num = "Nr."
 col_title = "Titel"
 reorder_hint = "Zum Umsortieren ziehen"
@@ -123,15 +123,15 @@ btn_download = "Herunterladen…"
 no_writable_share = "Keine beschreibbare Netzwerkfreigabe verfügbar: richte im Plugin Dateien eine ein."
 
 # adding links
-add_title = "Links hinzufügen"
+btn_add_links = "Hinzufügen"
+dlg_add_title = "Links hinzufügen"
+btn_add_submit = "Hinzufügen"
+line_waiting = "wartet"
+line_probing = "wird gelesen…"
+keep_video = "Video behalten"
+keep_playlist = "Wiedergabeliste behalten"
+dismiss_line = "Diese Zeile entfernen"
 add_placeholder = "Ein Link pro Zeile (YouTube, SoundCloud, Bandcamp…)"
-btn_probe = "Links lesen"
-probing = "Links werden gelesen…"
-choose_one = "Dieser Link verweist auf ein Video und seine Wiedergabeliste:"
-btn_add_video = "Dieses Video"
-btn_add_playlist = "Die ganze Wiedergabeliste"
-btn_add = "Hinzufügen"
-already_added = "Hinzugefügt"
 
 # the download dialog
 dlg_download_title = "In eine Freigabe herunterladen"

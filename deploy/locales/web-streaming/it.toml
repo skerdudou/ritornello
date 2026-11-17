@@ -107,7 +107,7 @@ load_error = "Errore: {cause}"
 
 # the presets
 entries_title = "Preselezioni"
-entries_empty = "Nessuna preselezione: incolla dei link qui sotto."
+entries_empty = "Nessuna preselezione: usa il pulsante Aggiungi per incollare dei link."
 col_num = "N."
 col_title = "Titolo"
 reorder_hint = "Trascina per riordinare"
@@ -123,15 +123,15 @@ btn_download = "Scarica…"
 no_writable_share = "Nessuna condivisione di rete scrivibile: dichiarane una nel plugin File."
 
 # adding links
-add_title = "Aggiungi link"
+btn_add_links = "Aggiungi"
+dlg_add_title = "Aggiungi link"
+btn_add_submit = "Aggiungi"
+line_waiting = "in attesa"
+line_probing = "lettura…"
+keep_video = "Tieni il video"
+keep_playlist = "Tieni la playlist"
+dismiss_line = "Rimuovi questa riga"
 add_placeholder = "Un link per riga (YouTube, SoundCloud, Bandcamp…)"
-btn_probe = "Leggi i link"
-probing = "Lettura dei link…"
-choose_one = "Questo link indica un video e la sua playlist:"
-btn_add_video = "Questo video"
-btn_add_playlist = "Tutta la playlist"
-btn_add = "Aggiungi"
-already_added = "Aggiunto"
 
 # the download dialog
 dlg_download_title = "Scarica in una condivisione"

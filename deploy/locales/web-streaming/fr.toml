@@ -107,7 +107,7 @@ load_error = "Erreur : {cause}"
 
 # the presets
 entries_title = "Préréglages"
-entries_empty = "Aucun préréglage : collez des liens ci-dessous."
+entries_empty = "Aucun préréglage : utilisez le bouton Ajouter pour coller des liens."
 col_num = "N°"
 col_title = "Titre"
 reorder_hint = "Glisser pour réordonner"
@@ -123,15 +123,15 @@ btn_download = "Télécharger…"
 no_writable_share = "Aucun partage réseau accessible en écriture : déclarez-en un dans le greffon Fichiers."
 
 # adding links
-add_title = "Ajouter des liens"
+btn_add_links = "Ajouter"
+dlg_add_title = "Ajouter des liens"
+btn_add_submit = "Ajouter"
+line_waiting = "en attente"
+line_probing = "analyse en cours…"
+keep_video = "Garder la vidéo"
+keep_playlist = "Garder la playlist"
+dismiss_line = "Retirer cette ligne"
 add_placeholder = "Un lien par ligne (YouTube, SoundCloud, Bandcamp…)"
-btn_probe = "Lire les liens"
-probing = "Lecture des liens…"
-choose_one = "Ce lien désigne une vidéo et sa liste de lecture :"
-btn_add_video = "Cette vidéo"
-btn_add_playlist = "Toute la liste"
-btn_add = "Ajouter"
-already_added = "Ajouté"
 
 # the download dialog
 dlg_download_title = "Télécharger vers un partage"

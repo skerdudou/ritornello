@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { Button, Input, ReorderHandle, ReorderList } from '@ritornello/ui'
-import { ref } from 'vue'
-import { videoCount, type Entry, type ProbeLine, type T } from './data'
+import { ref, watch } from 'vue'
+import { faultText, videoCount, type Entry, type ProbeLine, type T } from './data'
 
-defineProps<{
+const props = defineProps<{
   t: T
   /** The server's table, sorted by number. */
   entries: Entry[]
-  /** The links being worked through (drawn in the list by a later step). */
+  /** The links being worked through, drawn after the presets. */
   lines: ProbeLine[]
   /** Addresses of the presets ticked for download. */
   selected: Set<string>
@@ -40,6 +40,23 @@ const emit = defineEmits<{
 const focused = ref<string | null>(null)
 const draft = ref('')
 
+// A title just sent stays on screen until the page's re-read has landed (the
+// table is replaced then, whatever the answer): without it the old title
+// flashes back between Enter and the read. A refused rename shows the saved
+// title again, because the re-read brings it back.
+const sent = ref<{ url: string; title: string } | null>(null)
+watch(
+  () => props.entries,
+  () => {
+    sent.value = null
+  },
+)
+
+function shown(e: Entry): string {
+  if (focused.value === e.url) return draft.value
+  return sent.value?.url === e.url ? sent.value.title : e.title
+}
+
 function onFocus(e: Entry): void {
   focused.value = e.url
   draft.value = e.title
@@ -56,7 +73,10 @@ function commit(e: Entry): void {
   if (focused.value !== e.url) return
   focused.value = null
   const title = draft.value.trim()
-  if (title && title !== e.title) emit('rename', e.preset, e.url, title)
+  if (title && title !== e.title) {
+    sent.value = { url: e.url, title }
+    emit('rename', e.preset, e.url, title)
+  }
 }
 
 /** Escape: the saved title is back, and the field is left. */
@@ -65,7 +85,10 @@ function revert(ev: Event): void {
   ;(ev.target as HTMLElement).blur()
 }
 
-function onEnter(e: Entry, ev: Event): void {
+function onEnter(e: Entry, ev: KeyboardEvent): void {
+  // The Enter that validates an IME composition is not the operator's Enter.
+  if (ev.isComposing) return
+  ev.preventDefault()
   commit(e)
   ;(ev.target as HTMLElement).blur()
 }
@@ -73,7 +96,7 @@ function onEnter(e: Entry, ev: Event): void {
 
 <template>
   <div class="space-y-3">
-    <p v-if="!entries.length" class="text-sm text-muted-foreground" data-entries-empty>
+    <p v-if="!entries.length && !lines.length" class="text-sm text-muted-foreground" data-entries-empty>
       {{ t('entries_empty') }}
     </p>
     <table v-else class="w-full text-sm max-md:block">
@@ -114,13 +137,13 @@ function onEnter(e: Entry, ev: Event): void {
           </td>
           <td class="py-1 pr-2 max-md:order-3 max-md:basis-full max-md:p-0">
             <Input
-              :model-value="focused === r.url ? draft : r.title"
+              :model-value="shown(r)"
               data-entry-title
               :disabled="frozen"
               @focus="onFocus(r)"
               @update:model-value="onInput(r, $event)"
               @blur="commit(r)"
-              @keydown.enter.prevent="onEnter(r, $event)"
+              @keydown.enter="onEnter(r, $event)"
               @keydown.esc.prevent="revert($event)"
             />
             <!-- textContent only: titles, channels and sites come from remote data. -->
@@ -165,6 +188,59 @@ function onEnter(e: Entry, ev: Event): void {
           </td>
         </tr>
       </ReorderList>
+      <!-- The links being worked through: no number, no checkbox. Everything
+           that comes from a link or from the tool is text only. -->
+      <tbody v-if="lines.length" class="max-md:block" data-lines>
+        <tr
+          v-for="l in lines"
+          :key="l.id"
+          class="border-t border-border max-md:flex max-md:flex-wrap max-md:items-center max-md:gap-2 max-md:py-2"
+          data-probe-line
+          :data-line-state="l.state"
+        >
+          <td colspan="3" class="py-2 pl-1 pr-2 max-md:flex-1 max-md:p-0">
+            <p v-if="l.state === 'error'" class="text-destructive" data-probe-error>
+              <span class="break-all">{{ l.line }}</span> — {{ faultText(t, l) }}
+            </p>
+            <template v-else>
+              <p class="break-all text-muted-foreground" data-line-text>{{ l.line }}</p>
+              <p v-if="l.state === 'pending'" class="text-xs text-muted-foreground" data-line-waiting>
+                {{ t('line_waiting') }}
+              </p>
+              <p v-else-if="l.state === 'probing'" class="text-xs text-muted-foreground" role="status" data-line-probing>
+                <span class="inline-block animate-spin" aria-hidden="true">↻</span>
+                {{ t('line_probing') }}
+              </p>
+              <div v-else-if="l.state === 'found'" class="mt-1 space-y-1">
+                <div v-for="c in l.choices" :key="c.url" class="flex flex-wrap items-center gap-2">
+                  <span class="min-w-0 flex-1 wrap-anywhere">{{ c.title }}</span>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    :data-add-choice="c.kind"
+                    :disabled="frozen || c.present"
+                    @click="emit('choose', l.id, c.url)"
+                  >
+                    {{ c.present ? t('fault_already_present') : c.kind === 'playlist' ? t('keep_playlist') : t('keep_video') }}
+                  </Button>
+                </div>
+              </div>
+            </template>
+          </td>
+          <td class="whitespace-nowrap text-right max-md:order-1">
+            <Button
+              variant="ghost"
+              size="icon"
+              data-line-dismiss
+              :aria-label="t('dismiss_line')"
+              :disabled="frozen"
+              @click="emit('dismiss', l.id)"
+            >
+              ✕
+            </Button>
+          </td>
+        </tr>
+      </tbody>
     </table>
 
     <div class="flex flex-wrap items-center gap-2">
