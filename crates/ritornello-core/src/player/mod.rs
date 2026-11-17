@@ -39,6 +39,22 @@ pub enum ChimeRoute {
     Silent,
 }
 
+/// How much of a paused seekable file must remain after the chime for it to
+/// play (`ChimeRoute::Paused`). Measured by the paused spike on mpv 0.37,
+/// paused 0.2 s before the end: the unpause reaches the end within 6 ms,
+/// `end-file` then idle reach the core (which advances to the next track),
+/// and not one sample of the chime comes out (`amix duration=first` ends
+/// with the music). `keep-open` saves no chime either.
+pub const PAUSED_CHIME_END_MARGIN_S: f64 = 1.0;
+
+/// Whether a chime of `chime` played from `position` of a paused seekable
+/// file ends before the file does, by `PAUSED_CHIME_END_MARGIN_S`. No
+/// `duration` known: no guard. The one rule for the route's first chime
+/// (`MpvPlayer::chime_route`) and the core's second (`core::lock_sound`).
+pub fn paused_chime_fits(position: f64, duration: Option<f64>, chime: std::time::Duration) -> bool {
+    duration.is_none_or(|d| d - position >= chime.as_secs_f64() + PAUSED_CHIME_END_MARGIN_S)
+}
+
 #[async_trait::async_trait]
 pub trait Player: Send + Sync + 'static {
     async fn play(&self, uri: &str) -> Result<()>;

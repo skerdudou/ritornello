@@ -133,12 +133,19 @@ impl<P: Player> Core<P> {
             // mpv rebuilds the chain from `af` for every file, dropping the
             // gains `af-command` set: rewrite it now, while it costs no click.
             //
-            // A paused chime is dropped, never ended: mpv's gate let the new
-            // file through and ended the chime on its side, and ending it
-            // here would pause the new file. The rewrite below puts the plain
-            // chain back, since `af` still holds the chime's.
+            // A paused chime still sounding here was not ended by the core:
+            // every load the core sends ends it first. So mpv went on to the
+            // next entry by itself, unpaused for the chime (a file whose end
+            // the near-end guard could not see: no `duration`, or the core
+            // loop late on the deadline), and the next file plays at full
+            // gain under a display that says paused. It is ended without
+            // putting anything back (`finish_paused_chime_in_place`): mpv
+            // paused again — the new file waits, as the user left it — and
+            // the plain chain written; the gate, reset by that `start-file`,
+            // has nothing pending since no restore seek is sent. Then the
+            // usual rewrite, should the setting differ from that chain.
             Event::FileStarting => {
-                self.lock_sound_paused = None;
+                self.finish_paused_chime_in_place().await;
                 self.reapply_equalizer().await
             }
             // The chain takes `af-command` from here on (not from the file
@@ -148,7 +155,9 @@ impl<P: Player> Core<P> {
                 // A paused chime that mpv's idle cut short, no file start in
                 // between: ended all the same, so that the plain chain is
                 // what the next load finds and nothing of it stays pending.
-                self.finish_paused_chime().await;
+                // Nothing to put back on an idle mpv: no seek, and no wait
+                // for a chain rebuild that never comes.
+                self.finish_paused_chime_in_place().await;
                 // First, before any early return: whatever follows, nothing
                 // is loaded any more.
                 self.equalizer_idle();

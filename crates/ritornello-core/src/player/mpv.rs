@@ -879,7 +879,13 @@ impl MpvPlayer {
         }
         let position = number_or_none(self.ipc.command(&self.get("time-pos")).await);
         let duration = number_or_none(self.ipc.command(&self.get("duration")).await);
-        let seekable = self.ipc.command(&self.get("seekable")).await.ok() == Some(json!(true));
+        // Only an explicit `false` says "a stream": an unavailable `seekable`
+        // (an error) or anything but a boolean says nothing, and taking a
+        // file for a stream would leave it unrestored and unguarded against
+        // its end. No chime then.
+        let Ok(Value::Bool(seekable)) = self.ipc.command(&self.get("seekable")).await else {
+            return Ok(ChimeRoute::Silent);
+        };
         if !seekable {
             // A stream's `duration` is its cache end (measured): no guard.
             return Ok(ChimeRoute::Paused { sample_rate, channels, resume_at: None });
@@ -892,20 +898,12 @@ impl MpvPlayer {
             // Nowhere to put the file back: the chime would move it.
             return Ok(ChimeRoute::Silent);
         };
-        if duration.is_some_and(|d| d - position < chime.as_secs_f64() + PAUSED_CHIME_END_MARGIN_S) {
+        if !super::paused_chime_fits(position, duration, chime) {
             return Ok(ChimeRoute::Silent);
         }
         Ok(ChimeRoute::Paused { sample_rate, channels, resume_at: Some(position) })
     }
 }
-
-/// How much of a paused seekable file must remain after the chime for it to
-/// play (`ChimeRoute::Paused`). Measured by the paused spike on mpv 0.37,
-/// paused 0.2 s before the end: the unpause reaches the end within 6 ms,
-/// `end-file` then idle reach the core (which advances to the next track),
-/// and not one sample of the chime comes out (`amix duration=first` ends
-/// with the music). `keep-open` saves no chime either.
-const PAUSED_CHIME_END_MARGIN_S: f64 = 1.0;
 
 /// How long the end of a paused chime waits for the `audio-reconfig` of its
 /// chain rewrite before the restore seek. Measured by the paused spike on
@@ -1296,10 +1294,11 @@ impl super::Player for MpvPlayer {
     /// **Paused** (`pause` true, audio parameters known), three more
     /// questions: `time-pos`, `duration`, `seekable`. A seekable file is put
     /// back at `time-pos` after the chime, and is `Silent` when it ends
-    /// sooner than the chime plus `PAUSED_CHIME_END_MARGIN_S` (or has no
+    /// sooner than the chime plus `super::PAUSED_CHIME_END_MARGIN_S` (or has no
     /// position to go back to); a stream that is not seekable has no
     /// `resume_at` and no guard, its `duration` being the end of its cache
-    /// (measured, mpv 0.37).
+    /// (measured, mpv 0.37). Only an explicit `seekable: false` makes a
+    /// stream: an unavailable or non-boolean answer is `Silent`.
     ///
     /// **A paused chime sounding is `Silent`, without a question**: mpv,
     /// unpaused for it, would answer `Live`, and a chime mixed over the
@@ -2870,9 +2869,13 @@ pub(crate) mod tests {
         // `duration`, the cache end, never silences it (spike: 1.386667).
         let (route, _) = route_with(paused_answers(json!(1.2), json!(1.386667), json!(false))).await;
         assert_eq!(route.unwrap(), paused(None));
-        // `seekable` unavailable reads as not seekable.
+        // `seekable` unavailable, or not a boolean, says nothing: a file may
+        // be taken for a stream there, not put back and not guarded against
+        // its end. Silent.
         let (route, _) = route_with(paused_answers(json!(1.2), json!(150.0), Value::Null)).await;
-        assert_eq!(route.unwrap(), paused(None));
+        assert_eq!(route.unwrap(), ChimeRoute::Silent, "seekable unavailable");
+        let (route, _) = route_with(paused_answers(json!(1.2), json!(150.0), json!("yes"))).await;
+        assert_eq!(route.unwrap(), ChimeRoute::Silent, "seekable not a boolean");
 
         // The near-end guard: 0.74 s + 1 s must remain.
         let (route, _) = route_with(paused_answers(json!(148.0), json!(149.73), json!(true))).await;
@@ -3034,6 +3037,23 @@ pub(crate) mod tests {
         gate.end_paused_chime(true);
         assert!(gate.admit(&start));
         assert!(gate.admit(&json!({"event":"playback-restart"})));
+    }
+
+    /// mpv went on to the next file by itself during a paused chime: the
+    /// core ends the chime in place after that `start-file` (paused again,
+    /// plain chain, no seek). Nothing is left pending: the new file's
+    /// `playback-restart` and its progress are mpv's, and so are those of
+    /// the user's next resume.
+    #[test]
+    fn a_paused_chime_ended_after_mpvs_own_file_start_leaves_nothing_pending() {
+        let mut gate = AsideGate::default();
+        gate.begin_paused_chime(Progress { position_s: Some(148.5), duration_s: None });
+        assert!(gate.admit(&json!({"event":"start-file","playlist_entry_id":2})));
+        gate.end_paused_chime(false);
+        assert!(!gate.in_paused_chime());
+        assert_eq!(gate.frozen(), None);
+        assert!(gate.admit(&json!({"event":"playback-restart"})), "the new file's own");
+        assert!(gate.admit(&json!({"event":"playback-restart"})), "the user's resume");
     }
 
     /// A second chime keeps the first one's frozen progress: the file was

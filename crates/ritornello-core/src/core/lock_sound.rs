@@ -39,9 +39,14 @@
 //! of the core's own that moves the transport or rewrites the whole chain
 //! (`toggle_pause` for an alarm, the sleep timer's standby, a source's
 //! action, a source switch, an equalizer toggle, an output change); and
-//! when mpv goes idle. Only a file start drops it without an end: mpv's
-//! gate already let the new file through, and ending the chime would pause
-//! that file; the file start writes the plain chain (`reapply_equalizer`).
+//! when mpv goes idle, or a file starts. Those two end it in place
+//! (`finish_paused_chime_in_place`): nothing to put back on an idle mpv, and
+//! a file start the core did not send (it ends the chime before each load)
+//! is mpv going on to the next entry, unpaused for the chime — paused again,
+//! the new file waits as the user left the old one, and no seek moves it.
+//! A second chime is checked against the end of the file for its own
+//! length (`player::paused_chime_fits`, with the duration frozen at the
+//! pause), and not played when it would reach it.
 //!
 //! **A second lock change during a paused chime** is played from the
 //! core's record, not from `chime_route`, which answers `Silent` then (mpv
@@ -105,6 +110,20 @@ impl<P: Player> Core<P> {
         if let Some(chime) = &self.lock_sound_paused {
             let (plain, resume_at) = (chime.plain.clone(), chime.resume_at);
             let (sample_rate, channels) = (chime.sample_rate, chime.channels);
+            // The second chime plays from the first pause point for its own
+            // length: the route's near-end guard, passed for the first one,
+            // is checked again for it (a long preview after a short lock
+            // chime). The duration is the one mpv gave at the pause:
+            // `progress` stays frozen there while a chime sounds, without a
+            // question to mpv. Too close to the end: the first chime goes on
+            // alone — losing a chime, never advancing the file.
+            if let Some(at) = resume_at {
+                let duration = self.player.progress().await.ok().and_then(|p| p.duration_s);
+                if !crate::player::paused_chime_fits(at, duration, crate::lock_sound::duration(sound, motif)) {
+                    tracing::debug!("lock sound: a second chime would reach the end of the paused file, not played");
+                    return;
+                }
+            }
             self.sound_while_paused(plain, sound, motif, sample_rate, channels, resume_at).await;
             return;
         }
@@ -184,10 +203,25 @@ impl<P: Player> Core<P> {
 
     /// Ends a paused chime, if one sounds: mpv paused again, the plain
     /// chain written back, the file put back at the first pause point (see
-    /// the module for every caller). Never at a file start.
+    /// the module for every caller).
     pub(super) async fn finish_paused_chime(&mut self) {
+        self.end_paused_chime(true).await;
+    }
+
+    /// `finish_paused_chime` where the paused file is gone from under the
+    /// chime — mpv idle, or a new file started by mpv itself: paused again
+    /// and the plain chain back, but nothing put back. There is no point to
+    /// seek to (a seek on an idle mpv is refused, after waiting the whole
+    /// bounded wait for a chain rebuild that never comes; on a new file it
+    /// would move that file).
+    pub(super) async fn finish_paused_chime_in_place(&mut self) {
+        self.end_paused_chime(false).await;
+    }
+
+    async fn end_paused_chime(&mut self, put_back: bool) {
         let Some(chime) = self.lock_sound_paused.take() else { return };
-        match self.player.end_sound_while_paused(&chime.plain, chime.resume_at).await {
+        let resume_at = chime.resume_at.filter(|_| put_back);
+        match self.player.end_sound_while_paused(&chime.plain, resume_at).await {
             // `af` holds the plain chain again, the equalizer's entries as
             // they were: the gains mpv holds live are unchanged.
             Ok(()) => {
@@ -839,28 +873,76 @@ mod tests {
         }
     }
 
-    /// A file start ends the chime for mpv's gate on its own; ending it
-    /// here would pause the new file. The record goes, and the file start
-    /// writes the plain chain, with no seek.
+    /// Every load the core sends ends the chime first, so a file start
+    /// while it sounds is mpv going on to the next entry by itself,
+    /// unpaused for the chime: the next file would play at full gain under
+    /// a display that says paused. The chime is ended in place — mpv
+    /// paused again, the plain chain back, no seek (it would move the new
+    /// file) — and the core stays paused. The plain chain being the
+    /// setting's, the file start writes nothing more.
     #[tokio::test]
-    async fn a_file_start_during_a_paused_chime_drops_it_without_an_end() {
+    async fn a_file_start_during_a_paused_chime_pauses_the_new_file_without_a_seek() {
         let eq = enabled();
-        let (mut core, pc, _sc, _rx, _d) = chiming_while_paused(eq.clone()).await;
+        let (mut core, pc, _sc, rx, _d) = chiming_while_paused(eq.clone()).await;
         core.handle_event(Event::FileStarting).await;
-        assert_eq!(chime_calls(&pc), vec![format!("af {}", af_chain(&eq))]);
+        assert_eq!(chime_calls(&pc), vec![paused_chime_end(&af_chain(&eq), None)]);
         assert!(core.lock_sound_deadline().is_none());
+        assert!(core.playback && core.paused);
+        assert_eq!(rx.borrow().playback, Playback::Paused);
         core.expire_lock_sound().await;
-        assert_eq!(chime_calls(&pc), vec![format!("af {}", af_chain(&eq))], "nothing left to end");
+        assert_eq!(chime_calls(&pc), vec![paused_chime_end(&af_chain(&eq), None)], "nothing left to end");
     }
 
     /// mpv went idle under the chime without a file start: it is ended, so
-    /// that the plain chain is back for whatever loads next.
+    /// that the plain chain is back for whatever loads next — without a
+    /// seek, which an idle mpv refuses after the whole bounded wait for a
+    /// chain rebuild that never comes.
     #[tokio::test]
-    async fn an_idle_mpv_during_a_paused_chime_ends_it() {
+    async fn an_idle_mpv_during_a_paused_chime_ends_it_without_a_seek() {
         let (mut core, pc, _sc, _rx, _d) = chiming_while_paused(EqualizerSettings::default()).await;
         core.handle_event(Event::PlaybackIdle).await;
-        assert_eq!(calls_of(&pc).first(), Some(&paused_chime_end("", Some(AT))), "{:?}", calls_of(&pc));
+        assert_eq!(calls_of(&pc).first(), Some(&paused_chime_end("", None)), "{:?}", calls_of(&pc));
         assert!(core.lock_sound_deadline().is_none());
+    }
+
+    /// A second chime plays from the first pause point for its own length:
+    /// the near-end guard the route applied to the first is applied to it,
+    /// with the duration mpv gave at the pause (`progress`, frozen). Too
+    /// close to the end, the first chime goes on alone.
+    #[tokio::test]
+    async fn a_second_paused_chime_too_long_for_the_end_of_the_file_is_not_played() {
+        let lock = duration(LockSound::A, Motif::Lock).as_secs_f64();
+        let preview = duration(LockSound::A, Motif::Preview).as_secs_f64();
+        // Room for the lock chime (0.74 + 1 s), not for the preview (1.48 + 1 s).
+        let (mut core, pc, _sc, _rx, _d) = chiming_while_paused(EqualizerSettings::default()).await;
+        core.set_progress(Some(AT), Some(AT + lock + 1.1));
+        let first = core.lock_sound_deadline().unwrap();
+        core.preview_lock_sound(LockSound::A).await;
+        assert_eq!(chime_calls(&pc), Vec::<String>::new(), "the first chime goes on alone");
+        assert_eq!(core.lock_sound_deadline(), Some(first), "its end unchanged");
+
+        // Just enough room: played.
+        let (mut core, pc, _sc, _rx, _d) = chiming_while_paused(EqualizerSettings::default()).await;
+        core.set_progress(Some(AT), Some(AT + preview + 1.01));
+        core.preview_lock_sound(LockSound::A).await;
+        assert_eq!(chime_calls(&pc), vec![paused_chime("", Motif::Preview, Some(AT))]);
+
+        // No duration known (a file mpv gives none of): no guard, as for the route.
+        let (mut core, pc, _sc, _rx, _d) = chiming_while_paused(EqualizerSettings::default()).await;
+        core.set_progress(Some(AT), None);
+        core.preview_lock_sound(LockSound::A).await;
+        assert_eq!(chime_calls(&pc), vec![paused_chime("", Motif::Preview, Some(AT))]);
+
+        // A stream (`resume_at` None): its duration is its cache end, no guard.
+        let (mut core, pc, _sc, _rx, _d) = paused_with(EqualizerSettings::default()).await;
+        set_route(&core, ChimeRoute::Paused { sample_rate: 48000, channels: 2, resume_at: None });
+        core.set_progress(Some(1.2), Some(1.386667));
+        core.handle_command(Command::SetInputLock(true)).await.unwrap();
+        core.preview_lock_sound(LockSound::A).await;
+        assert_eq!(
+            chime_calls(&pc),
+            vec![paused_chime("", Motif::Lock, None), paused_chime("", Motif::Preview, None)]
+        );
     }
 
     /// A whole-chain write of the equalizer or of an output change would
