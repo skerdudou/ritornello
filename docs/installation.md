@@ -1488,6 +1488,12 @@ That happens after a rollback or a channel switch to such a binary. The
 tolerant load protects the future only: it skips a binding it cannot read
 and keeps the rest.
 
+**The web-streaming page that saves every change at once, and its Add
+dialog, were never run on real hardware.** They were built and tested on a
+development machine only; the links the plugin reads in the background, and
+the choice between a video and a playlist, were never tried against the Pi's
+yt-dlp.
+
 **The equalizer has been measured on WSL only, never on the Pi, never
 listened to.** The prototype ran on a development machine with mpv 0.37 and
 ffmpeg 6.1.1:
