@@ -349,10 +349,8 @@ describes — the packages, the audio, then a first `deploy.sh` that provisions
 `/etc/ritornello`, creates the user and enables the units — and use release
 archives from then on.
 
-The common case — the core and every plugin, from a fresh download. The
-release's own notes carry the same recipe; since the release is published as
-a **draft**, whoever reviews it can fill `<version>` and `<arch>` in before
-publishing, and the template ships them as placeholders:
+The common case — the core and every plugin, from a fresh download (this
+section is the recipe's only home: the release notes do not repeat it):
 
     sha256sum -c SHA256SUMS --ignore-missing
     sudo tar --no-same-owner -C / -xzf ritornello-core-<version>-<arch>.tar.gz

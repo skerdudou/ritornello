@@ -19,75 +19,24 @@ the core to 0.2.0 forgets the alarms: note them first.
 ## What's new since 0.2.0
 
 - **Equalizer** — 10 bands on the Configuration page, for every source; seven presets plus your own; automatic anti-clipping compensation.
-- **Remote lock & chime** — hold a key bound to "Lock (long press)" 2 s, or tap the padlock in the Player card: the remote ignores every other key (no key is bound by default).
+- **Remote lock & chime** — hold a key bound to "Lock (long press)" 2 s, or tap the padlock in the Player card: the remote ignores every other key.
 - The displays show LOCKED / UNLOCKED; a soft chime (five to choose from, or none, with a preview) plays on each change.
+- **MCE remote preset** — Clear is the lock key; red and green toggle random and repeat; Video, Audio and TV pick the cd, files and radio sources.
 - **On a phone** — every page fits a 412 px screen; reorder lists by finger with the ⠿ handle.
 - Presets as a scrolling list or swiped pages; pinch, pan and double tap on the enlarged cover; volume in steps of 5, heard while dragging.
 - **Sleep timer & alarms** — a sleep timer beside the standby key (immediate, fade, end of track), with a typed duration and +15 min.
 - Phone-style alarms on the config page: time, days, source, volume, optional "turn off after"; the console shows the timer and the next alarm.
-- **Web streaming** — keep part of a single video (cut times to the millisecond, needs ffmpeg).
+- **Web streaming** — links are added from a dialog and progress in the list; every change is saved at once (no Save button).
+- Keep part of a single video (cut times to the millisecond, needs ffmpeg).
 - The square album art of an album track; a playlist can take the folder's `cover.jpg` alone.
+- **Files** — a track's embedded cover, tags and lyrics now follow every track change (the new cover was sometimes never shown).
 - **Other** — an **auto** theme that follows the system; the empty Length column of files is gone.
 - The journal names who asked for an update; French, German, Spanish and Italian cover the new texts.
 
 Never tried on the Pi: the equalizer, the remote lock and its chime, the sleep
-timer and alarms, the phone pages on a real phone (see docs/installation.md,
-"What has not been verified").
-
-## Install
-
-Common case — the core and every plugin:
-
-```sh
-sha256sum -c SHA256SUMS --ignore-missing
-sudo tar --no-same-owner -C / -xzf ritornello-core-<version>-<arch>.tar.gz
-sudo tar --no-same-owner -C / -xzf ritornello-plugins-<version>-<arch>.tar.gz
-sudo chown -R ritornello: /etc/ritornello
-sudo systemctl daemon-reload && sudo systemctl restart ritornello
-```
-
-`--no-same-owner` is belt and braces, not a workaround: the archives are
-built with every entry owned by `root`, and the packaging script refuses to
-produce one that is not. But extracting as root restores whatever ownership
-an archive carries, so the flag makes the recipe safe even for an archive
-built before that rule existed — a polkit rules file (JavaScript `polkitd`
-runs as root) owned by a non-root uid is a local privilege escalation.
-
-Each archive holds the tree as it will exist on the device, and holds no
-configuration you may have edited: `stations.toml`, `input-bindings.toml` and
-`plugins.toml` are never in it. Example files and the `plugins.toml` block of
-each plugin travel beside the tree, to be copied by hand.
-
-Replacing a single plugin is the same two commands with that plugin's archive.
-
-The `files` plugin needs its companion, `ritornello-files-mount`, which
-carries the root mount helper, its unit and its polkit rule: the plugin's own
-archive does not. After installing `ritornello-plugin-files` together with
-`ritornello-files-mount` (or the bundle, which carries both) for the first
-time:
-
-```sh
-sudo systemctl enable ritornello-media-mount.service
-```
-
-Enabled, **not** started: what it is enabled for is machine boot, where it
-reconciles the declared network shares. Skip it and declared shares silently
-stop being mounted after a reboot.
-
-A language pack (`ritornello-lang-<language>-<version>.tar.gz`) is not part
-of the recipe above, and not part of any component's archive either. It is
-**flat** — `pack.toml` plus one file per plugin it covers, no leading
-path — so the `tar -C /` above must never be run against it: doing so drops
-those files straight into `/`. Install one from the config page, where the
-core fetches, verifies and writes it itself with no privileged step at all;
-or, by hand, extract it into its own directory:
-
-```sh
-sudo mkdir -p /etc/ritornello/language-packs/ritornello-lang-<language>
-sudo tar --no-same-owner -C /etc/ritornello/language-packs/ritornello-lang-<language> \
-  -xzf ritornello-lang-<language>-<version>.tar.gz
-sudo chown -R ritornello: /etc/ritornello/language-packs/ritornello-lang-<language>
-```
+timer and alarms, the phone pages on a real phone, the web streaming add
+dialog, the embedded-cover fix (see docs/installation.md, "What has not been
+verified").
 
 ## What this release carries
 
