@@ -2304,8 +2304,15 @@ radio paused long enough for its server to drop the connection, woken by a
 paused chime, may reach the end of what it holds: mpv would then go idle and
 the core's stream retry would restart the radio by itself. Not measured; the
 ~1.4 s the chime consumes is likely covered by the read-ahead. Each
-step of a paused chime is synchronous on the core loop (worst case about 25 s,
-or 16 s, under the IPC timeouts), not measured on the Pi. A chime mixed into
+step of a paused chime runs on the core loop within a total budget of its
+own (the route's questions 1 s, the start 1.5 s, the end 1.5 s), so an mpv
+that stops answering holds the loop at most about 4 s on a lock press; an
+end that gave up has still written its pause, chain and seek for an mpv
+that answers late, and the resume rewrites the chain before the music can
+be heard. Tested against a scripted socket that stops answering, on the dev
+machine; the budgets were never spent against a real mpv, and how long the
+Pi's mpv takes to answer these commands under load is not measured. A chime
+mixed into
 playback is built on the filter chain mpv actually holds (rebuilding the
 equalizer entries after a live band change clicked 20/20).
 A second chime during an idle one replaces it
