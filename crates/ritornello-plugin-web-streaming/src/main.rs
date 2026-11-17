@@ -38,7 +38,7 @@ async fn main() -> Result<()> {
         limits: Limits { ffmpeg, ..Limits::default() },
     };
     let resolver = jobs::resolver_for(files_roots_path(&data), Duration::from_secs(10));
-    let jobs = Jobs::start(&data, entries.clone(), ctx, resolver);
+    let jobs = Jobs::start(&data, ctx, resolver);
     // yt-dlp: installed at once when absent, then checked daily, in the
     // background.
     let tool = Tool::new(&data, jobs.tool_gate())?;

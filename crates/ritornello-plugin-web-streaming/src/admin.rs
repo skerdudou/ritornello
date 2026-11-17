@@ -36,7 +36,7 @@ use store::Store;
 use ritornello_plugin_web_streaming::reason;
 use ritornello_files_mount::mounts::read_proc_mounts;
 use ritornello_plugin_sdk::AdminPlugin;
-use ritornello_plugin_web_streaming::entries::Entries;
+use ritornello_plugin_web_streaming::entries::{Entries, Entry};
 use ritornello_plugin_web_streaming::download::{CoverMode, Format, Trim, default_name};
 use ritornello_plugin_web_streaming::jobs::{JobOptions, Jobs};
 use ritornello_plugin_web_streaming::settings::Channel;
@@ -66,6 +66,13 @@ const LAST_TARGET: &str = "last_target";
 const LAST_FORMAT: &str = "last_format";
 const LAST_COVER: &str = "last_cover";
 
+/// A preset as the page drew it: its number and its address.
+#[derive(Debug, Deserialize)]
+struct Pick {
+    preset: u8,
+    url: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum Op {
@@ -88,8 +95,10 @@ enum Op {
     ListTargets,
     ListDirs { target: Target },
     CreateDir { target: Target, name: String },
+    /// Downloads the presets `items` name by number and address (`stale`
+    /// when the table moved since the page drew them).
     Download {
-        presets: Vec<u8>,
+        items: Vec<Pick>,
         target: Target,
         #[serde(default)]
         format: Format,
@@ -255,14 +264,23 @@ impl WebStreamingAdmin {
         targets.contains(&target.root).then_some(target)
     }
 
-    fn download(&self, presets: Vec<u8>, target: Target, mut options: JobOptions, playlists: &[u8]) -> Result<(), Text> {
-        if presets.is_empty() {
+    /// `table` is the presets as read once: the picks are judged against it
+    /// and the job keeps the picked rows from it.
+    fn download(&self, items: Vec<Pick>, target: Target, mut options: JobOptions, table: &[Entry]) -> Result<(), Text> {
+        if items.is_empty() {
             return Err(keyed("nothing_selected"));
         }
         let mut seen = std::collections::HashSet::new();
-        if let Some(twice) = presets.iter().find(|p| !seen.insert(**p)) {
-            return Err(keyed_with("duplicate_preset", "preset", twice));
+        if let Some(twice) = items.iter().find(|p| !seen.insert(p.preset)) {
+            return Err(keyed_with("duplicate_preset", "preset", twice.preset));
         }
+        let mut picked = Vec::with_capacity(items.len());
+        for item in &items {
+            let row = table.iter().find(|e| e.preset == item.preset && e.url == item.url).ok_or_else(|| keyed("stale"))?;
+            picked.push(row.clone());
+        }
+        let presets: Vec<u8> = picked.iter().map(|e| e.preset).collect();
+        let playlists: Vec<u8> = table.iter().filter(|e| e.kind == Kind::Playlist).map(|e| e.preset).collect();
         // mp3 is only ever a conversion by ffmpeg: not offered without it,
         // and refused here whatever the page sent. (m4a goes through: the
         // site's own m4a needs no ffmpeg, and the row says when the original
@@ -285,7 +303,7 @@ impl WebStreamingAdmin {
             return Err(keyed("trim_needs_ffmpeg"));
         }
         let (format, cover) = (options.format, options.cover);
-        self.jobs.enqueue_with(presets, target.clone(), options);
+        self.jobs.enqueue_with(picked, target.clone(), options);
         // Remembered for the next time; the write is off this thread.
         let tool = self.tool.clone();
         tokio::task::spawn_blocking(move || {
@@ -326,6 +344,10 @@ fn jobs_for_page(jobs: &[ritornello_plugin_web_streaming::jobs::Job]) -> serde_j
         }
     };
     for job in value.as_array_mut().into_iter().flatten() {
+        // The snapshot is the job's own, not the page's.
+        if let Some(fields) = job.as_object_mut() {
+            fields.remove("entries");
+        }
         code_the_detail(job);
         for row in job["rows"].as_array_mut().into_iter().flatten() {
             code_the_detail(row);
@@ -469,15 +491,13 @@ impl AdminPlugin for WebStreamingAdmin {
                 explore::create_dir(&self.shared, &self.env, target, name);
                 Ok(())
             }
-            Op::Download { presets, target, format, cover, names, trims } => {
+            Op::Download { items, target, format, cover, names, trims } => {
                 let names = by_preset(names)?;
                 let trims = by_preset(trims)?;
-                // What each preset is, as saved: a cut is a single video's.
-                let playlists: Vec<u8> = {
-                    let entries = self.entries.read().await;
-                    entries.entry.iter().filter(|e| e.kind == Kind::Playlist).map(|e| e.preset).collect()
-                };
-                self.download(presets, target, JobOptions { format, cover, names, trims }, &playlists)
+                // The table read once: the picks are judged against it, the
+                // job keeps its rows, and a cut is a single video's by its kinds.
+                let table = self.entries.read().await.entry.clone();
+                self.download(items, target, JobOptions { format, cover, names, trims }, &table)
             }
             Op::Cancel { job } => {
                 // A job that ended a moment ago is not an error.

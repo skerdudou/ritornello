@@ -131,7 +131,6 @@ async fn world_searching(tool_body: &str, targets_max_age: Duration, arch: &str,
     };
     let jobs = Jobs::start(
         &data,
-        entries.clone(),
         ctx,
         Arc::new(move |_| {
             let r = resolved.clone();
@@ -196,6 +195,11 @@ fn entry(preset: u8, url: &str, kind: Kind) -> Entry {
     Entry { preset, url: url.into(), kind, title: format!("t{preset}"), channel: None, count: None, site: None, identity: None }
 }
 
+/// A preset as the page names it in a request: its number and its address.
+fn pick(preset: u8, url: &str) -> Value {
+    json!({ "preset": preset, "url": url })
+}
+
 fn key_of(r: Result<(), Text>) -> String {
     match r {
         Err(Text::Keyed { key, .. }) => {
@@ -219,7 +223,7 @@ async fn no_admin_op_waits_for_yt_dlp() {
     let target = json!({ "root": "nas", "path": "" });
 
     quickly("probe", w.op(json!({ "op": "probe", "text": VIDEO }))).await.unwrap();
-    quickly("download", w.op(json!({ "op": "download", "presets": [1], "target": target }))).await.unwrap();
+    quickly("download", w.op(json!({ "op": "download", "items": [pick(1, VIDEO)], "target": target }))).await.unwrap();
     quickly("update_tool", w.op(json!({ "op": "update_tool", "force": true }))).await.unwrap();
     quickly("set_channel", w.op(json!({ "op": "set_channel", "channel": "nightly" }))).await.unwrap();
     quickly("reprobe", w.op(json!({ "op": "reprobe" }))).await.unwrap();
@@ -786,7 +790,7 @@ async fn the_last_target_is_remembered_and_dropped_when_gone() {
     w.until("targets", |d| d["targets"] == json!(["nas"])).await;
     w.entries.write().await.entry = vec![entry(1, VIDEO, Kind::Video)];
 
-    w.op(json!({ "op": "download", "presets": [1], "target": { "root": "nas", "path": "rock/live" } }))
+    w.op(json!({ "op": "download", "items": [pick(1, VIDEO)], "target": { "root": "nas", "path": "rock/live" } }))
         .await
         .unwrap();
     let d = w.until("remembered", |d| d["last_target"] != Value::Null).await;
@@ -811,12 +815,12 @@ async fn the_last_target_is_remembered_and_dropped_when_gone() {
 async fn a_download_is_queued_and_shows_in_the_jobs() {
     let mut w = world(&answering()).await;
     w.entries.write().await.entry = vec![entry(1, VIDEO, Kind::Video)];
-    w.op(json!({ "op": "download", "presets": [1], "target": { "root": "nas", "path": "" } })).await.unwrap();
+    w.op(json!({ "op": "download", "items": [pick(1, VIDEO)], "target": { "root": "nas", "path": "" } })).await.unwrap();
     let d = w.until("a job", |d| !d["jobs"].as_array().unwrap().is_empty()).await;
     assert_eq!(d["jobs"][0]["presets"], json!([1]));
-    assert_eq!(key_of(w.op(json!({ "op": "download", "presets": [], "target": { "root": "nas", "path": "" } })).await), "nothing_selected");
+    assert_eq!(key_of(w.op(json!({ "op": "download", "items": [], "target": { "root": "nas", "path": "" } })).await), "nothing_selected");
     assert_eq!(
-        key_of(w.op(json!({ "op": "download", "presets": [1, 1], "target": { "root": "nas", "path": "" } })).await),
+        key_of(w.op(json!({ "op": "download", "items": [pick(1, VIDEO), pick(1, VIDEO)], "target": { "root": "nas", "path": "" } })).await),
         "duplicate_preset"
     );
 }
@@ -832,6 +836,7 @@ fn a_reason_the_plugin_wrote_is_a_code_and_an_outside_voice_stays_raw() {
     let job = Job {
         id: 1,
         presets: vec![1],
+        entries: Vec::new(),
         target,
         state: JobState::Failed(TargetError::NotMounted.to_string()),
         rows: vec![
@@ -921,10 +926,10 @@ async fn mp3_is_refused_without_ffmpeg_whatever_the_page_sent() {
     w.until("probed", |d| d["capabilities"]["ffmpeg_hint"] != Value::Null).await;
     w.entries.write().await.entry = vec![entry(1, VIDEO, Kind::Video)];
     let target = json!({ "root": "nas", "path": "" });
-    assert_eq!(key_of(w.op(json!({ "op": "download", "presets": [1], "target": target, "format": "mp3" })).await), "ffmpeg_missing");
+    assert_eq!(key_of(w.op(json!({ "op": "download", "items": [pick(1, VIDEO)], "target": target, "format": "mp3" })).await), "ffmpeg_missing");
     assert!(w.admin.get_data().await["jobs"].as_array().unwrap().is_empty(), "nothing was queued");
     // m4a goes through: the site's own m4a needs no ffmpeg.
-    w.op(json!({ "op": "download", "presets": [1], "target": target, "format": "m4a" })).await.unwrap();
+    w.op(json!({ "op": "download", "items": [pick(1, VIDEO)], "target": target, "format": "m4a" })).await.unwrap();
 }
 
 #[tokio::test]
@@ -939,7 +944,7 @@ async fn mp3_is_taken_once_ffmpeg_is_found() {
     assert_eq!(d["capabilities"]["ffmpeg"], "7.1.1-1+b1");
     assert_eq!(d["capabilities"]["ffmpeg_hint"], Value::Null);
     w.entries.write().await.entry = vec![entry(1, VIDEO, Kind::Video)];
-    w.op(json!({ "op": "download", "presets": [1], "target": { "root": "nas", "path": "" }, "format": "mp3" })).await.unwrap();
+    w.op(json!({ "op": "download", "items": [pick(1, VIDEO)], "target": { "root": "nas", "path": "" }, "format": "mp3" })).await.unwrap();
 }
 
 /// A world whose machine probe found an ffmpeg (a script that only says its
@@ -962,11 +967,11 @@ async fn a_cut_is_refused_without_ffmpeg_and_nothing_is_queued() {
     w.until("probed", |d| d["capabilities"]["ffmpeg_hint"] != Value::Null).await;
     w.entries.write().await.entry = vec![entry(1, VIDEO, Kind::Video)];
     let target = json!({ "root": "nas", "path": "" });
-    let cut = json!({ "op": "download", "presets": [1], "target": target, "trims": { "1": { "start_ms": 10000, "end_ms": 70000 } } });
+    let cut = json!({ "op": "download", "items": [pick(1, VIDEO)], "target": target, "trims": { "1": { "start_ms": 10000, "end_ms": 70000 } } });
     assert_eq!(key_of(w.op(cut).await), "trim_needs_ffmpeg");
     assert!(w.admin.get_data().await["jobs"].as_array().unwrap().is_empty(), "nothing was queued");
     // A "cut" that keeps everything is none, and needs nothing.
-    w.op(json!({ "op": "download", "presets": [1], "target": target, "trims": { "1": { "start_ms": 0 } } })).await.unwrap();
+    w.op(json!({ "op": "download", "items": [pick(1, VIDEO)], "target": target, "trims": { "1": { "start_ms": 0 } } })).await.unwrap();
 }
 
 #[tokio::test]
@@ -974,7 +979,7 @@ async fn a_cut_is_a_single_video_s_and_must_keep_something() {
     let (mut w, _sys) = world_with_ffmpeg("exit 1").await;
     w.entries.write().await.entry = vec![entry(1, VIDEO, Kind::Video), entry(2, LIST, Kind::Playlist)];
     let target = json!({ "root": "nas", "path": "" });
-    let refused = |trims: Value| json!({ "op": "download", "presets": [1, 2], "target": target, "trims": trims });
+    let refused = |trims: Value| json!({ "op": "download", "items": [pick(1, VIDEO), pick(2, LIST)], "target": target, "trims": trims });
     let r = w.op(refused(json!({ "2": { "end_ms": 60000 } }))).await;
     assert_eq!(key_of(r.clone()), "trim_playlist");
     assert_eq!(r.unwrap_err(), keyed_with("trim_playlist", "preset", 2));
@@ -985,12 +990,12 @@ async fn a_cut_is_a_single_video_s_and_must_keep_something() {
     // Kept with the job, a whole "cut" and one of a preset not asked for
     // dropped (the playlist's included: it is not downloaded here).
     w.op(json!({
-        "op": "download", "presets": [1], "target": target,
+        "op": "download", "items": [pick(1, VIDEO)], "target": target,
         "trims": { "1": { "start_ms": 83000, "end_ms": 300000 }, "2": { "end_ms": 5000 } },
     }))
     .await
     .unwrap();
-    w.op(json!({ "op": "download", "presets": [1], "target": target, "trims": { "1": { "start_ms": 0 } } })).await.unwrap();
+    w.op(json!({ "op": "download", "items": [pick(1, VIDEO)], "target": target, "trims": { "1": { "start_ms": 0 } } })).await.unwrap();
     let d = w.until("two jobs", |d| d["jobs"].as_array().unwrap().len() == 2).await;
     assert_eq!(d["jobs"][0]["options"]["trims"], json!({ "1": { "start_ms": 83000, "end_ms": 300000 } }));
     assert_eq!(d["jobs"][1]["options"].get("trims"), None);
@@ -1001,7 +1006,7 @@ async fn a_fractional_cut_is_accepted_and_kept_with_the_job() {
     let (mut w, _sys) = world_with_ffmpeg("exit 1").await;
     w.entries.write().await.entry = vec![entry(1, VIDEO, Kind::Video)];
     let target = json!({ "root": "nas", "path": "" });
-    w.op(json!({ "op": "download", "presets": [1], "target": target, "trims": { "1": { "start_ms": 90250, "end_ms": 300000 } } })).await.unwrap();
+    w.op(json!({ "op": "download", "items": [pick(1, VIDEO)], "target": target, "trims": { "1": { "start_ms": 90250, "end_ms": 300000 } } })).await.unwrap();
     let d = w.until("a job", |d| d["jobs"].as_array().unwrap().len() == 1).await;
     assert_eq!(d["jobs"][0]["options"]["trims"], json!({ "1": { "start_ms": 90250, "end_ms": 300000 } }));
 }
@@ -1013,7 +1018,7 @@ async fn the_choices_go_with_the_job_and_the_format_and_cover_are_remembered() {
     assert_eq!((d["last_format"].clone(), d["last_cover"].clone()), (json!("original"), json!("separate")), "the defaults");
     w.entries.write().await.entry = vec![entry(1, VIDEO, Kind::Video), entry(2, LIST, Kind::Playlist)];
     w.op(json!({
-        "op": "download", "presets": [1, 2], "target": { "root": "nas", "path": "" },
+        "op": "download", "items": [pick(1, VIDEO), pick(2, LIST)], "target": { "root": "nas", "path": "" },
         "format": "m4a", "cover": "embedded", "names": { "1": "Mine", "2": "Theirs" },
     }))
     .await
@@ -1024,7 +1029,7 @@ async fn the_choices_go_with_the_job_and_the_format_and_cover_are_remembered() {
     let settings = std::fs::read_to_string(w.data.join("settings.toml")).unwrap();
     assert!(settings.contains("last_format") && settings.contains("last_cover"), "{settings}");
     // A request of an older page, without any of them: the defaults.
-    w.op(json!({ "op": "download", "presets": [1], "target": { "root": "nas", "path": "" } })).await.unwrap();
+    w.op(json!({ "op": "download", "items": [pick(1, VIDEO)], "target": { "root": "nas", "path": "" } })).await.unwrap();
     let d = w.until("second job", |d| d["jobs"].as_array().unwrap().len() == 2).await;
     assert_eq!(d["jobs"][1]["options"], json!({ "format": "original", "cover": "separate" }));
 }
@@ -1083,4 +1088,41 @@ async fn the_last_failed_playback_is_served_to_the_page() {
     let record = json!({"time": 1730000000.5, "host": "www.youtube.com", "code": "ytdlp_failed", "detail": "ERROR: gone"});
     std::fs::write(w.data.join(ritornello_plugin_web_streaming::playfail::FILE), record.to_string()).unwrap();
     assert_eq!(quickly("get_data", w.admin.get_data()).await["last_failure"], record);
+}
+
+// ---- a download and a table that moves ---------------------------------------
+
+/// A yt-dlp that is slow to probe, so a job is still waiting for it while the
+/// table changes under the page.
+const SLOW_PROBE: &str = "sleep 1; cat '{dir}/video.json'";
+
+#[tokio::test]
+async fn a_download_keeps_what_was_picked_when_the_table_moves() {
+    let slow = SLOW_PROBE.replace("{dir}", &fixtures().display().to_string());
+    let mut w = world(&slow).await;
+    w.entries.write().await.entry = vec![entry(1, VIDEO, Kind::Video)];
+    w.op(json!({ "op": "download", "items": [pick(1, VIDEO)], "target": { "root": "nas", "path": "" } })).await.unwrap();
+    // The preset goes before the job has looked at it.
+    w.op(json!({ "op": "remove", "preset": 1, "url": VIDEO })).await.unwrap();
+    assert!(w.entries.read().await.entry.is_empty());
+    let d = w.until("the job is over", |d| d["jobs"][0]["state"] == "done" || d["jobs"][0]["state"] == "failed").await;
+    let rows = d["jobs"][0]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{d}");
+    assert_eq!(rows[0]["id"], "jNQXAC9IVRw", "the job names the video that was picked, not NO_SUCH_PRESET: {d}");
+    assert!(d["jobs"][0].get("entries").is_none(), "the snapshot is the job's own, not the page's");
+}
+
+#[tokio::test]
+async fn a_download_of_a_moved_preset_is_stale() {
+    let mut w = world(&answering()).await;
+    w.entries.write().await.entry = vec![entry(1, VIDEO, Kind::Video), entry(2, LIST, Kind::Playlist)];
+    let target = json!({ "root": "nas", "path": "" });
+    // The page drew preset 1 as the list: the table moved since.
+    assert_eq!(key_of(w.op(json!({ "op": "download", "items": [pick(1, LIST)], "target": target })).await), "stale");
+    // One stale pick refuses the lot.
+    assert_eq!(
+        key_of(w.op(json!({ "op": "download", "items": [pick(2, LIST), pick(1, LIST)], "target": target })).await),
+        "stale"
+    );
+    assert!(w.admin.get_data().await["jobs"].as_array().unwrap().is_empty(), "no job was queued");
 }
