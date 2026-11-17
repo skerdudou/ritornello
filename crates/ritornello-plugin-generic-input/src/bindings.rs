@@ -140,8 +140,13 @@ impl Bindings {
     /// would empty the table for one unknown key.
     fn from_value(root: &toml::Value, path: &Path) -> Bindings {
         let mut devices = Vec::new();
-        let Some(raw_devices) = root.get("devices").and_then(toml::Value::as_array) else {
-            return Bindings::default();
+        let raw_devices = match root.get("devices") {
+            None => return Bindings::default(),
+            Some(toml::Value::Array(a)) => a,
+            Some(_) => {
+                tracing::warn!("bindings {}: `devices` is not a list, no device is read", path.display());
+                return Bindings::default();
+            }
         };
         for raw in raw_devices {
             let Some(name) = raw.get("name").and_then(toml::Value::as_str) else {
@@ -149,9 +154,18 @@ impl Bindings {
                 continue;
             };
             let mut bindings = Vec::new();
-            let raw_bindings =
-                raw.get("bindings").and_then(toml::Value::as_array).map(Vec::as_slice);
-            for rb in raw_bindings.unwrap_or_default() {
+            let raw_bindings: &[toml::Value] = match raw.get("bindings") {
+                None => &[],
+                Some(toml::Value::Array(a)) => a,
+                Some(_) => {
+                    tracing::warn!(
+                        "bindings {}: `bindings` of {name} is not a list, its bindings are skipped",
+                        path.display()
+                    );
+                    &[]
+                }
+            };
+            for rb in raw_bindings {
                 match rb.clone().try_into::<Binding>() {
                     Ok(b) => bindings.push(b),
                     Err(e) => {
@@ -349,6 +363,27 @@ cmd = "PlayPause"
         )
         .unwrap();
         assert_eq!(Bindings::load(&path), sample());
+    }
+
+    /// A `devices` or a device's `bindings` that is not a list is skipped
+    /// like the other unreadable parts, and says so: silently, the remote
+    /// would just stop answering after a hand edit.
+    #[test]
+    fn a_devices_or_bindings_that_is_not_a_list_is_warned_about() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("input-bindings.toml");
+
+        std::fs::write(&path, "devices = \"eHome\"\n").unwrap();
+        let mut table = None;
+        let logs = crate::devices::tests::warnings_of(|| table = Some(Bindings::load(&path)));
+        assert_eq!(table, Some(Bindings::default()));
+        assert!(logs.contains("`devices` is not a list"), "{logs}");
+
+        std::fs::write(&path, "[[devices]]\nname = \"eHome\"\nbindings = 115\n").unwrap();
+        let mut table = None;
+        let logs = crate::devices::tests::warnings_of(|| table = Some(Bindings::load(&path)));
+        assert_eq!(table, Some(Bindings { devices: vec![Device { name: "eHome".into(), bindings: vec![] }] }));
+        assert!(logs.contains("`bindings` of eHome is not a list"), "{logs}");
     }
 
     #[test]

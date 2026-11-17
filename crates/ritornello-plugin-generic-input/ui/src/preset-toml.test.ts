@@ -23,6 +23,9 @@ describe('ACTIONS', () => {
     // binds the toggle; `SetInputLock` is the web remote's absolute form.
     expect(ACTIONS.find((a) => a.key === 'act_input_lock')?.cmd).toEqual({ cmd: 'ToggleInputLock' })
     expect(ACTIONS.some((a) => a.cmd.cmd === 'SetInputLock')).toBe(false)
+    // `InputLockRefused` is the plugin's own answer to a refused key, never a
+    // key's action: the core only shows LOCKED for it and does nothing else.
+    expect(ACTIONS.some((a) => a.cmd.cmd === 'InputLockRefused')).toBe(false)
   })
 
   it('offers the two seek actions, after transport', () => {

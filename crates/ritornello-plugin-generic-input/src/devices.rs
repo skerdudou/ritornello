@@ -513,7 +513,7 @@ pub fn spawn_periodic_rescan(hub: Hub, root: PathBuf, period: Duration) -> JoinH
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::bindings::{Binding, Device as BindDevice};
 
@@ -950,7 +950,7 @@ mod tests {
     }
 
     /// The `warn` lines `f` emits on this thread, as text.
-    fn warnings_of(f: impl FnOnce()) -> String {
+    pub(crate) fn warnings_of(f: impl FnOnce()) -> String {
         #[derive(Clone, Default)]
         struct Sink(Arc<Mutex<Vec<u8>>>);
         impl std::io::Write for Sink {

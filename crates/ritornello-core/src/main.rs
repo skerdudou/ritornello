@@ -83,8 +83,8 @@ impl core::Source for SourceClient {
 /// The same flag counts the relay in `relays` (`InputLockRelays`), for the
 /// page to know whether the lock has an effect anywhere: joined here, before
 /// the task exists, and given back when the task ends — **before** it reports
-/// on `unreachable`, so the loop's arm that republishes on that report reads
-/// the count without this relay. The caller publishes after the spawn.
+/// on `unreachable`, so the loop's arm that republishes on that report
+/// (`on_plugin_unreachable`) reads the count without this relay. The caller publishes after the spawn.
 ///
 /// `run_input_client` **never** returns `Ok`: it exits with an error both on
 /// EOF and on the core's channel closing. The second case reports into the
@@ -110,6 +110,87 @@ fn spawn_input_relay(
         drop(share);
         let _ = unreachable.send((name, wiring)).await;
     });
+}
+
+/// What the main loop does when a plugin's socket has closed: the body of
+/// its `unreachable_rx` arm, whose comment says what the closing proves.
+///
+/// A function rather than inline code so that a test can drive the arm
+/// itself with the report a real relay sends: the republish below is only
+/// observable on the **published** state, which the live counter the core
+/// reads does not stand in for.
+async fn on_plugin_unreachable<P: player::Player>(
+    name: String,
+    wiring: u64,
+    children: &HotPlugChildren,
+    core: &mut core::Core<P>,
+    wirings: &HashMap<String, u64>,
+    non_supervised: &mut HashSet<String>,
+) {
+    // Whatever the wiring: an input relay that honoured the lock
+    // left `InputLockRelays` before reporting here, stale
+    // incarnation or not, and the page must stop offering a lock
+    // nothing honours any more.
+    core.publish_state();
+    if wirings.get(&name).copied().unwrap_or(0) != wiring {
+        // The socket of a previous incarnation, arriving after
+        // the next one's rewiring. See `wirings`.
+        tracing::debug!(
+            "plugin {name} socket from wiring {wiring} closed after it was rewired"
+        );
+    } else {
+        tracing::info!("plugin {name} is no longer reachable, reporting it disconnected");
+        // **The name leaves `non_supervised`, and that is the
+        // useful half.** It was only there because a living
+        // process escaped the core's supervision; that process
+        // is no longer reachable, so the plugin becomes
+        // manageable again — turning it on from the UI will
+        // launch a real, supervised one, instead of being
+        // refused by `hot_unplug`.
+        //
+        // This is also why this registry gets purged while
+        // `startups` does not: `non_supervised` describes a
+        // **capability** the core has over a process, and that
+        // capability just changed. No status line carries this
+        // information, so nothing could reread it.
+        non_supervised.remove(&name);
+        // **Unwired if it was a Source**, exactly as the
+        // supervised death branch does. Without this line, this
+        // path would be a half-measure, and a half-measure is
+        // worse than nothing here: the page would say
+        // "unreachable" while the core kept the source wired on
+        // a closed socket, hence still offered to the sources
+        // catalog and the remote control. The two death paths
+        // must produce the **same** state, or behavior would
+        // depend on who launched the process.
+        //
+        // `forget_dead_source` and not `remove_source`: the
+        // distinction is written in its doc, and it holds here
+        // for the same reason — nobody requested this shutdown,
+        // so nothing switches to another source. The music
+        // continues, `active_source` keeps its name, and it is
+        // the conjunction "active source X, plugin X
+        // unreachable" that carries the diagnosis.
+        if !core.forget_dead_source(&name) {
+            tracing::debug!("plugin {name} was not a wired source, nothing to unwire");
+        }
+        // A single lock for both writes, like `hot_unplug`: the
+        // "disconnected" line and the active source's name
+        // describe the same instant.
+        let mut statuses = children.status_state.write().await;
+        // Idempotent, and it needs to be: for a *supervised*
+        // plugin, the `plugin_waits` arm will also mark it, in
+        // an order nothing fixes. `mark_plugin_disconnected`
+        // only sets booleans, and `remove` on an absent key is a
+        // non-event — verified, not assumed.
+        crate::status::mark_plugin_disconnected(&mut statuses, &name);
+        statuses.active_source = core.active_source().to_string();
+        // After the status lock, not before: `forget_page` takes
+        // two other locks, and nesting them would make safety
+        // depend on an order never to reverse elsewhere.
+        drop(statuses);
+        admin::forget_page(&children.admin_backends, &children.admin_assets, &children.registry, &name).await;
+    }
 }
 
 /// Relays the state to **one** display, in its own task.
@@ -2818,70 +2899,7 @@ async fn main() -> Result<()> {
             // not strict proof of death, and nothing here infers an exit
             // code from it.
             Some((name, wiring)) = unreachable_rx.recv() => {
-                // Whatever the wiring: an input relay that honoured the lock
-                // left `InputLockRelays` before reporting here, stale
-                // incarnation or not, and the page must stop offering a lock
-                // nothing honours any more.
-                core.publish_state();
-                if wirings.get(&name).copied().unwrap_or(0) != wiring {
-                    // The socket of a previous incarnation, arriving after
-                    // the next one's rewiring. See `wirings`.
-                    tracing::debug!(
-                        "plugin {name} socket from wiring {wiring} closed after it was rewired"
-                    );
-                } else {
-                    tracing::info!("plugin {name} is no longer reachable, reporting it disconnected");
-                    // **The name leaves `non_supervised`, and that is the
-                    // useful half.** It was only there because a living
-                    // process escaped the core's supervision; that process
-                    // is no longer reachable, so the plugin becomes
-                    // manageable again — turning it on from the UI will
-                    // launch a real, supervised one, instead of being
-                    // refused by `hot_unplug`.
-                    //
-                    // This is also why this registry gets purged while
-                    // `startups` does not: `non_supervised` describes a
-                    // **capability** the core has over a process, and that
-                    // capability just changed. No status line carries this
-                    // information, so nothing could reread it.
-                    non_supervised.remove(&name);
-                    // **Unwired if it was a Source**, exactly as the
-                    // supervised death branch does. Without this line, this
-                    // path would be a half-measure, and a half-measure is
-                    // worse than nothing here: the page would say
-                    // "unreachable" while the core kept the source wired on
-                    // a closed socket, hence still offered to the sources
-                    // catalog and the remote control. The two death paths
-                    // must produce the **same** state, or behavior would
-                    // depend on who launched the process.
-                    //
-                    // `forget_dead_source` and not `remove_source`: the
-                    // distinction is written in its doc, and it holds here
-                    // for the same reason — nobody requested this shutdown,
-                    // so nothing switches to another source. The music
-                    // continues, `active_source` keeps its name, and it is
-                    // the conjunction "active source X, plugin X
-                    // unreachable" that carries the diagnosis.
-                    if !core.forget_dead_source(&name) {
-                        tracing::debug!("plugin {name} was not a wired source, nothing to unwire");
-                    }
-                    // A single lock for both writes, like `hot_unplug`: the
-                    // "disconnected" line and the active source's name
-                    // describe the same instant.
-                    let mut statuses = status_state.write().await;
-                    // Idempotent, and it needs to be: for a *supervised*
-                    // plugin, the `plugin_waits` arm will also mark it, in
-                    // an order nothing fixes. `mark_plugin_disconnected`
-                    // only sets booleans, and `remove` on an absent key is a
-                    // non-event — verified, not assumed.
-                    crate::status::mark_plugin_disconnected(&mut statuses, &name);
-                    statuses.active_source = core.active_source().to_string();
-                    // After the status lock, not before: `forget_page` takes
-                    // two other locks, and nesting them would make safety
-                    // depend on an order never to reverse elsewhere.
-                    drop(statuses);
-                    admin::forget_page(&admin_backends, &admin_assets, &registry, &name).await;
-                }
+                on_plugin_unreachable(name, wiring, &hot_children, &mut core, &wirings, &mut non_supervised).await;
             }
             Some((name, update)) = source_update_rx.recv() => {
                 // A frame carrying a play request may have switched the
@@ -5000,23 +5018,40 @@ mod toggle_tests {
     /// while a plugin that honours it is connected, off again once its relay
     /// ended. Without the second half, a disabled generic-input left the page
     /// offering a lock that locked nothing — the reported defect.
+    ///
+    /// The second half is read on the **published** state, the receiver the
+    /// page and the relays read, after the main loop's arm handled the
+    /// relay's own report: `player_state()` reads the live count and would
+    /// stay green with the arm's republish removed, which then left the
+    /// padlock offered until the next unrelated publish.
     #[tokio::test]
     async fn the_lock_is_available_only_while_an_input_that_honours_it_is_connected() {
         let mut b = bench();
         assert!(!b.core.player_state().input_lock_available, "bench precondition: no input yet");
+        let (unreachable_tx, mut unreachable_rx) = mpsc::channel(4);
+        b.children.unreachable_tx = unreachable_tx;
 
         let stream = wire_input(&mut b, true).await;
         assert!(b.children.state_rx.borrow().input_lock_available, "published as soon as the input is wired");
 
-        // The plugin goes away: its relay reads EOF and ends.
+        // The plugin goes away: its relay reads EOF, ends, and reports.
         drop(stream);
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while b.core.player_state().input_lock_available {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("a relay that ended no longer makes the lock available");
+        let (name, wiring) = tokio::time::timeout(std::time::Duration::from_secs(5), unreachable_rx.recv())
+            .await
+            .expect("the relay that ended reports on `unreachable`")
+            .unwrap();
+        assert_eq!((name.as_str(), wiring), ("mpd", 1), "bench precondition: the report names the relay");
+        assert!(
+            b.children.state_rx.borrow().input_lock_available,
+            "bench precondition: nothing but the arm republishes, so the page still reads the lock as available"
+        );
+
+        let wirings = HashMap::from([("mpd".to_string(), 1)]);
+        on_plugin_unreachable(name, wiring, &b.children, &mut b.core, &wirings, &mut b.non_supervised).await;
+        assert!(
+            !b.children.state_rx.borrow().input_lock_available,
+            "once the arm handled the report, the page no longer offers a lock nothing honours"
+        );
     }
 
     /// A plugin that did not announce `input_lock` honours nothing: counting
