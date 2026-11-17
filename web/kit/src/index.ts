@@ -20,10 +20,13 @@ export {
   DEFAULT_MODE,
   DEFAULT_PRESET,
   fontFamilies,
+  MODE_CHOICES,
   presets,
+  resolveMode,
   resolveVars,
   withFallback,
   type Mode,
+  type ModeChoice,
   type Preset,
 } from './themes/engine'
 

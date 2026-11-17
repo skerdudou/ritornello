@@ -8,9 +8,13 @@ use serde::{Deserialize, Serialize};
 
 /// Default preset of the installation. The core only knows its name.
 pub const DEFAULT_THEME: &str = "northern-lights";
-/// Default mode. There is **no** `system` mode: the default is explicit and
-/// persisted, like the locale.
+/// Default mode: explicit, like the locale — `auto` is offered, not imposed on
+/// a device whose owner never touched the key.
 pub const DEFAULT_MODE: &str = "light";
+/// The modes the core stores. `auto` is resolved by each browser against its
+/// own `prefers-color-scheme` (`web/kit/src/themes/engine.ts`, `resolveMode`):
+/// the core never sees a browser, so it carries the word and nothing else.
+pub const MODES: [&str; 3] = ["light", "dark", "auto"];
 
 const MAX_NAME: usize = 64;
 
@@ -70,7 +74,7 @@ impl std::error::Error for ThemeError {}
 /// Pure function, without a catalog: `theme_put` resolves the returned error
 /// against the core's.
 pub fn validate(theme: &str, mode: &str) -> Result<(), ThemeError> {
-    if mode != "light" && mode != "dark" {
+    if !MODES.contains(&mode) {
         return Err(ThemeError::UnknownMode { mode: mode.to_string() });
     }
     if theme.is_empty() || theme.len() > MAX_NAME {
@@ -151,12 +155,22 @@ mod tests {
     }
 
     #[test]
-    fn mode_accepts_only_light_and_dark() {
+    fn mode_accepts_light_dark_and_auto_only() {
         assert!(validate("vercel", "light").is_ok());
         assert!(validate("vercel", "dark").is_ok());
-        // No `system` mode: the default is explicit.
+        assert!(validate("vercel", "auto").is_ok());
+        // The word is `auto`, the one the page sends: CSS's own name for it
+        // is not an alias.
         assert!(validate("vercel", "system").is_err());
+        assert!(validate("vercel", "Auto").is_err());
         assert!(validate("vercel", "").is_err());
+    }
+
+    #[test]
+    fn from_persisted_keeps_auto() {
+        // A device left on `auto` must come back on `auto` after a restart,
+        // not on the default.
+        assert_eq!(from_persisted(Some("cyberpunk"), Some("auto")).mode, "auto");
     }
 
     #[test]
