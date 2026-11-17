@@ -328,9 +328,18 @@ the Player card (below): the chosen sound, with its locking or its unlocking
 motif. It is
 mixed into what plays — the music is never lowered — or plays alone when
 nothing is playing, standby included, without waking anything. It follows the
-volume and the mute, and is silent while the music is paused or while a file
-is still loading. The setting `lock_sound` is `none` or one of five sounds
-`a` to `e` (default `a`), part of `GET`/`PUT /api/settings`.
+volume and the mute, and is silent while a file is still loading. While the
+music is **paused** it plays too: the music branch is held at gain 0 in mpv's
+filter chain, mpv is unpaused for the chime and paused again, and a seekable
+file is put back at its exact position. A live stream is not seeked, so it
+ends up about 1.4 s further behind live, and the listener may hear about one
+audio buffer of music at the unpause. Near the end of a seekable file
+(remaining less than the chime plus 1 s) no chime is played, since it would end
+the file and advance the playlist. A user command during a paused chime (play,
+pause, next, seek, stop, source, power…) first ends the chime and puts the file
+back, then applies; volume, mute, +10 and the lock commands do not. The
+setting `lock_sound` is `none` or one of five sounds `a` to `e` (default `a`),
+part of `GET`/`PUT /api/settings`.
 
 The padlock counts in the header's width budget (`headerMode`), like the
 sleep timer and standby keys it closes the row with: a header too narrow for
@@ -1662,8 +1671,9 @@ the other player settings. Beside it, a play button (▶, "Play on the device")
 plays the sound **on the device**, not in the browser, so what is heard is what
 a lock change will sound like; it plays the value on screen, saved or not, and
 is disabled for None. Under them, a note explains why nothing will be heard
-when the player is muted ("Muted: nothing will be heard.") or paused ("Paused:
-nothing will be heard."), read from the same player stream as the Home page.
+when the player is muted ("Muted: nothing will be heard."), read from the same
+player stream as the Home page; a paused player plays the sound, so it has no
+note.
 
 The button posts `POST /api/lock-sound/preview` with `{"sound": "<value>"}`:
 `204` when the preview is queued (also for `none`, where nothing is), `422`
@@ -2611,11 +2621,22 @@ external TOML text, decentralized per component, read from **one root**:
 
 ## Theme
 
-The interface offers a **light/dark** toggle and a picker opening a dialog
-with the **42 themes** from [tweakcn](https://tweakcn.com) (Apache-2.0).
-This is a **device** setting, like the language: it is persisted in
-`state.json` (`theme` and `mode` fields) and therefore applies to every
-browser visiting the interface. Default: `northern-lights`, light mode.
+The interface offers a mode key and a picker opening a dialog with the
+**42 themes** from [tweakcn](https://tweakcn.com) (Apache-2.0). This is a
+**device** setting, like the language: it is persisted in `state.json`
+(`theme` and `mode` fields) and therefore applies to every browser visiting
+the interface. Default: `northern-lights`, light mode.
+
+The mode key cycles through **light, dark and auto**. It shows the current
+state, not the next one: the sun or the moon of the mode actually painted,
+with a small **A** over it in auto, and the state spelled out in its
+tooltip. Auto is stored as the word `auto`, which the core only validates:
+each browser resolves it against its own system preference
+(`prefers-color-scheme`) before the first paint, and repaints when that
+preference changes while the page is open. One device can therefore be dark
+on a phone at night and light on a desk at the same moment — the setting is
+shared, its resolution is not. A core older than this mode reads `auto` as
+unknown and falls back to light, keeping the theme.
 
 The fonts declared by the themes are loaded from a CDN — the interface's
 only external resource. Offline, the display falls back to the system font

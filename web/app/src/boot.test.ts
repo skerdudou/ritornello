@@ -12,6 +12,11 @@ describe('readBootTheme', () => {
     expect(readBootTheme({} as never)).toEqual({ theme: DEFAULT_PRESET, mode: DEFAULT_MODE })
   })
 
+  it('reads auto as a choice of its own, not as an unknown mode', () => {
+    const win = { __RITORNELLO_THEME__: { theme: 'vercel', mode: 'auto' } } as never
+    expect(readBootTheme(win)).toEqual({ theme: 'vercel', mode: 'auto' })
+  })
+
   it('rejects an unknown mode rather than propagating it', () => {
     const win = { __RITORNELLO_THEME__: { theme: 'vercel', mode: 'system' } } as never
     expect(readBootTheme(win)).toEqual({ theme: 'vercel', mode: DEFAULT_MODE })

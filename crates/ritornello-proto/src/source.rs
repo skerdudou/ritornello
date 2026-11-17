@@ -456,6 +456,22 @@ pub struct SourceMessage {
     /// text, never translated: an address is not a sentence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<String>,
+    /// Absolute local path of the file the identity declared by
+    /// `IdentityUpdate::Playing` plays, for a Source playing local files —
+    /// the playing counterpart of `Armed::media_path`. The core reads that
+    /// file's tags, lyrics and embedded cover itself, tied to the identity:
+    /// whoever knows which file is playing declares it, and mpv's own
+    /// announcements (which reach the core on another channel, in either
+    /// order) no longer describe a local file.
+    ///
+    /// Same lifecycle as `location`: absent = keep, as long as the identity
+    /// does not change; the core forgets it when the identity changes or is
+    /// cleared, then applies what the same frame declares. Always sent in the
+    /// frame that declares the identity (the SDK's `plays_file_at`). A URL or
+    /// a relative path is ignored. A core older than source 1.4 ignores the
+    /// field and keeps describing the file from mpv.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_path: Option<String>,
     /// The source's own word about its state, **unresolved**: a key into
     /// this module's own catalog and its parameters, or explicit verbatim
     /// text (see [`Text`]).
@@ -632,6 +648,7 @@ mod tests {
             preset_count: None,
             preset_name: None,
             location: None,
+            media_path: None,
             status_text: None,
             can_eject: None,
             has_finite_list: None,
@@ -664,6 +681,20 @@ mod tests {
         assert!(!serde_json::to_string(&old).unwrap().contains("armed"), "absent stays absent on the wire");
         let no_path = Armed { identity: serde_json::json!(1), media_path: None };
         assert!(!serde_json::to_string(&no_path).unwrap().contains("media_path"));
+    }
+
+    #[test]
+    fn a_media_path_travels_beside_a_playing_identity_and_an_older_frame_reads_without_it() {
+        let old: SourceMessage =
+            serde_json::from_str(r#"{"identity":{"state":"Playing","value":{"k":1}},"location":"smb://h/a.mp3"}"#)
+                .unwrap();
+        assert_eq!(old.media_path, None);
+        let mut m = old.clone();
+        m.media_path = Some("/m/a.mp3".into());
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains(r#""media_path":"/m/a.mp3""#), "{json}");
+        assert_eq!(serde_json::from_str::<SourceMessage>(&json).unwrap(), m);
+        assert!(!serde_json::to_string(&old).unwrap().contains("media_path"), "absent stays absent on the wire");
     }
 
     #[test]

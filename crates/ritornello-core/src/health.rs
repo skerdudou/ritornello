@@ -1,11 +1,11 @@
-//! Circuit breaker for embedded cover extraction: bounds the `lofty` call,
+//! Circuit breaker for the read of a declared file: bounds the `lofty` call,
 //! which may never return on a silent network share, and remembers the mount
 //! points that no longer answer.
 //!
 //! # Why this bound exists
 //!
-//! `player::mpv::embedded_cover` opens and walks the file **currently
-//! playing** with `lofty`, a strictly blocking call. That file may come from a
+//! `player::mpv::read_media_file` opens and walks the file **a Source
+//! declared**, armed or playing, with `lofty`, a strictly blocking call. That file may come from a
 //! network share, and this project has already lived through the incident this
 //! causes without a bound: a sleeping cifs mount made a whole admin page
 //! disappear, an IO that never completes holding the loop that should have
@@ -42,10 +42,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Timeout granted to the extraction of an embedded cover.
+/// Timeout granted to the read of a declared file (its tags, lyrics and
+/// embedded cover).
 ///
 /// Under the five seconds that `MpvIpc::command` already tolerates for an mpv
-/// response: a stuck extraction must not become, on its own, the longest wait
+/// response: a stuck read must not become, on its own, the longest wait
 /// the core loop can suffer.
 pub const TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -129,7 +130,7 @@ impl Health {
         match tokio::time::timeout(self.timeout, &mut task).await {
             Ok(Ok(v)) => Some(v),
             Ok(Err(e)) => {
-                tracing::warn!("embedded cover extraction on {} failed: {e}", path.display());
+                tracing::warn!("read of the declared file {} failed: {e}", path.display());
                 None
             }
             Err(_) => {

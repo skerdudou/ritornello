@@ -1274,12 +1274,11 @@ pub(crate) fn assemble_covers_and_core<P: player::Player>(
     player: P,
     wiring: core::Wiring,
     cover_tx: mpsc::Sender<(String, bool)>,
-    extraction_tx: mpsc::Sender<(String, Option<cover::CoverSource>)>,
-    armed_read_tx: mpsc::Sender<core::ArmedRead>,
+    file_read_tx: mpsc::Sender<core::FileRead>,
     skeleton: AppState,
 ) -> (AppState, core::Core<P>) {
     let covers = Arc::new(cover::CoverCache::new());
-    let core_engine = core::Core::new(player, wiring, covers.clone(), cover_tx, extraction_tx, armed_read_tx);
+    let core_engine = core::Core::new(player, wiring, covers.clone(), cover_tx, file_read_tx);
     // The lyrics store is the core's own, built by `Core::new`: handed out
     // from there, it cannot be a second one either.
     let app_state = AppState { covers, lyrics: core_engine.app_lyrics().clone(), ..skeleton };
@@ -1754,8 +1753,8 @@ async fn reorder_plugins<P: player::Player>(
 /// True for a frame the core accepts to write to the log.
 ///
 /// **It filters out only one thing: `lofty`'s chatter below error level.**
-/// `player::mpv::embedded_cover` opens the file being played with `lofty` to
-/// extract a cover, hence **on every track change**, and `lofty` emits a
+/// `player::mpv::read_media_file` opens the file a Source declared with
+/// `lofty` to read its tags and cover, hence **on every track change**, and `lofty` emits a
 /// `WARN` there for every MP3 without a Xing header — "MPEG: Using bitrate to
 /// estimate duration". This is not an incident: it is the normal estimation
 /// method for this format, it calls for no action, and it repeats per track.
@@ -2345,16 +2344,12 @@ async fn main() -> Result<()> {
     // in hand (or already cached), and the `select!` loop below consumes
     // them to publish the local URL for the right track.
     let (cover_tx, mut cover_rx) = mpsc::channel::<(String, bool)>(4);
-    // Result of a detached embedded-cover extraction (see
-    // `Core::handle_path`): same principle as `cover_tx` above, on a
-    // separate channel rather than an enrichment on the same one — the two
-    // carry different payloads, and nothing synchronizes them with each
-    // other.
-    let (extraction_tx, mut extraction_rx) =
-        mpsc::channel::<(String, Option<cover::CoverSource>)>(4);
-    // Result of the detached read of an armed file's tags and cover (see
-    // `Core::arm`): same principle again, its own channel for its own payload.
-    let (armed_read_tx, mut armed_read_rx) = mpsc::channel::<core::ArmedRead>(4);
+    // Result of the detached read of a file a Source declared, armed or
+    // playing — its tags, lyrics and embedded cover (see
+    // `Core::declare_media_path`): same principle as `cover_tx` above, on a
+    // separate channel — the two carry different payloads, and nothing
+    // synchronizes them with each other.
+    let (file_read_tx, mut file_read_rx) = mpsc::channel::<core::FileRead>(4);
 
     // How this process leaves. Named here rather than built inline in the
     // `SystemInfo` literal below, because the update worker exits by the very
@@ -2576,8 +2571,7 @@ async fn main() -> Result<()> {
                 plugin_data_root: plugin_data_root.clone(),
             },
             cover_tx,
-            extraction_tx,
-            armed_read_tx,
+            file_read_tx,
             app_state_skeleton,
         );
         core = core_engine;
@@ -2919,18 +2913,12 @@ async fn main() -> Result<()> {
             Some((key, success)) = cover_rx.recv() => {
                 core.cover_arrived(key, success).await;
             }
-            // A detached extraction by `Core::handle_path` finished (result
-            // bounded by `Health::bounded`, see `health.rs`): `extraction_arrived`
-            // releases the in-flight marker in every case, and only keeps
-            // the result if it still describes what mpv is currently
-            // playing.
-            Some((path, r)) = extraction_rx.recv() => {
-                core.extraction_arrived(path, r).await;
-            }
-            // The detached read `Core::arm` launched on an armed file (bounded
-            // the same way): kept only while that file is still the one armed.
-            Some(read) = armed_read_rx.recv() => {
-                core.armed_read_arrived(read).await;
+            // The detached read `Core::declare_media_path` launched on a
+            // declared file finished (bounded by `Health::bounded`, see
+            // `health.rs`): kept only while the identity it was launched for
+            // still declares that file.
+            Some(read) = file_read_rx.recv() => {
+                core.file_read_arrived(read).await;
             }
             Some(list) = update_sources_rx.recv() => {
                 core.set_update_sources(list);
@@ -3576,10 +3564,16 @@ mod toggle_tests {
         async fn audio_filter_command(&self, _cmd: &crate::equalizer::AfCommand) -> Result<()> {
             Ok(())
         }
-        async fn chime_route(&self) -> Result<crate::player::ChimeRoute> {
+        async fn chime_route(&self, _chime: std::time::Duration) -> Result<crate::player::ChimeRoute> {
             Ok(crate::player::ChimeRoute::Silent)
         }
         async fn play_aside(&self, _uri: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn sound_while_paused(&self, _chain: &str, _resume_at: Option<f64>) -> Result<()> {
+            Ok(())
+        }
+        async fn end_sound_while_paused(&self, _chain: &str, _resume_at: Option<f64>) -> Result<()> {
             Ok(())
         }
     }
@@ -3657,7 +3651,6 @@ mod toggle_tests {
                 },
             },
             covers.clone(),
-            mpsc::channel(4).0,
             mpsc::channel(4).0,
             mpsc::channel(4).0,
         );

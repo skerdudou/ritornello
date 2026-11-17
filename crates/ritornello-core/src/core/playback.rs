@@ -78,10 +78,6 @@ impl<P: Player> Core<P> {
             // Same status as ICY with respect to `retry_count`: metadata does
             // not prove that playback is alive.
             Event::FileTags { track, lyrics } => self.handle_file_tags(track.map(|t| *t), lyrics),
-            // Same status as the tags with respect to `retry_count`: the path
-            // attests nothing about the liveness of the stream, it only
-            // serves the embedded cover.
-            Event::Path(path) => self.handle_path(path),
             // The player changed track on its own: end of a disc track, no
             // key pressed. The core knows it (mpv tells it) but cannot fix
             // the identity — it is opaque to it. So it tells the Source,
@@ -101,6 +97,18 @@ impl<P: Player> Core<P> {
             // applied it, that action was silently dropped: the identity on
             // screen moved to the resumed track, but mpv itself stayed on
             // whatever it had opened, so the sound did not follow.
+            // During a paused chime, mpv plays on from the pause point for
+            // the chime's length: a track boundary it crosses (a disc paused
+            // just before a track's end — its tracks are chapters, which the
+            // end-of-file guard of `ChimeRoute::Paused` does not see) is the
+            // chime's, not the listener's, and the restore puts the file
+            // back on the track the core still holds. Every command of the
+            // user's ends the chime first, so none of theirs can be dropped
+            // here. A crossing still queued when the chime's end runs first
+            // gets through: rare, and the same as before this guard.
+            Event::TrackChanged(n) if self.lock_sound_paused.is_some() => {
+                tracing::debug!("track {n} crossed by a paused chime: not acted on");
+            }
             Event::TrackChanged(n) => {
                 if !self.standby {
                     // Judged before the request, whose answer may move the
@@ -120,11 +128,34 @@ impl<P: Player> Core<P> {
             }
             // mpv rebuilds the chain from `af` for every file, dropping the
             // gains `af-command` set: rewrite it now, while it costs no click.
-            Event::FileStarting => self.reapply_equalizer().await,
+            //
+            // A paused chime still sounding here was not ended by the core:
+            // every load the core sends ends it first. So mpv went on to the
+            // next entry by itself, unpaused for the chime (a file whose end
+            // the near-end guard could not see: no `duration`, or the core
+            // loop late on the deadline), and the next file plays at full
+            // gain under a display that says paused. It is ended without
+            // putting anything back (`finish_paused_chime_in_place`): mpv
+            // paused again — the new file waits, as the user left it — and
+            // the plain chain written; the gate, reset by that `start-file`,
+            // has nothing pending since no restore seek is sent. Then the
+            // usual rewrite, should the setting differ from that chain.
+            Event::FileStarting => {
+                // mpv's held tags described the file it is leaving.
+                self.held_file_tags = None;
+                self.finish_paused_chime_in_place().await;
+                self.reapply_equalizer().await
+            }
             // The chain takes `af-command` from here on (not from the file
             // start): send what changed while the file was loading.
             Event::PlaybackRestarted => self.equalizer_live().await,
             Event::PlaybackIdle => {
+                // A paused chime that mpv's idle cut short, no file start in
+                // between: ended all the same, so that the plain chain is
+                // what the next load finds and nothing of it stays pending.
+                // Nothing to put back on an idle mpv: no seek, and no wait
+                // for a chain rebuild that never comes.
+                self.finish_paused_chime_in_place().await;
                 // First, before any early return: whatever follows, nothing
                 // is loaded any more.
                 self.equalizer_idle();
@@ -315,7 +346,7 @@ mod tests {
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
         let (covers, cover_tx) = test_covers();
         let manifest_order = declared_order(&sources);
-        let mut core = Core::new(player, Wiring { sources, persisted, state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0, plugin_data_root: std::path::PathBuf::from("/root") }, covers, cover_tx, mpsc::channel(4).0, mpsc::channel(4).0);
+        let mut core = Core::new(player, Wiring { sources, persisted, state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0, plugin_data_root: std::path::PathBuf::from("/root") }, covers, cover_tx, mpsc::channel(4).0);
         core.resume().await.unwrap();
         assert_eq!(core.handle_event(Event::PlaybackIdle).await, EventOutcome::Nothing);
     }
@@ -431,7 +462,7 @@ mod tests {
         let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
         let (covers, cover_tx) = test_covers();
         let manifest_order = declared_order(&sources);
-        let mut core = Core::new(player, Wiring { sources, persisted, state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0, plugin_data_root: std::path::PathBuf::from("/root") }, covers, cover_tx, mpsc::channel(4).0, mpsc::channel(4).0);
+        let mut core = Core::new(player, Wiring { sources, persisted, state_path: dir.path().join("state.json"), catalog, registry: test_registry(&root), manifest_order, metadata: silent_wiring(vec![]), sources_catalog: watch::channel(SourcesCatalog::default()).0, plugin_data_root: std::path::PathBuf::from("/root") }, covers, cover_tx, mpsc::channel(4).0);
         // Single source: SourceCycle re-activates "cd", which answers `Play cdda://`.
         core.handle_command(Command::SourceCycle).await.unwrap();
         assert!(player_calls.lock().unwrap().contains(&"play cdda://".to_string()));

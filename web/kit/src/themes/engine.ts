@@ -1,6 +1,23 @@
 import raw from './presets.json'
 
+/** The mode actually painted: what `applyTheme` and `resolveVars` take. */
 export type Mode = 'light' | 'dark'
+
+/**
+ * The mode the device stores. `auto` is not a third palette: each browser
+ * resolves it against its own `prefers-color-scheme`, so a setting shared by
+ * every browser of the device can still follow each one's system. The core
+ * cannot resolve it — it never sees the browser — hence `resolveMode` here.
+ */
+export type ModeChoice = Mode | 'auto'
+
+/** The order in which the header key cycles through the choices. */
+export const MODE_CHOICES: readonly ModeChoice[] = ['light', 'dark', 'auto']
+
+export function resolveMode(choice: ModeChoice, prefersDark: boolean): Mode {
+  if (choice === 'auto') return prefersDark ? 'dark' : 'light'
+  return choice
+}
 
 export interface Preset {
   label: string
@@ -10,7 +27,7 @@ export interface Preset {
 export const presets = raw as unknown as Record<string, Preset>
 
 export const DEFAULT_PRESET = 'northern-lights'
-export const DEFAULT_MODE: Mode = 'light'
+export const DEFAULT_MODE: ModeChoice = 'light'
 
 /** Generic families: cited by the presets but never to be downloaded. */
 const GENERICS = new Set([

@@ -1497,6 +1497,9 @@ impl CdSource {
             preset_name: issue.preset_name,
             // Nor a location: a disc has no address a person could read.
             location: issue.location,
+            // Nor a file: mpv reads the disc, there is no local file for the
+            // core to read (see `SourceMessage::media_path`).
+            media_path: issue.media_path,
             // Same status logic as any other frame: presence flips it.
             status_text: issue.status_text,
             // The cd never enumerates named presets: a track has no name

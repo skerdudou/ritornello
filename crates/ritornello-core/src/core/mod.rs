@@ -11,7 +11,7 @@
 //! - `lock_sound`: the chime of a lock change, idle or mixed into playback
 //! - `player`: mpv events, restart with growing backoff, resume on wake
 //! - `play_request`: a source asking to be played, and what the core decides
-//! - `metadata`: identity, ICY, tags, enrichments, covers and extraction
+//! - `metadata`: identity, the declared file, ICY, tags, enrichments and covers
 //! - `position`: progress reported by mpv, anchor set by a plugin
 //! - `publish`: player state and sources_catalog pushed to displays, SPA and plugins
 //! - `settings`: audio output, language, theme, writing `state.json`
@@ -449,36 +449,42 @@ pub struct Core<P: Player> {
     cover_tx: mpsc::Sender<(String, bool)>,
     /// Key whose retrieval is in flight, so it is not launched twice.
     cover_in_flight: Option<String>,
-    /// Last path announced by mpv (`Event::Path`), kept **only** for
-    /// comparison when a detached extraction arrives — never interpreted,
-    /// per the principle laid down for `OBSERVED`. An extraction launched
-    /// for a path can come back after mpv has moved on to another one:
-    /// without this trace, its result would land after the fact on the next
-    /// track.
-    current_path: Option<String>,
-    /// Path whose embedded extraction is currently in flight, so a second
-    /// one is not launched while the first is still running on that same
-    /// file.
-    extraction_in_flight: Option<String>,
-    /// Result of an extraction detached by `handle_path`, consumed by
-    /// `main`'s `select!` loop (see `extraction_arrived`). Symmetric to
-    /// `cover_tx` above.
-    extraction_tx: mpsc::Sender<(String, Option<crate::cover::CoverSource>)>,
-    /// Result of the detached read `arm` launches on an armed file, consumed
-    /// by `main`'s `select!` loop (see `armed_read_arrived`). Symmetric to
-    /// `extraction_tx` above.
-    armed_read_tx: mpsc::Sender<ArmedRead>,
-    /// The file behind the armed identity, as the Source declared it
-    /// (`Armed::media_path`). What `armed_read_arrived` compares a read
-    /// against: a late answer for a track the Source has since moved off must
-    /// not land on the next one. **Meaningful only while `armed`**:
-    /// `set_identity_state` clears it on unarming, but `apply`'s `Play`
-    /// unarms without touching it, so every reader checks `armed` first
-    /// (`armed_read_arrived`, and `arm`'s re-arm test).
-    armed_path: Option<String>,
+    /// Result of the detached read `declare_media_path` launches on a file a
+    /// Source declared, consumed by `main`'s `select!` loop (see
+    /// `file_read_arrived`). Symmetric to `cover_tx` above.
+    file_read_tx: mpsc::Sender<FileRead>,
+    /// The local file behind the current identity, armed or playing, as the
+    /// Source declared it (`Armed::media_path`, `SourceMessage::media_path`).
+    /// Lives and dies with the identity, like `location`: kept while the
+    /// identity stays (armed ↔ playing on the same track keeps its file, and
+    /// its read), forgotten when it changes or is cleared.
+    ///
+    /// Two readers: `file_read_arrived` compares a read against it — a late
+    /// answer for a track the Source has since moved off must not land on the
+    /// next one — and `handle_file_tags` ignores mpv's tags while it is set,
+    /// since the declared read is then the one description of that file.
+    media_path: Option<String>,
+    /// The declared read of `media_path` came back empty-handed — the file
+    /// could not be read, or the share did not answer in time. mpv's tags
+    /// then describe that track again (`handle_file_tags`), as they did
+    /// before the Source declared its files, rather than leaving it untitled
+    /// for its whole duration; and the same file declared again (Play on the
+    /// armed track a sleeping share failed to read) is read again
+    /// (`declare_media_path`). Forgotten with `media_path`.
+    media_read_failed: bool,
+    /// The last tags mpv announced while a declared file kept them out
+    /// (`handle_file_tags`), kept for one use: if the declared read then
+    /// fails, they are what describes the track (`file_read_arrived`). mpv
+    /// announces a file's tags once, so ignored and not kept, they would be
+    /// gone for good. Kept across an identity change on purpose — mpv's tags
+    /// for the next file arrive before the Source declares it, which is the
+    /// very race the declared read closes — and forgotten when mpv starts
+    /// loading another file (`Event::FileStarting`), so they only ever
+    /// describe the file mpv holds.
+    held_file_tags: Option<(Option<ritornello_proto::Track>, Option<ritornello_proto::Lyrics>)>,
     /// Circuit breaker that bounds the `lofty` call, strictly blocking and
     /// potentially on a network share: see `health.rs` and the comment on
-    /// `handle_path`.
+    /// `spawn_file_read`.
     health: Arc<crate::health::Health>,
     /// The active Source declared it would keep a network cover (see
     /// `SourceMessage::cover_archivable`). Forgotten on identity change and
@@ -576,10 +582,26 @@ pub struct Core<P: Player> {
     /// when the last write failed and `af` is unknown. A file start rewrites
     /// the chain only when it differs from the setting's.
     eq_chain_written: Option<String>,
+    /// The equalizer part of what mpv's `af` holds: the plain chain (no
+    /// chime) last written whole from the setting (`--af` at launch, a
+    /// toggle, a file start, an audio output change). It equals
+    /// `eq_chain_written` unless a chime is mixed in, and it is **not** the
+    /// setting's chain once a gain moved live: `af-command` never updates
+    /// `af`. A chime is mixed into it, and its removal writes it back
+    /// (`write_held_chain`), so mpv's equalizer entries keep their arguments
+    /// — a rewrite that changes one mid-playback clicks — and the live gains
+    /// (`eq_preamp_sent`, `eq_bands_sent`) stand. `None` when `af` is
+    /// unknown (a failed write).
+    eq_plain_written: Option<String>,
     /// The chain written with a lock chime mixed in, and when to write it
     /// back without (`lock_sound.rs`). Cleared by any other whole-chain
     /// write: that write already dropped the chime.
     lock_sound_mixed: Option<(String, Instant)>,
+    /// A lock chime sounding over the paused file, mpv unpaused for it
+    /// (`lock_sound.rs`): what to end it with and when. It must always be
+    /// ended: put back (`finish_paused_chime`), or in place on a file start
+    /// or an idle mpv (`finish_paused_chime_in_place`).
+    lock_sound_paused: Option<lock_sound::PausedChime>,
     /// mpv holds a live chain `af-command` can reach: set at
     /// `PlaybackRestarted`, cleared at `FileStarting` and `PlaybackIdle` (an
     /// idle or loading mpv refuses every `af-command`). False at launch: mpv
@@ -587,14 +609,15 @@ pub struct Core<P: Player> {
     eq_live: bool,
 }
 
-/// What the detached read of an armed file (`Core::arm`) found: its tags
-/// and embedded cover, both `None` when the file could not be read or did not
-/// answer in time. `path` is the file read, compared on arrival.
+/// What the detached read of a declared file (`Core::declare_media_path`)
+/// found: its tags, embedded lyrics and embedded cover, all `None` when the
+/// file could not be read or did not answer in time. `identity` and `path`
+/// are what it was launched for, compared on arrival.
 #[derive(Debug)]
-pub struct ArmedRead {
+pub struct FileRead {
+    pub identity: serde_json::Value,
     pub path: String,
-    pub tags: Option<ritornello_proto::Track>,
-    pub cover: Option<crate::cover::CoverSource>,
+    pub file: Option<crate::player::mpv::MediaFile>,
 }
 
 /// Resolves the standby label from a sources_catalog already in hand.
@@ -613,8 +636,7 @@ impl<P: Player> Core<P> {
         wiring: Wiring,
         covers: Arc<crate::cover::CoverCache>,
         cover_tx: mpsc::Sender<(String, bool)>,
-        extraction_tx: mpsc::Sender<(String, Option<crate::cover::CoverSource>)>,
-        armed_read_tx: mpsc::Sender<ArmedRead>,
+        file_read_tx: mpsc::Sender<FileRead>,
     ) -> Self {
         let Wiring {
             sources,
@@ -724,11 +746,10 @@ impl<P: Player> Core<P> {
             covers,
             cover_tx,
             cover_in_flight: None,
-            current_path: None,
-            extraction_in_flight: None,
-            extraction_tx,
-            armed_read_tx,
-            armed_path: None,
+            file_read_tx,
+            media_path: None,
+            media_read_failed: false,
+            held_file_tags: None,
             health: Arc::new(crate::health::Health::new()),
             source_cover_archivable: false,
             cover_archive_attempted: Arc::new(std::sync::Mutex::new(None)),
@@ -751,8 +772,10 @@ impl<P: Player> Core<P> {
             equalizer: persisted.equalizer.clone(),
             eq_bands_sent: persisted.equalizer.gains,
             eq_chain_written: Some(crate::equalizer::af_chain(&persisted.equalizer)),
+            eq_plain_written: Some(crate::equalizer::af_chain(&persisted.equalizer)),
             eq_live: false,
             lock_sound_mixed: None,
+            lock_sound_paused: None,
         };
         // The sources wired at startup are already known: without this
         // publication, the channel would keep its blank
@@ -883,6 +906,11 @@ impl<P: Player> Core<P> {
             // `carries_a_fact`: a frame that carries it in a way that counts
             // carries an identity, which already makes it recompose the view.
             armed,
+            // Source contract 1.4, the playing counterpart of
+            // `armed.media_path`: read only beside `IdentityUpdate::Playing`,
+            // in the identity block below. Nothing to add to
+            // `carries_a_fact` for the reason just given for `armed`.
+            media_path,
         } = update;
         // Read **before** the guard below, and this is intentional: the
         // sources_catalog describes every source, not the one that is
@@ -1073,7 +1101,7 @@ impl<P: Player> Core<P> {
         }
         if let Some(identity) = identity {
             match identity {
-                IdentityUpdate::Playing(v) => self.set_identity(Some(v)),
+                IdentityUpdate::Playing(v) => self.declare_playing(v, media_path),
                 // Nothing plays: the Source either keeps a track armed (what
                 // Play would start, kept on screen) or keeps nothing — the
                 // default SDK `stop()`, and every source that predates the
@@ -1974,7 +2002,6 @@ mod tests {
             FakePlayer::default(),
             wiring,
             cover_tx,
-            mpsc::channel(4).0,
             mpsc::channel(4).0,
             crate::status::tests_support::app_state(),
         );

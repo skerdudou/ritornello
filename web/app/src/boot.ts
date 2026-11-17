@@ -1,4 +1,4 @@
-import { DEFAULT_MODE, DEFAULT_PRESET, type Mode } from '@ritornello/ui'
+import { DEFAULT_MODE, DEFAULT_PRESET, MODE_CHOICES, type ModeChoice } from '@ritornello/ui'
 import type { ThemePayload } from './types'
 
 declare global {
@@ -13,6 +13,7 @@ declare global {
 // strings; it knows no color.
 export function readBootTheme(win: Window = window): ThemePayload {
   const raw = win.__RITORNELLO_THEME__
-  const mode: Mode = raw?.mode === 'dark' || raw?.mode === 'light' ? raw.mode : DEFAULT_MODE
+  const known = MODE_CHOICES.find((m) => m === raw?.mode)
+  const mode: ModeChoice = known ?? DEFAULT_MODE
   return { theme: raw?.theme || DEFAULT_PRESET, mode }
 }

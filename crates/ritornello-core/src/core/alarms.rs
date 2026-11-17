@@ -593,6 +593,26 @@ mod tests {
         assert_eq!(on_disk(&d).volume, 35);
     }
 
+    /// A lock chime sounding over the paused file has mpv unpaused: the
+    /// alarm's Play toggles the pause, so the chime is ended (mpv paused
+    /// again) first — otherwise the toggle would pause the music for good.
+    #[tokio::test]
+    async fn alarm_during_a_paused_chime_ends_it_before_resuming() {
+        let (mut core, pc, _sc, rx, _d) = playing().await;
+        core.handle_command(Command::PlayPause).await.unwrap();
+        *core.player.route.lock().unwrap() =
+            crate::player::ChimeRoute::Paused { sample_rate: 48000, channels: 2, resume_at: Some(4.0) };
+        core.handle_command(Command::SetInputLock(true)).await.unwrap();
+        clear(&pc);
+        with_alarms(&mut core, vec![ringing_at(T, AlarmTarget::Resume, 35)]);
+        core.check_alarms(T).await;
+        let calls = pc.lock().unwrap().clone();
+        let end = calls.iter().position(|c| c.starts_with("paused-chime-end ")).expect("ended");
+        let pause = calls.iter().position(|c| c == "pause").expect("resumed");
+        assert!(end < pause, "{calls:?}");
+        assert_eq!(rx.borrow().playback, Playback::Playing);
+    }
+
     #[tokio::test]
     async fn alarm_awake_plays_its_source_or_switches_to_it() {
         // Stopped on the radio, the alarm names the radio: Play.

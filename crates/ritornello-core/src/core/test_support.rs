@@ -43,8 +43,16 @@ pub(super) struct FakePlayer {
     pub(super) af_cmd_fails_for: Arc<Mutex<Option<String>>>,
     /// What `chime_route` answers (`Idle` by default).
     pub(super) route: Arc<Mutex<crate::player::ChimeRoute>>,
+    /// The chime length each `chime_route` was asked with.
+    pub(super) route_asked: Arc<Mutex<Vec<std::time::Duration>>>,
     /// When true, `chime_route` fails — mpv unreachable.
     pub(super) route_fails: Arc<std::sync::atomic::AtomicBool>,
+    /// When true, `sound_while_paused` fails after recording the call — an
+    /// IPC timeout, which says nothing about whether mpv took the chain.
+    pub(super) paused_chime_fails: Arc<std::sync::atomic::AtomicBool>,
+    /// When true, `end_sound_while_paused` fails after recording the call:
+    /// which of its steps failed is unknown, so is `af`.
+    pub(super) paused_chime_end_fails: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[async_trait::async_trait]
@@ -147,8 +155,10 @@ impl crate::player::Player for FakePlayer {
         }
         Ok(())
     }
-    /// Records nothing: a question, not an action.
-    async fn chime_route(&self) -> anyhow::Result<crate::player::ChimeRoute> {
+    /// Records nothing in `calls`: a question, not an action. The chime's
+    /// length asked about goes to `route_asked`.
+    async fn chime_route(&self, chime: std::time::Duration) -> anyhow::Result<crate::player::ChimeRoute> {
+        self.route_asked.lock().unwrap().push(chime);
         if self.route_fails.load(std::sync::atomic::Ordering::SeqCst) {
             anyhow::bail!("mpv: command timeout");
         }
@@ -156,6 +166,20 @@ impl crate::player::Player for FakePlayer {
     }
     async fn play_aside(&self, uri: &str) -> anyhow::Result<()> {
         self.calls.lock().unwrap().push(format!("aside {uri}"));
+        Ok(())
+    }
+    async fn sound_while_paused(&self, chain: &str, resume_at: Option<f64>) -> anyhow::Result<()> {
+        self.calls.lock().unwrap().push(format!("paused-chime {chain} {resume_at:?}"));
+        if self.paused_chime_fails.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("mpv: command timeout");
+        }
+        Ok(())
+    }
+    async fn end_sound_while_paused(&self, chain: &str, resume_at: Option<f64>) -> anyhow::Result<()> {
+        self.calls.lock().unwrap().push(format!("paused-chime-end {chain} {resume_at:?}"));
+        if self.paused_chime_end_fails.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("mpv: command timeout");
+        }
         Ok(())
     }
 }
@@ -409,7 +433,6 @@ pub(super) fn setup_persisted(persisted: PersistedState) -> Rig {
         covers,
         cover_tx,
         mpsc::channel(4).0,
-        mpsc::channel(4).0,
     );
     (core, player_calls, source_calls, state_rx, dir)
 }
@@ -449,7 +472,6 @@ pub(super) fn setup_metadata(
         covers,
         cover_tx,
         mpsc::channel(4).0,
-        mpsc::channel(4).0,
     );
     (core, np_rx, state_rx, dir)
 }
@@ -461,24 +483,19 @@ pub(super) fn test_core() -> (Core<FakePlayer>, watch::Receiver<NowPlaying>, wat
     setup_metadata(vec![])
 }
 
-/// Like `test_core`, but **keeps** the receiver of the embedded-cover
-/// extraction channel instead of dropping it.
+/// Like `test_core`, but **keeps** the receiver of the declared-file read
+/// channel: what `declare_media_path` really sends, drained from the real
+/// channel, is what a test hands to `file_read_arrived` — as `main` does.
 ///
-/// Needed by any test that really lets the detached task of `handle_path`
-/// run on a real file: the real result must be drained from the real
-/// channel, not reconstructed by a second, independent call to
-/// `mpv::embedded_cover` on the test's own side. Before this rework, that
-/// second call was worse than redundant — it raced the detached task's
-/// write to the same temp file, a real race between two writers discovered
-/// in use (see the report of task 6, ruling 1 of the review). The write is
-/// gone, but the reason to drain the real channel is not: it is still the
-/// only way to assert on the exact `CoverSource` production code produced,
-/// rather than one a duplicated computation happens to agree with today.
+/// Draining the real channel rather than reconstructing a read by a second,
+/// independent call to `mpv::read_media_file` on the test's side is the
+/// point: it asserts on what production code produced, not on a parallel
+/// computation believed to agree with it.
 #[allow(clippy::type_complexity)]
-pub(super) fn test_core_with_extraction() -> (
+pub(super) fn test_core_with_file_read() -> (
     Core<FakePlayer>,
     watch::Receiver<PlayerState>,
-    mpsc::Receiver<(String, Option<crate::cover::CoverSource>)>,
+    mpsc::Receiver<super::FileRead>,
     tempfile::TempDir,
 ) {
     let dir = tempfile::tempdir().unwrap();
@@ -492,7 +509,7 @@ pub(super) fn test_core_with_extraction() -> (
     let root = dir.path().to_path_buf();
     let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
     let (covers, cover_tx) = test_covers();
-    let (extraction_tx, extraction_rx) = mpsc::channel(4);
+    let (file_read_tx, file_read_rx) = mpsc::channel(4);
     let manifest_order = declared_order(&sources);
     let core = Core::new(
         FakePlayer::default(),
@@ -509,54 +526,21 @@ pub(super) fn test_core_with_extraction() -> (
         },
         covers,
         cover_tx,
-        extraction_tx,
-        mpsc::channel(4).0,
+        file_read_tx,
     );
-    (core, state_rx, extraction_rx, dir)
+    (core, state_rx, file_read_rx, dir)
 }
 
-/// Like `test_core`, but **keeps** the receiver of the armed-file read
-/// channel: what `arm` really sends, drained from the real channel, is what
-/// a test hands to `armed_read_arrived`.
-#[allow(clippy::type_complexity)]
-pub(super) fn test_core_with_armed_read() -> (
-    Core<FakePlayer>,
-    watch::Receiver<PlayerState>,
-    mpsc::Receiver<super::ArmedRead>,
-    tempfile::TempDir,
-) {
-    let dir = tempfile::tempdir().unwrap();
-    let source_calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let mut sources: HashMap<String, Arc<dyn Source>> = HashMap::new();
-    sources.insert("radio".into(), Arc::new(FakeSource { name: "radio", calls: source_calls.clone(), ..Default::default() }));
-    sources.insert("cd".into(), Arc::new(FakeSource { name: "cd", calls: source_calls, ..Default::default() }));
-    let (np_tx, _np_rx) =
-        watch::channel(NowPlaying { source: "radio".into(), identity: None, ..Default::default() });
-    let (state_tx, state_rx) = watch::channel(PlayerState::default());
-    let root = dir.path().to_path_buf();
-    let catalog = Arc::new(tokio::sync::RwLock::new(ritornello_i18n::Chain::load_for_tests("core", "en", &root, crate::i18n::EN)));
-    let (covers, cover_tx) = test_covers();
-    let (armed_read_tx, armed_read_rx) = mpsc::channel(4);
-    let manifest_order = declared_order(&sources);
-    let core = Core::new(
-        FakePlayer::default(),
-        Wiring {
-            sources,
-            persisted: PersistedState::default(),
-            state_path: dir.path().join("state.json"),
-            catalog,
-            registry: test_registry(&root),
-            manifest_order,
-            sources_catalog: watch::channel(SourcesCatalog::default()).0,
-            plugin_data_root: std::path::PathBuf::from("/root"),
-            metadata: MetadataWiring { plugins: vec![], now_playing: np_tx, state: state_tx },
-        },
-        covers,
-        cover_tx,
-        mpsc::channel(4).0,
-        armed_read_tx,
-    );
-    (core, state_rx, armed_read_rx, dir)
+/// Update a Source playing a local **file** sends: the identity, and the
+/// path the core reads tags, lyrics and embedded cover from — the shape the
+/// SDK's `plays_file_at` produces (the location left out, which the core
+/// does not read here).
+pub(super) fn plays_file(identity: serde_json::Value, path: &str) -> SourceUpdate {
+    SourceUpdate {
+        identity: Some(IdentityUpdate::Playing(identity)),
+        media_path: Some(path.to_string()),
+        ..Default::default()
+    }
 }
 
 /// Update a stopped Source sends when it keeps a **file** armed: `arms`,
@@ -629,7 +613,6 @@ pub(super) fn setup_without_source() -> (Core<FakePlayer>, watch::Receiver<Playe
         },
         covers,
         cover_tx,
-        mpsc::channel(4).0,
         mpsc::channel(4).0,
     );
     (core, state_rx, dir)
@@ -725,13 +708,13 @@ pub(super) fn quick_settings() -> crate::state::Settings {
 ///
 /// **The image used to have to stay different from the one in
 /// `player::mpv::tests`, and no longer does — kept distinct anyway, for
-/// clarity.** `player::mpv::embedded_cover` used to name a temp file after
+/// clarity.** The embedded-cover probe used to name a temp file after
 /// the *content* of the image and write it to the `temp_dir()` **shared** by
 /// every test of this binary — which run in parallel; two fixtures carrying
 /// the same image would then collide there, and the tests here additionally
 /// went through `CoverCache`, whose eviction **deleted** those files, which
 /// is exactly what produced an intermittent failure in the neighbour reading
-/// a file erased or rewritten under it. `embedded_cover` now only probes the
+/// a file erased or rewritten under it. `read_media_file` only probes the
 /// container and writes nothing, so that collision cannot occur anymore;
 /// green and 32×32 remains distinct from the red 16×16 of
 /// `player::mpv::tests` simply so a mismatch between the two is easy to spot.
@@ -762,6 +745,44 @@ pub(super) fn test_mp3_with_cover(dir: &std::path::Path) -> Option<std::path::Pa
 
 /// The LRC `test_mp3_with_lyrics` embeds.
 pub(super) const EMBEDDED_LRC: &str = "[00:01.00]First line\n[00:02.50]Second line";
+
+/// A one-second mp3 whose ID3v2.3 tag carries a title and one `TXXX` frame
+/// described `description` holding `text` — the shape some taggers give
+/// lyrics (`TXXX:LYRICS`, `TXXX:UNSYNCEDLYRICS`). Written by hand like
+/// `test_mp3_with_lyrics`, since ffmpeg would choose the frame itself. `None`
+/// if ffmpeg is absent.
+pub(super) fn test_mp3_with_user_text(dir: &std::path::Path, name: &str, description: &str, text: &str) -> Option<std::path::PathBuf> {
+    let bare = dir.join(format!("{name}.bare.mp3"));
+    let ok = std::process::Command::new("ffmpeg")
+        .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1"])
+        .args(["-c:a", "libmp3lame", "-write_id3v2", "0"])
+        .arg(&bare)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        return None;
+    }
+    let frame = |id: &[u8; 4], body: &[u8]| {
+        let mut f = id.to_vec();
+        f.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
+        f.extend_from_slice(&[0, 0]);
+        f.extend_from_slice(body);
+        f
+    };
+    let mut frames = frame(b"TIT2", &[&[0u8][..], b"Title"].concat());
+    // Encoding, the description and its terminator, then the value.
+    frames.extend(frame(b"TXXX", &[&[0u8][..], description.as_bytes(), &[0u8][..], text.as_bytes()].concat()));
+    let n = frames.len();
+    let size = [(n >> 21) as u8 & 0x7f, (n >> 14) as u8 & 0x7f, (n >> 7) as u8 & 0x7f, n as u8 & 0x7f];
+    let mut file = b"ID3\x03\x00\x00".to_vec();
+    file.extend_from_slice(&size);
+    file.extend(frames);
+    file.extend(std::fs::read(&bare).ok()?);
+    let output = dir.join(format!("{name}.mp3"));
+    std::fs::write(&output, file).ok()?;
+    Some(output)
+}
 
 /// Generates, via ffmpeg, a one-second mp3 carrying a **real** ID3v2.3
 /// `USLT` frame (language `eng`, no descriptor) with `EMBEDDED_LRC`, plus a
@@ -855,8 +876,8 @@ pub(super) fn embedded_picture_bytes(path: &std::path::Path) -> Vec<u8> {
         .to_vec()
 }
 
-/// Like `test_core_with_extraction`, but keeps the **cover** channel instead
-/// of the extraction one.
+/// Like `test_core_with_file_read`, but keeps the **cover** channel instead
+/// of the file-read one.
 ///
 /// Needed by any test that must observe whether `start_cover_fetch`'s real
 /// detached task actually re-fetched and re-inserted a cache entry, rather
@@ -904,7 +925,6 @@ pub(super) fn test_core_with_cover_channel() -> (
         },
         covers,
         cover_tx,
-        mpsc::channel(4).0,
         mpsc::channel(4).0,
     );
     (core, state_rx, cover_rx, dir)
@@ -1214,7 +1234,6 @@ fn archiving_rig(offers: bool, network: bool, refuses_archive: bool) -> Archivin
         },
         covers,
         cover_tx,
-        mpsc::channel(4).0,
         mpsc::channel(4).0,
     );
     ArchivingRig { core, archives, lyrics_archives, offers, _dir: dir }
