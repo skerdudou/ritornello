@@ -2546,7 +2546,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-cd"
-version = "0.2.0"
+version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2565,7 +2565,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-console"
-version = "0.3.0-beta.1"
+version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2581,7 +2581,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-files"
-version = "0.2.0"
+version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2602,7 +2602,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-generic-input"
-version = "0.2.0"
+version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2621,7 +2621,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-lrclib-lyrics"
-version = "0.2.0"
+version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2640,7 +2640,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-mpd"
-version = "0.2.0"
+version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2658,7 +2658,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-musicbrainz"
-version = "0.2.0"
+version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2676,7 +2676,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-nrj-metas"
-version = "0.2.0"
+version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2694,7 +2694,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-ouifm-metas"
-version = "0.2.0"
+version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2713,7 +2713,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-radio"
-version = "0.2.0"
+version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2732,7 +2732,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-radiofrance-metas"
-version = "0.2.0"
+version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2765,7 +2765,7 @@ dependencies = [
 
 [[package]]
 name = "ritornello-plugin-web-streaming"
-version = "0.3.0-beta.1"
+version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
  "async-trait",
