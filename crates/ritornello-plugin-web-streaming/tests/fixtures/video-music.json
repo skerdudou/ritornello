@@ -1,0 +1,374 @@
+{
+ "id": "0k2Di6QqqEA",
+ "title": "Da Coconut Nut (The Coconut Song)",
+ "thumbnails": [
+  {
+   "url": "https://yt3.googleusercontent.com/PEYGm455cR6Sst12Fq_9VIevF18kBcYARedz8aP5884_Gp9FgruD2dw41zBgL-dI0s-Vt5fUMLK_fQs=w60-h60-l90-rj",
+   "height": 60,
+   "width": 60,
+   "preference": -39,
+   "id": "0",
+   "resolution": "60x60"
+  },
+  {
+   "url": "https://yt3.googleusercontent.com/PEYGm455cR6Sst12Fq_9VIevF18kBcYARedz8aP5884_Gp9FgruD2dw41zBgL-dI0s-Vt5fUMLK_fQs=w120-h120-l90-rj",
+   "height": 120,
+   "width": 120,
+   "preference": -39,
+   "id": "1",
+   "resolution": "120x120"
+  },
+  {
+   "url": "https://yt3.googleusercontent.com/PEYGm455cR6Sst12Fq_9VIevF18kBcYARedz8aP5884_Gp9FgruD2dw41zBgL-dI0s-Vt5fUMLK_fQs=w226-h226-l90-rj",
+   "height": 226,
+   "width": 226,
+   "preference": -39,
+   "id": "2",
+   "resolution": "226x226"
+  },
+  {
+   "url": "https://yt3.googleusercontent.com/PEYGm455cR6Sst12Fq_9VIevF18kBcYARedz8aP5884_Gp9FgruD2dw41zBgL-dI0s-Vt5fUMLK_fQs=w544-h544-l90-rj",
+   "height": 544,
+   "width": 544,
+   "preference": -39,
+   "id": "3",
+   "resolution": "544x544"
+  },
+  {
+   "url": "https://i.ytimg.com/vi/0k2Di6QqqEA/3.jpg",
+   "preference": -37,
+   "id": "4"
+  },
+  {
+   "url": "https://i.ytimg.com/vi_webp/0k2Di6QqqEA/3.webp",
+   "preference": -36,
+   "id": "5"
+  },
+  {
+   "url": "https://i.ytimg.com/vi/0k2Di6QqqEA/2.jpg",
+   "preference": -35,
+   "id": "6"
+  },
+  {
+   "url": "https://i.ytimg.com/vi_webp/0k2Di6QqqEA/2.webp",
+   "preference": -34,
+   "id": "7"
+  },
+  {
+   "url": "https://i.ytimg.com/vi/0k2Di6QqqEA/1.jpg",
+   "preference": -33,
+   "id": "8"
+  },
+  {
+   "url": "https://i.ytimg.com/vi_webp/0k2Di6QqqEA/1.webp",
+   "preference": -32,
+   "id": "9"
+  },
+  {
+   "url": "https://i.ytimg.com/vi/0k2Di6QqqEA/mq3.jpg",
+   "preference": -31,
+   "id": "10"
+  },
+  {
+   "url": "https://i.ytimg.com/vi_webp/0k2Di6QqqEA/mq3.webp",
+   "preference": -30,
+   "id": "11"
+  },
+  {
+   "url": "https://i.ytimg.com/vi/0k2Di6QqqEA/mq2.jpg",
+   "preference": -29,
+   "id": "12"
+  },
+  {
+   "url": "https://i.ytimg.com/vi_webp/0k2Di6QqqEA/mq2.webp",
+   "preference": -28,
+   "id": "13"
+  },
+  {
+   "url": "https://i.ytimg.com/vi/0k2Di6QqqEA/mq1.jpg",
+   "preference": -27,
+   "id": "14"
+  },
+  {
+   "url": "https://i.ytimg.com/vi_webp/0k2Di6QqqEA/mq1.webp",
+   "preference": -26,
+   "id": "15"
+  },
+  {
+   "url": "https://i.ytimg.com/vi/0k2Di6QqqEA/hq3.jpg",
+   "preference": -25,
+   "id": "16"
+  },
+  {
+   "url": "https://i.ytimg.com/vi_webp/0k2Di6QqqEA/hq3.webp",
+   "preference": -24,
+   "id": "17"
+  },
+  {
+   "url": "https://i.ytimg.com/vi/0k2Di6QqqEA/hq2.jpg",
+   "preference": -23,
+   "id": "18"
+  },
+  {
+   "url": "https://i.ytimg.com/vi_webp/0k2Di6QqqEA/hq2.webp",
+   "preference": -22,
+   "id": "19"
+  },
+  {
+   "url": "https://i.ytimg.com/vi/0k2Di6QqqEA/hq1.jpg",
+   "preference": -21,
+   "id": "20"
+  },
+  {
+   "url": "https://i.ytimg.com/vi_webp/0k2Di6QqqEA/hq1.webp",
+   "preference": -20,
+   "id": "21"
+  },
+  {
+   "url": "https://i.ytimg.com/vi/0k2Di6QqqEA/sd3.jpg",
+   "preference": -19,
+   "id": "22"
+  },
+  {
+   "url": "https://i.ytimg.com/vi_webp/0k2Di6QqqEA/sd3.webp",
+   "preference": -18,
+   "id": "23"
+  },
+  {
+   "url": "https://i.ytimg.com/vi/0k2Di6QqqEA/sd2.jpg",
+   "preference": -17,
+   "id": "24"
+  },
+  {
+   "url": "https://i.ytimg.com/vi_webp/0k2Di6QqqEA/sd2.webp",
+   "preference": -16,
+   "id": "25"
+  },
+  {
+   "url": "https://i.ytimg.com/vi/0k2Di6QqqEA/sd1.jpg",
+   "preference": -15,
+   "id": "26"
+  },
+  {
+   "url": "https://i.ytimg.com/vi_webp/0k2Di6QqqEA/sd1.webp",
+   "preference": -14,
+   "id": "27"
+  },
+  {
+   "url": "https://i.ytimg.com/vi/0k2Di6QqqEA/default.jpg",
+   "preference": -13,
+   "id": "28"
+  },
+  {
+   "url": "https://i.ytimg.com/vi_webp/0k2Di6QqqEA/default.webp",
+   "preference": -12,
+   "id": "29"
+  },
+  {
+   "url": "https://i.ytimg.com/vi/0k2Di6QqqEA/mqdefault.jpg",
+   "height": 180,
+   "width": 320,
+   "preference": -11,
+   "id": "30",
+   "resolution": "320x180"
+  },
+  {
+   "url": "https://i.ytimg.com/vi_webp/0k2Di6QqqEA/mqdefault.webp",
+   "preference": -10,
+   "id": "31"
+  },
+  {
+   "url": "https://i.ytimg.com/vi/0k2Di6QqqEA/0.jpg",
+   "preference": -9,
+   "id": "32"
+  },
+  {
+   "url": "https://i.ytimg.com/vi_webp/0k2Di6QqqEA/0.webp",
+   "preference": -8,
+   "id": "33"
+  },
+  {
+   "url": "https://i.ytimg.com/vi/0k2Di6QqqEA/hqdefault.jpg",
+   "preference": -7,
+   "id": "34"
+  },
+  {
+   "url": "https://i.ytimg.com/vi/0k2Di6QqqEA/hqdefault.jpg?sqp=-oaymwEbCKgBEF5IVfKriqkDDggBFQAAiEIYAXABwAEG&rs=AOn4CLCuDfx4Wm7D53TZbD8lKKPzoKFmcA",
+   "height": 94,
+   "width": 168,
+   "preference": -7,
+   "id": "35",
+   "resolution": "168x94"
+  },
+  {
+   "url": "https://i.ytimg.com/vi/0k2Di6QqqEA/hqdefault.jpg?sqp=-oaymwEbCMQBEG5IVfKriqkDDggBFQAAiEIYAXABwAEG&rs=AOn4CLCNnB_gat7fVhRdfRFNg8EOu-qArg",
+   "height": 110,
+   "width": 196,
+   "preference": -7,
+   "id": "36",
+   "resolution": "196x110"
+  },
+  {
+   "url": "https://i.ytimg.com/vi/0k2Di6QqqEA/hqdefault.jpg?sqp=-oaymwEcCPYBEIoBSFXyq4qpAw4IARUAAIhCGAFwAcABBg==&rs=AOn4CLB4VpC_KVAEKU2wSG71j1UxySkYIQ",
+   "height": 138,
+   "width": 246,
+   "preference": -7,
+   "id": "37",
+   "resolution": "246x138"
+  },
+  {
+   "url": "https://i.ytimg.com/vi/0k2Di6QqqEA/hqdefault.jpg?sqp=-oaymwEcCNACELwBSFXyq4qpAw4IARUAAIhCGAFwAcABBg==&rs=AOn4CLA2tgMCzHDXvAUSSoJMd9KKkT5G4g",
+   "height": 188,
+   "width": 336,
+   "preference": -7,
+   "id": "38",
+   "resolution": "336x188"
+  },
+  {
+   "url": "https://i.ytimg.com/vi_webp/0k2Di6QqqEA/hqdefault.webp",
+   "preference": -6,
+   "id": "39"
+  },
+  {
+   "url": "https://i.ytimg.com/vi/0k2Di6QqqEA/sddefault.jpg",
+   "preference": -5,
+   "id": "40"
+  },
+  {
+   "url": "https://i.ytimg.com/vi_webp/0k2Di6QqqEA/sddefault.webp",
+   "preference": -4,
+   "id": "41"
+  },
+  {
+   "url": "https://i.ytimg.com/vi/0k2Di6QqqEA/hq720.jpg",
+   "height": 720,
+   "width": 1280,
+   "preference": -3,
+   "id": "42",
+   "resolution": "1280x720"
+  },
+  {
+   "url": "https://i.ytimg.com/vi_webp/0k2Di6QqqEA/hq720.webp",
+   "preference": -2,
+   "id": "43"
+  },
+  {
+   "url": "https://i.ytimg.com/vi/0k2Di6QqqEA/maxresdefault.jpg",
+   "height": 720,
+   "width": 1280,
+   "preference": -1,
+   "id": "44",
+   "resolution": "1280x720"
+  },
+  {
+   "url": "https://i.ytimg.com/vi_webp/0k2Di6QqqEA/maxresdefault.webp",
+   "height": 1080,
+   "width": 1920,
+   "preference": 0,
+   "id": "45",
+   "resolution": "1920x1080"
+  }
+ ],
+ "thumbnail": "https://i.ytimg.com/vi_webp/0k2Di6QqqEA/maxresdefault.webp",
+ "description": "Provided to YouTube by The Orchard Enterprises\n\nDa Coconut Nut (The Coconut Song) · The San Miguel Master Chorale · Ryan Cayabyab\n\nDa Coconut Nut\n\n℗ 2004 SMC\n\nReleased on: 2004-02-23\n\nAuto-generated by YouTube.",
+ "channel_id": "UCu2W8q3tTxqr_1aDkm9ym7w",
+ "channel_url": "https://www.youtube.com/channel/UCu2W8q3tTxqr_1aDkm9ym7w",
+ "duration": 213,
+ "view_count": 2668083,
+ "average_rating": null,
+ "age_limit": 0,
+ "webpage_url": "https://www.youtube.com/watch?v=0k2Di6QqqEA",
+ "categories": [
+  "Music"
+ ],
+ "tags": [
+  "The San Miguel Master Chorale",
+  "Ryan Cayabyab",
+  "Da Coconut Nut"
+ ],
+ "playable_in_embed": true,
+ "live_status": "not_live",
+ "media_type": "video",
+ "release_timestamp": null,
+ "_format_sort_fields": [
+  "quality",
+  "res",
+  "fps",
+  "hdr:12",
+  "source",
+  "vcodec",
+  "channels",
+  "acodec",
+  "lang",
+  "proto"
+ ],
+ "album": "Da Coconut Nut",
+ "artists": [
+  "The San Miguel Master Chorale",
+  "Ryan Cayabyab"
+ ],
+ "track": "Da Coconut Nut (The Coconut Song)",
+ "release_date": "20040223",
+ "release_year": 2004,
+ "comment_count": null,
+ "chapters": null,
+ "like_count": 35915,
+ "channel": "The San Miguel Master Chorale - Topic",
+ "channel_follower_count": 2240,
+ "creators": [
+  "The San Miguel Master Chorale",
+  "Ryan Cayabyab"
+ ],
+ "uploader": "The San Miguel Master Chorale - Topic",
+ "uploader_id": null,
+ "uploader_url": null,
+ "upload_date": "20220723",
+ "timestamp": 1658570877,
+ "alt_title": "Da Coconut Nut (The Coconut Song)",
+ "availability": "public",
+ "original_url": "https://www.youtube.com/watch?v=0k2Di6QqqEA",
+ "webpage_url_basename": "watch",
+ "webpage_url_domain": "youtube.com",
+ "extractor": "youtube",
+ "extractor_key": "Youtube",
+ "playlist": null,
+ "playlist_index": null,
+ "display_id": "0k2Di6QqqEA",
+ "fulltitle": "Da Coconut Nut (The Coconut Song)",
+ "duration_string": "3:33",
+ "is_live": false,
+ "was_live": false,
+ "artist": "The San Miguel Master Chorale, Ryan Cayabyab",
+ "creator": "The San Miguel Master Chorale, Ryan Cayabyab",
+ "requested_subtitles": null,
+ "_has_drm": null,
+ "epoch": 1794913287,
+ "format": "616 - 1080x1080 (Premium)+251 - audio only (medium)",
+ "format_id": "616+251",
+ "ext": "webm",
+ "protocol": "m3u8_native+https",
+ "language": null,
+ "format_note": "Premium+medium",
+ "filesize_approx": 3337598,
+ "tbr": 1534.76,
+ "width": 1080,
+ "height": 1080,
+ "resolution": "1080x1080",
+ "fps": 25.0,
+ "dynamic_range": "SDR",
+ "vcodec": "vp09.00.40.08",
+ "vbr": 1409.441,
+ "stretched_ratio": null,
+ "aspect_ratio": 1.0,
+ "acodec": "opus",
+ "abr": 125.319,
+ "asr": 48000,
+ "audio_channels": 2,
+ "_type": "video",
+ "_version": {
+  "version": "2026.10.26",
+  "current_git_head": null,
+  "release_git_head": "c91f8de0bfb3577894abad716eaaa01659e6bd14",
+  "repository": "yt-dlp/yt-dlp"
+ }
+}

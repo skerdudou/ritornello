@@ -61,8 +61,12 @@ export type RowState = 'pending' | 'running' | 'converting' | 'done' | 'failed' 
 /** The format a download is kept in. */
 export type Format = 'original' | 'm4a' | 'mp3'
 
-/** Where a single video's cover goes. */
-export type CoverMode = 'embedded' | 'separate'
+/**
+ * Where each track's cover goes. `folder`, offered for a playlist only:
+ * none of its own, every track shows the folder's `cover.jpg` (a single
+ * video, which has no folder of its own, gets its picture beside it).
+ */
+export type CoverMode = 'embedded' | 'separate' | 'folder'
 
 /** What the operator chose in the download dialog. */
 export interface Choices {

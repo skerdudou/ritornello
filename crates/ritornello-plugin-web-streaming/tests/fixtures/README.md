@@ -83,3 +83,27 @@ null` (the badge is rarely present), so a null `availability` does not mean
 The video capture has thumbnails with no `width`/`height` (the `*.jpg` and
 `*.webp` guessed from the id) and a few with sizes (signed `hqdefault.jpg`
 URLs, up to 480x360); the flat playlist entries carry four sized ones.
+
+## An album track, and its album
+
+Captured on 2026-11-17 on the Raspberry Pi, through the plugin's own
+wrapper, with yt-dlp 2026.10.26, as `yt-dlp --ignore-config --no-warnings -J
+--flat-playlist --extractor-args youtube:player_client=default,web_music --
+<url>` (the arguments the plugin probes with), then re-indented (one space).
+
+| File | Source | Changes |
+|---|---|---|
+| `video-music.json` | `https://www.youtube.com/watch?v=0k2Di6QqqEA`, an "Art Track" (auto-generated from an album) | The `formats`, `requested_formats`, `requested_downloads`, `heatmap`, `automatic_captions` and `subtitles` keys were removed, as in `video.json`. Nothing else. |
+| `album-playlist.json` | `https://www.youtube.com/playlist?list=OLAK5uy_lSJ0FKs6xyxFGj-i7CQOt4sncnPuvnTCA`, that track's album (1 entry) | None. |
+
+The track's thumbnails are YouTube's 16:9 frames (`hq720.jpg` and
+`maxresdefault.jpg` at 1280x720: the square album art centred on a flat
+colour) plus, from the `web_music` client only, the album art itself, square,
+at `yt3.googleusercontent.com/...=w<n>-h<n>-l90-rj` in 60, 120, 226 and 544
+pixels; `-rj` is answered as `image/jpeg` (checked, even to an `Accept` that
+prefers webp). Without that client the list holds no square picture at all.
+The album's own thumbnails are square (180, 640, 1200); its flat entry's are
+16:9 only, whatever the client: a flat listing asks no player of any client.
+Searched before the first commit for a dotted IPv4, `googlevideo`, `token=`,
+`Signature`, `Policy=`, `Key-Pair`, `cookie`, `session`, `client_id`, `ip=`
+and `expire=`: none is left.

@@ -1,7 +1,8 @@
 //! `yt-dlp`, run under a deadline, and its `-J --flat-playlist` answer read.
 //!
-//! The command is always `<bin> -J --flat-playlist -- <url>`: `bin` is the
-//! wrapper script `<data_dir>/bin/yt-dlp` that already carries the
+//! The command is always `<bin> -J --flat-playlist --extractor-args
+//! youtube:player_client=default,web_music -- <url>` ([`PROBE_ARGS`]): `bin`
+//! is the wrapper script `<data_dir>/bin/yt-dlp` that already carries the
 //! configuration flags, so nothing here passes any. The `--` keeps a link that
 //! begins with a dash from being read as an option.
 //!
@@ -254,6 +255,19 @@ pub const PROBE_ANSWER_MAX: usize = 32 * 1024 * 1024;
 /// and the page said the site had not answered in time.
 pub const PROBE_DEADLINE: Duration = Duration::from_secs(300);
 
+/// What a probe passes before the link, which follows alone.
+///
+/// The `web_music` player client is asked for besides yt-dlp's default
+/// ones (its formats alone need a PO token, so never instead of them): on a
+/// track made from an album it adds the album art, square, to the
+/// thumbnails, where the default clients list only 16:9 frames with that art
+/// centred on a flat colour (`tests/fixtures/video-music.json`). It asks one
+/// more player of YouTube for a single video and nothing more for a flat
+/// list, which asks no player at all; a yt-dlp that no longer knows the
+/// client only warns ("Skipping unsupported client") and answers as before.
+/// Other sites ignore a `youtube:` argument.
+const PROBE_ARGS: [&str; 5] = ["-J", "--flat-playlist", "--extractor-args", "youtube:player_client=default,web_music", "--"];
+
 impl Ytdlp {
     pub fn new(data_dir: &Path) -> Self {
         Self { bin: data_dir.join("bin").join("yt-dlp") }
@@ -278,7 +292,8 @@ impl Ytdlp {
         if !self.installed() {
             return Err(ToolError::Missing);
         }
-        let mut child = spawn_in_own_group(&self.bin, &["-J".into(), "--flat-playlist".into(), "--".into(), url.into()])
+        let args: Vec<String> = PROBE_ARGS.iter().map(|a| a.to_string()).chain([url.to_string()]).collect();
+        let mut child = spawn_in_own_group(&self.bin, &args)
             .await
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
@@ -391,25 +406,32 @@ fn read_video(v: &Value) -> Option<Video> {
 }
 
 /// The URL of the largest `.jpg` of a `thumbnails` array (the extension is
-/// judged on the URL's path, never its query string).
+/// judged on the URL's path, never its query string; see [`names_a_jpg`]).
 ///
 /// "Largest" is the greatest `width * height` among the entries that declare
-/// both: those are the ones the source really served. Failing any, the best
+/// both: those are the ones the source really served. A square one of at
+/// least [`SQUARE_MIN_SIDE`] pixels beats any other shape, however larger:
+/// it is the album's art, where a 16:9 frame of the same track only centres
+/// it on a flat colour (an album track's, `tests/fixtures/video-music.json`).
+/// A video that is not an album's track lists no square. Failing any sized one, the best
 /// `preference` (yt-dlp lists the worst first) among the unsized ones, whose
 /// existence is a guess. A webp or png is never taken: the display side
 /// decodes jpg only.
 fn largest_jpg(thumbnails: &Value) -> Option<String> {
-    let jpgs: Vec<(&str, Option<u64>, i64)> = thumbnails
+    // The address; whether it is a square big enough and its area, when
+    // sized; its preference.
+    type Candidate<'a> = (&'a str, Option<(bool, u64)>, i64);
+    let jpgs: Vec<Candidate> = thumbnails
         .as_array()?
         .iter()
         .filter_map(|t| {
             let url = t["url"].as_str()?;
-            let parsed = url::Url::parse(url).ok()?;
-            if !parsed.path().to_ascii_lowercase().ends_with(".jpg") {
+            if !names_a_jpg(&url::Url::parse(url).ok()?) {
                 return None;
             }
             let area = match (t["width"].as_u64(), t["height"].as_u64()) {
-                (Some(w), Some(h)) => Some(w * h),
+                // A square big enough is put above every other size.
+                (Some(w), Some(h)) => Some((w == h && w >= SQUARE_MIN_SIDE, w * h)),
                 _ => None,
             };
             Some((url, area, t["preference"].as_i64().unwrap_or(0)))
@@ -418,6 +440,22 @@ fn largest_jpg(thumbnails: &Value) -> Option<String> {
     let sized = jpgs.iter().filter(|(_, area, _)| area.is_some()).max_by_key(|(_, area, _)| *area);
     let best = sized.or_else(|| jpgs.iter().max_by_key(|(_, _, preference)| *preference));
     best.map(|(url, _, _)| (*url).to_string())
+}
+
+/// The side from which a square thumbnail is preferred to a larger one of
+/// another shape: an album's art (544 pixels from YouTube Music, 500 from
+/// SoundCloud) is, a 60- or 226-pixel icon of it is not worth a full frame.
+const SQUARE_MIN_SIDE: u64 = 300;
+
+/// Whether a thumbnail's address names a jpeg: its path ends in `.jpg`
+/// (whatever its case; never judged on the query string), or it is Google's
+/// user content asked rendered as a jpeg (`=…-rj` ends the path, as
+/// `yt3.googleusercontent.com` serves YouTube Music's album art; measured
+/// to answer `image/jpeg` even to an `Accept` that prefers webp).
+fn names_a_jpg(url: &url::Url) -> bool {
+    let path = url.path().to_ascii_lowercase();
+    let google = url.host_str().is_some_and(|h| h == "googleusercontent.com" || h.ends_with(".googleusercontent.com"));
+    path.ends_with(".jpg") || (google && path.ends_with("-rj"))
 }
 
 #[cfg(test)]
@@ -553,6 +591,53 @@ mod tests {
                 .as_deref(),
             Some("https://x/b.jpg")
         );
+    }
+
+    #[test]
+    fn an_album_track_takes_its_square_art_not_the_larger_frame_around_it() {
+        // Captured with the `web_music` client: 1280x720 frames, and the
+        // album art in 60, 120, 226 and 544 pixels on yt3.googleusercontent.com.
+        let p = parse_probe(&fixture("video-music.json")).unwrap();
+        let square = "https://yt3.googleusercontent.com/PEYGm455cR6Sst12Fq_9VIevF18kBcYARedz8aP5884_Gp9FgruD2dw41zBgL-dI0s-Vt5fUMLK_fQs=w544-h544-l90-rj";
+        assert_eq!(p.thumbnail_jpg.as_deref(), Some(square));
+        assert_eq!(p.entries[0].thumbnail_jpg.as_deref(), Some(square));
+        // Its album: the playlist's own square art (the largest anyway); its
+        // flat entry, which no player was asked for, has 16:9 frames only.
+        let p = parse_probe(&fixture("album-playlist.json")).unwrap();
+        assert_eq!(p.thumbnail_jpg.as_deref(), Some("https://i9.ytimg.com/s_p/OLAK5uy_lSJ0FKs6xyxFGj-i7CQOt4sncnPuvnTCA/maxresdefault.jpg"));
+        let entry = p.entries[0].thumbnail_jpg.as_deref().unwrap();
+        assert!(entry.starts_with("https://i.ytimg.com/vi/0k2Di6QqqEA/hqdefault.jpg?"), "{entry}");
+    }
+
+    #[test]
+    fn square_and_google_picture_edge_cases() {
+        let pick = |thumbs: &str| {
+            let json = format!(r#"{{"_type":"video","id":"aaaaaaaaaaa","title":"t","thumbnails":{thumbs}}}"#);
+            parse_probe(&json).unwrap().thumbnail_jpg
+        };
+        let frame = r#"{"url":"https://x/frame.jpg","width":1280,"height":720}"#;
+        // A square from SQUARE_MIN_SIDE beats a larger frame; one pixel less does not.
+        let sq = |side: u64| format!(r#"{{"url":"https://x/sq{side}.jpg","width":{side},"height":{side}}}"#);
+        assert_eq!(pick(&format!("[{frame},{}]", sq(300))).as_deref(), Some("https://x/sq300.jpg"));
+        assert_eq!(pick(&format!("[{frame},{}]", sq(299))).as_deref(), Some("https://x/frame.jpg"));
+        // Among squares, the largest.
+        assert_eq!(pick(&format!("[{},{frame},{}]", sq(544), sq(400))).as_deref(), Some("https://x/sq544.jpg"));
+        // Nearly square is not square.
+        assert_eq!(
+            pick(&format!(r#"[{frame},{{"url":"https://x/near.jpg","width":544,"height":543}}]"#)).as_deref(),
+            Some("https://x/frame.jpg")
+        );
+        // Google user content counts as a jpg only when asked rendered as one,
+        // on Google's own host: not a lookalike, not without `-rj`.
+        let g = |url: &str| pick(&format!(r#"[{{"url":"{url}","width":544,"height":544}}]"#));
+        let ok = "https://yt3.googleusercontent.com/abc=w544-h544-l90-rj";
+        assert_eq!(g(ok).as_deref(), Some(ok));
+        assert_eq!(g("https://lh3.googleusercontent.com/abc=w544-h544-RJ").as_deref(), Some("https://lh3.googleusercontent.com/abc=w544-h544-RJ"));
+        assert_eq!(g("https://yt3.googleusercontent.com/abc=w544-h544-l90-rw"), None);
+        assert_eq!(g("https://yt3.googleusercontent.com/abc"), None);
+        assert_eq!(g("https://googleusercontent.com.evil.example/abc=w544-rj"), None);
+        assert_eq!(g("https://evilgoogleusercontent.com/abc=w544-rj"), None);
+        assert_eq!(g("https://x.example/abc=w544-rj"), None);
     }
 
     #[test]
@@ -875,7 +960,10 @@ mod tests {
 
             let p = y.probe("-oops", Duration::from_secs(10)).await.unwrap();
             assert_eq!(p.title, "Me at the zoo");
-            assert_eq!(std::fs::read_to_string(&args).unwrap(), "-J\n--flat-playlist\n--\n-oops\n");
+            assert_eq!(
+                std::fs::read_to_string(&args).unwrap(),
+                "-J\n--flat-playlist\n--extractor-args\nyoutube:player_client=default,web_music\n--\n-oops\n"
+            );
         }
 
         #[tokio::test]

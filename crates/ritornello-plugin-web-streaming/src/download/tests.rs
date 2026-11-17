@@ -746,6 +746,31 @@ async fn each_track_of_a_playlist_gets_its_own_thumbnail_as_chosen_and_the_folde
     assert_eq!(notes(&events), vec![Note::CoverBeside; probe.entries.len()]);
 }
 
+#[tokio::test]
+async fn the_folder_s_picture_alone_leaves_a_playlist_s_tracks_without_one() {
+    let s = setup(&fixture_path("playlist.json"), "", Some(JPEG.to_vec()));
+    let (_, events) = run_choosing(&s, &playlist_entry(), &choosing(Format::Original, CoverMode::Folder), &Cancel::new()).await;
+    let folder = s.resolved.dir.join("Popular Music Videos");
+    let files = files_in(&folder);
+    assert!(files.contains(&"cover.jpg".to_string()), "{files:?}");
+    assert!(!files.iter().any(|f| f.ends_with(".jpg") && f != "cover.jpg"), "{files:?}");
+    assert!(files.iter().any(|f| f.ends_with(".m4a")), "{files:?}");
+    // Only the folder's picture was fetched, and nothing was said about any track's.
+    let probe = crate::ytdlp::parse_probe(&std::fs::read_to_string(fixture_path("playlist.json")).unwrap()).unwrap();
+    assert_eq!(*s.calls.lock().unwrap(), [probe.thumbnail_jpg.clone().unwrap()]);
+    assert_eq!(notes(&events), vec![]);
+}
+
+#[tokio::test]
+async fn the_folder_s_picture_puts_a_single_video_s_beside_it() {
+    // A single video has no folder of its own: its picture goes beside it.
+    let s = setup(&fixture_path("video.json"), "", Some(JPEG.to_vec()));
+    let (end, events) = run_choosing(&s, &zoo(), &choosing(Format::Original, CoverMode::Folder), &Cancel::new()).await;
+    assert_eq!(end, PresetEnd::Finished);
+    assert_eq!(files_in(&s.resolved.dir), ["Me at the zoo.jpg", "Me at the zoo.m4a"]);
+    assert_eq!(notes(&events), vec![]);
+}
+
 // ---- the names typed --------------------------------------------------------
 
 #[tokio::test]

@@ -50,7 +50,7 @@ printf 'audio' > "$file"
 "#,
         probe = probe.display(),
         log = log.display(),
-        slow = if slow_probe { r#"case "$4" in *jNQXAC9IVRw) sleep 1;; esac"# } else { ":" },
+        slow = if slow_probe { r#"case "$6" in *jNQXAC9IVRw) sleep 1;; esac"# } else { ":" },
     );
     std::fs::write(ytdlp.bin(), script).unwrap();
     std::fs::set_permissions(ytdlp.bin(), std::fs::Permissions::from_mode(0o755)).unwrap();

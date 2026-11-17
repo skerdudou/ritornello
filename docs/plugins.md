@@ -2990,8 +2990,21 @@ a folder of a share, in the format chosen in the dialog:
   ever runs as the plugin's own conversion of a finished local file (above).
 - **The cover.** The plugin picks a `jpg` from the thumbnails the probe
   listed and fetches it itself through the guard (timeouts, a size cap, no
-  redirect to anywhere local). A playlist's is written as `cover.jpg` in its
-  folder. Each track's — a single video's, and each video's of a playlist,
+  redirect to anywhere local). A square one of at least 300 pixels beats
+  any larger frame: the probe asks yt-dlp for YouTube's `web_music` player
+  client besides its default ones (`--extractor-args
+  youtube:player_client=default,web_music`), which adds, for a track made
+  from an album, the album art itself (`yt3.googleusercontent.com`, up to
+  544 pixels, a jpeg as its `-rj` asks) where the default clients only
+  centre it in a 16:9 frame on a flat colour. That client costs one more
+  request for a single video and nothing for a flat list (no player is
+  asked), and a yt-dlp that has dropped it only warns; a list's entries
+  therefore keep their 16:9 frames. A playlist's own picture is written as `cover.jpg` in its
+  folder (an album's is square). The dialog offers a playlist a third
+  choice, **the folder's picture alone**: its tracks then get none of their
+  own and all show that `cover.jpg` (a single video downloaded in the same
+  job, which has no folder of its own, gets its picture beside it).
+  Otherwise each track's — a single video's, and each video's of a playlist,
   from its own entry's thumbnails — is **the track's own**, never the
   folder's (a `cover.jpg` beside one video became the cover of every other
   track of the folder; and a playlist's tracks once had no picture of their

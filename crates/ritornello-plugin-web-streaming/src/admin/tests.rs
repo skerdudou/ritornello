@@ -52,7 +52,7 @@ fn install_tool(data: &Path, body: &str) {
 /// A yt-dlp that answers a probe with the captures, and "downloads" nothing.
 fn answering() -> String {
     format!(
-        "case \"$4\" in *playlist*) cat '{dir}/playlist.json';; *) cat '{dir}/video.json';; esac",
+        "case \"$6\" in *playlist*) cat '{dir}/playlist.json';; *) cat '{dir}/video.json';; esac",
         dir = fixtures().display()
     )
 }
@@ -262,7 +262,7 @@ async fn each_refused_line_has_its_own_error_and_the_valid_ones_are_probed() {
 /// address it is given, and writes each address it is given to `bin/calls`.
 fn answering_web() -> String {
     format!(
-        "echo \"$4\" >> \"$(dirname \"$0\")/calls\"\ncase \"$4\" in *sets*) cat '{dir}/soundcloud-set.json';; *album*) cat '{dir}/bandcamp-album.json';; *live*) echo '{{\"_type\":\"video\",\"id\":\"1\",\"title\":\"t\",\"is_live\":true}}';; *) cat '{dir}/soundcloud-track.json';; esac",
+        "echo \"$6\" >> \"$(dirname \"$0\")/calls\"\ncase \"$6\" in *sets*) cat '{dir}/soundcloud-set.json';; *album*) cat '{dir}/bandcamp-album.json';; *live*) echo '{{\"_type\":\"video\",\"id\":\"1\",\"title\":\"t\",\"is_live\":true}}';; *) cat '{dir}/soundcloud-track.json';; esac",
         dir = fixtures().display()
     )
 }
