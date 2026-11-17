@@ -33,8 +33,10 @@ pub(crate) struct Store {
     /// [`SAVE_DEADLINE`], shorter in the tests.
     pub(super) deadline: Duration,
     /// Runs on the blocking thread before the files are written: a test holds
-    /// a write there so that it outlives its deadline.
-    #[cfg(test)]
+    /// a write there so that it outlives its deadline. Always `None` outside
+    /// the tests. Not gated by `#[cfg(test)]`: the core's data-directory guard
+    /// cannot delimit a gated struct field or struct-literal field (they end
+    /// with a comma), and refuses what it cannot delimit.
     pub(super) before_write: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
@@ -46,7 +48,6 @@ impl Store {
             saved,
             edit: Arc::new(tokio::sync::Mutex::new(())),
             deadline: SAVE_DEADLINE,
-            #[cfg(test)]
             before_write: None,
         }
     }
@@ -107,14 +108,12 @@ impl Store {
         let probed = probe.lock().unwrap_or_else(|p| p.into_inner()).lists_for(&table);
         let (data, path) = (self.data.clone(), self.data.join("entries.toml"));
         let to_write = table.clone();
-        #[cfg(test)]
         let before_write = self.before_write.clone();
         let left = self.deadline.saturating_sub(started.elapsed());
         let written = targets::blocking(left, move || {
             // Held on the blocking thread: dropped when this write ends, even
             // one the deadline gave up on; handed back when it succeeds.
             let editing = editing;
-            #[cfg(test)]
             if let Some(hook) = before_write {
                 hook();
             }
