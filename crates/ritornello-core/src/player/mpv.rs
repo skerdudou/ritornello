@@ -19,6 +19,10 @@ pub struct MpvIpc {
     /// Keeps the events of a `play_aside` load away from the core. A plain
     /// mutex: never held across an `await`.
     gate: Arc<std::sync::Mutex<AsideGate>>,
+    /// Counts mpv's `audio-reconfig` events, which the core never sees: the
+    /// end of a paused chime waits for the one of its chain rewrite
+    /// (`end_sound_while_paused`).
+    reconfigs: Arc<tokio::sync::watch::Sender<u64>>,
 }
 
 impl MpvIpc {
@@ -29,9 +33,11 @@ impl MpvIpc {
             pending: Arc::new(Mutex::new(HashMap::new())),
             next_id: AtomicU64::new(1),
             gate: Arc::new(std::sync::Mutex::new(AsideGate::default())),
+            reconfigs: Arc::new(tokio::sync::watch::Sender::new(0)),
         });
         let pending = ipc.pending.clone();
         let gate = ipc.gate.clone();
+        let reconfigs = ipc.reconfigs.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(read).lines();
             // True until the first `idle-active` notification.
@@ -91,6 +97,9 @@ impl MpvIpc {
                         }
                         _ => {}
                     }
+                }
+                if v["event"] == json!("audio-reconfig") {
+                    reconfigs.send_modify(|n| *n = n.wrapping_add(1));
                 }
                 if let Some(id) = v.get("request_id").and_then(Value::as_u64) {
                     if let Some(tx) = pending.lock().await.remove(&id) {
@@ -250,23 +259,45 @@ impl MpvIpc {
     /// can pass `loadfile` its options without knowing which mpv version
     /// counts its positional arguments how — and waits for its response.
     pub async fn command_named(&self, cmd: Value) -> Result<Value> {
+        let (id, rx) = self.send(cmd).await?;
+        self.wait(id, rx, COMMAND_TIMEOUT).await
+    }
+
+    /// `command`, its response awaited until `deadline` at most (a lock
+    /// chime's budget, `PAUSED_CHIME_START_BUDGET`…). The command is written
+    /// whatever the time left — at zero, it is written and not awaited — so
+    /// an mpv that answers late still applies it, in order with the others.
+    /// A response that missed the deadline is `CommandTimeout`.
+    pub async fn command_until(&self, args: &[Value], deadline: tokio::time::Instant) -> Result<Value> {
+        let (id, rx) = self.send(json!(args)).await?;
+        self.wait(id, rx, deadline.saturating_duration_since(tokio::time::Instant::now())).await
+    }
+
+    /// Writes one command, its response to come through `rx`. Only the
+    /// wait is ever bounded, never the write: a write cut halfway would
+    /// leave half a line in mpv's input, and every command after it lost.
+    async fn send(&self, cmd: Value) -> Result<(u64, oneshot::Receiver<Result<Value>>)> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
         let msg = json!({ "command": cmd, "request_id": id });
-        {
-            let mut w = self.writer.lock().await;
-            if let Err(e) = w.write_all(format!("{msg}\n").as_bytes()).await {
-                self.pending.lock().await.remove(&id);
-                return Err(e.into());
-            }
+        let mut w = self.writer.lock().await;
+        if let Err(e) = w.write_all(format!("{msg}\n").as_bytes()).await {
+            self.pending.lock().await.remove(&id);
+            return Err(e.into());
         }
-        match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
+        Ok((id, rx))
+    }
+
+    /// Awaits the response to command `id` for `timeout` at most; past it
+    /// the entry is dropped (a late response then answers nothing).
+    async fn wait(&self, id: u64, rx: oneshot::Receiver<Result<Value>>, timeout: std::time::Duration) -> Result<Value> {
+        match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(res)) => res,
             Ok(Err(_)) => bail!("mpv: response abandoned"),
             Err(_) => {
                 self.pending.lock().await.remove(&id);
-                bail!("mpv: command timeout")
+                Err(CommandTimeout.into())
             }
         }
     }
@@ -277,6 +308,24 @@ impl MpvIpc {
         Ok(())
     }
 }
+
+/// How long a command waits for mpv's response, unless it has a budget of
+/// its own (`MpvIpc::command_until`).
+const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// mpv did not answer a command in the time it was given. Typed, so that
+/// the end of a paused chime can tell a restore seek that mpv may still
+/// apply (written, unanswered) from one it refused.
+#[derive(Debug)]
+pub struct CommandTimeout;
+
+impl std::fmt::Display for CommandTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("mpv: command timeout")
+    }
+}
+
+impl std::error::Error for CommandTimeout {}
 
 /// What a change of mpv's `paused-for-cache` means for the journal.
 #[derive(Debug, PartialEq)]
@@ -377,6 +426,26 @@ const TRACK_PROPERTIES: [&str; 2] = ["playlist-pos", "chapter"];
 ///   `idle-active: true` (a stop) through rather than mistake it for a
 ///   restoration. `paused-for-cache` only feeds the journal, which the pump
 ///   writes before the gate.
+///
+/// **It also keeps a paused chime from the core** (`sound_while_paused`):
+/// mpv is unpaused for the chime and paused again, the file put back where
+/// it stood, and the core must go on seeing a paused file. Measured by the
+/// paused spike on mpv 0.37 (`PAUSED_CHIME` in the tests): of the lines that
+/// sequence produces, `audio-reconfig` and `seek`, which the pump never
+/// turns into events, and `playback-restart` — the flush seek's, during the
+/// chime, and the restore seek's, which mpv sends only once the user
+/// resumes, 0.29 to 0.4 s later. So every `playback-restart` is swallowed
+/// during the chime, and after it exactly one more, whenever it comes,
+/// unless a `start-file` comes first (a new file: nothing of the chime is
+/// pending any more, and its own `playback-restart` is real). No
+/// `start-file`, `end-file`, `idle` or observed property change in any run
+/// (a file near its end does produce them: `ChimeRoute::Silent` there). A
+/// `start-file` during the chime is the user's, admitted, and ends the
+/// chime for the gate. mpv may also send the restore's `playback-restart`
+/// while still paused (seen with `ao=null` on a loaded machine, about one
+/// run in eight): it is swallowed then just the same. Were it ever lost,
+/// the one swallowed in its place would be a later seek's, which the core
+/// only reads to know the chain is live: it already was.
 #[derive(Debug, Default)]
 pub(crate) struct AsideGate {
     /// Asides sent whose `start-file` has not come yet.
@@ -392,6 +461,16 @@ pub(crate) struct AsideGate {
     pending: HashMap<String, Value>,
     /// Lines to hand to the core right after the admitted line.
     replay: Vec<Value>,
+    /// A paused chime sounds (`sound_while_paused` until
+    /// `end_sound_while_paused`): every `playback-restart` is its own.
+    paused_chime: bool,
+    /// The restore seek of a paused chime was sent and its
+    /// `playback-restart` has not come yet (it comes once the user resumes).
+    restore_pending: bool,
+    /// What `progress` answers while a paused chime sounds, and after a
+    /// restore until the user's next move (`end_paused_chime`, `thaw`) or a
+    /// `start-file`: what it answered at the pause.
+    frozen: Option<Progress>,
 }
 
 /// A property-change's value; absent (property unavailable) reads as `null`.
@@ -433,9 +512,63 @@ impl AsideGate {
         self.loading
     }
 
+    /// A paused chime is about to be written: `progress` is what the core
+    /// reads until it ends. A second chime keeps the first one's.
+    pub(crate) fn begin_paused_chime(&mut self, progress: Progress) {
+        self.paused_chime = true;
+        self.frozen.get_or_insert(progress);
+    }
+
+    /// Whether a paused chime sounds (`begin_paused_chime` until
+    /// `end_paused_chime`, or a `start-file`).
+    pub(crate) fn in_paused_chime(&self) -> bool {
+        self.paused_chime
+    }
+
+    /// The progress frozen by a paused chime, if one sounds.
+    pub(crate) fn frozen(&self) -> Option<Progress> {
+        self.frozen
+    }
+
+    /// The paused chime is over; `restore_sent` when its restore seek was
+    /// sent, whose `playback-restart` is still to come. Then `progress`
+    /// stays frozen until the user moves playback (`thaw`) or a file starts,
+    /// not until that `playback-restart`: after the restore, mpv's
+    /// `time-pos` read while still paused said 0.17 s short of where the
+    /// file was put back in about one run in four (mpv 0.37, `ao=null`, the
+    /// test machine loaded), the restore's `playback-restart` having come
+    /// during the pause in some of those runs, while playback did resume at
+    /// the restored point — a bar going back for nothing. Nothing but the
+    /// user moves a paused file.
+    pub(crate) fn end_paused_chime(&mut self, restore_sent: bool) {
+        self.paused_chime = false;
+        self.restore_pending = restore_sent;
+        if !restore_sent {
+            self.frozen = None;
+        }
+    }
+
+    /// The user moves playback (resume, seek, stop, another track): from
+    /// now on `progress` is mpv's again, unless a paused chime sounds.
+    pub(crate) fn thaw(&mut self) {
+        if !self.paused_chime {
+            self.frozen = None;
+        }
+    }
+
     /// Whether `line` (an event, never a response) reaches the core. When it
     /// does, `take_replay` gives what must follow it.
     pub(crate) fn admit(&mut self, line: &Value) -> bool {
+        if line["event"] == json!("start-file") {
+            self.paused_chime = false;
+            self.restore_pending = false;
+            self.frozen = None;
+        } else if line["event"] == json!("playback-restart") && (self.paused_chime || self.restore_pending) {
+            if !self.paused_chime {
+                self.restore_pending = false;
+            }
+            return false;
+        }
         if line["event"] == json!("start-file") {
             if self.armed > 0 {
                 self.armed -= 1;
@@ -756,6 +889,7 @@ impl MpvPlayer {
     /// **before** it is written, since its `start-file` can arrive before
     /// its response (`AsideGate::sounding_aside`).
     async fn real_load(&self, cmd: &[Value]) -> Result<Value> {
+        self.gate().thaw();
         self.gate().set_loading(true);
         let result = self.ipc.command(cmd).await;
         if result.is_err() {
@@ -764,23 +898,106 @@ impl MpvPlayer {
         result
     }
 
-    /// `chime_route`'s three questions to mpv.
-    async fn ask_chime_route(&self) -> Result<super::ChimeRoute> {
+    fn get(&self, name: &str) -> [Value; 2] {
+        [json!("get_property"), json!(name)]
+    }
+
+    /// `get_property name`, answered by `deadline` — or not sent at all once
+    /// it has passed: a question nobody waits for is worth nothing.
+    async fn ask_until(&self, name: &str, deadline: tokio::time::Instant) -> Result<Value> {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(CommandTimeout.into());
+        }
+        self.ipc.command_until(&self.get(name), deadline).await
+    }
+
+    /// A paused chime's command — the chain, a seek, the pause — answered by
+    /// `deadline`, or not sent once it has passed (see `ask_until`).
+    async fn act_until(&self, args: &[Value], deadline: tokio::time::Instant) -> Result<Value> {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(CommandTimeout.into());
+        }
+        self.ipc.command_until(args, deadline).await
+    }
+
+    /// `chime_route`'s questions to mpv, in the paused spike's order.
+    /// The questions share `CHIME_ROUTE_BUDGET`: one that misses it fails
+    /// (`CommandTimeout`), and so does every one after, unsent. A late
+    /// answer to `time-pos` or `duration` would otherwise read as "none"
+    /// and drop the near-end guard: once the budget is spent, `seekable`
+    /// fails too, and the route is `Silent`.
+    async fn ask_chime_route(&self, chime: std::time::Duration) -> Result<super::ChimeRoute> {
         use super::ChimeRoute;
-        if self.ipc.command(&[json!("get_property"), json!("idle-active")]).await? == json!(true) {
+        let deadline = tokio::time::Instant::now() + CHIME_ROUTE_BUDGET;
+        if self.ask_until("idle-active", deadline).await? == json!(true) {
             return Ok(ChimeRoute::Idle);
         }
-        if self.ipc.command(&[json!("get_property"), json!("pause")]).await? == json!(true) {
+        let paused = self.ask_until("pause", deadline).await? == json!(true);
+        let params = self.ask_until("audio-params", deadline).await.unwrap_or(Value::Null);
+        let field = |name: &str| params[name].as_u64().and_then(|n| u32::try_from(n).ok());
+        let (Some(sample_rate), Some(channels)) = (field("samplerate"), field("channel-count")) else {
+            return Ok(ChimeRoute::Silent);
+        };
+        if !paused {
+            return Ok(ChimeRoute::Live { sample_rate, channels });
+        }
+        let position = number_or_none(self.ask_until("time-pos", deadline).await);
+        let duration = number_or_none(self.ask_until("duration", deadline).await);
+        // Only an explicit `false` says "a stream": an unavailable `seekable`
+        // (an error) or anything but a boolean says nothing, and taking a
+        // file for a stream would leave it unrestored and unguarded against
+        // its end. No chime then.
+        let Ok(Value::Bool(seekable)) = self.ask_until("seekable", deadline).await else {
+            return Ok(ChimeRoute::Silent);
+        };
+        if !seekable {
+            // A stream's `duration` is its cache end (measured): no guard.
+            return Ok(ChimeRoute::Paused { sample_rate, channels, resume_at: None });
+        }
+        // After a restore, still paused, the pause point is the one the gate
+        // kept: `time-pos` then read up to 0.17 s short (`end_paused_chime`),
+        // and a second chime would put the file back there.
+        let kept = self.gate().frozen().and_then(|p| p.position_s);
+        let Some(position) = kept.or(position) else {
+            // Nowhere to put the file back: the chime would move it.
+            return Ok(ChimeRoute::Silent);
+        };
+        if !super::paused_chime_fits(position, duration, chime) {
             return Ok(ChimeRoute::Silent);
         }
-        let params = self.ipc.command(&[json!("get_property"), json!("audio-params")]).await.unwrap_or(Value::Null);
-        let field = |name: &str| params[name].as_u64().and_then(|n| u32::try_from(n).ok());
-        Ok(match (field("samplerate"), field("channel-count")) {
-            (Some(sample_rate), Some(channels)) => ChimeRoute::Live { sample_rate, channels },
-            _ => ChimeRoute::Silent,
-        })
+        Ok(ChimeRoute::Paused { sample_rate, channels, resume_at: Some(position) })
     }
 }
+
+/// How long the end of a paused chime waits for the `audio-reconfig` of its
+/// chain rewrite before the restore seek. Measured by the paused spike on
+/// mpv 0.37: a restore seek sent before that rebuild was lost once in about
+/// 49 (the audio resumed 2.7 s off while `time-pos` claimed the restored
+/// position); with the wait, never in 50, and the wait itself took under
+/// 0.1 ms each time. The guard is reasoned from that one failure, not proven.
+const RESTORE_RECONFIG_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The lock chime runs on the core loop, which also serves the remote and
+/// the page: no part of it may wait out mpv's 5 s per command
+/// (`COMMAND_TIMEOUT`), which made a lock press on an mpv that stopped
+/// answering hold the loop for about 30 s (the route's six questions), 25 s
+/// (the start's five commands) and 16 s (the end's three, plus the chain
+/// rebuild's wait). Each step now has a total budget; mpv answers each
+/// command in well under a millisecond on the dev machine, so a budget is
+/// only ever spent by an mpv in trouble.
+///
+/// The route's questions, all of them.
+const CHIME_ROUTE_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
+/// The start of a paused chime (`sound_while_paused`): the pause's
+/// progress, the chain, the flush seek, the unpause. A step past it is not
+/// sent, the call fails, and the core ends the chime at once.
+pub(crate) const PAUSED_CHIME_START_BUDGET: std::time::Duration = std::time::Duration::from_millis(1500);
+/// The end of a paused chime (`end_sound_while_paused`): the pause, the
+/// chain, the wait for its rebuild (`RESTORE_RECONFIG_WAIT`, cut to what is
+/// left), the restore seek. Unlike the start, every step is written even
+/// once the budget is spent, only not awaited: an mpv that answers late
+/// applies them in order, and ends paused, on the plain chain, put back.
+pub(crate) const PAUSED_CHIME_END_BUDGET: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// Brings a `get_property` response down to a usable number.
 ///
@@ -994,18 +1211,22 @@ impl super::Player for MpvPlayer {
         Ok(())
     }
     async fn stop(&self) -> Result<()> {
+        self.gate().thaw();
         self.ipc.command(&[json!("stop")]).await?;
         Ok(())
     }
     async fn toggle_pause(&self) -> Result<()> {
+        self.gate().thaw();
         self.ipc.command(&[json!("cycle"), json!("pause")]).await?;
         Ok(())
     }
     async fn next(&self) -> Result<()> {
+        self.gate().thaw();
         self.ipc.command(&[json!("playlist-next")]).await?;
         Ok(())
     }
     async fn prev(&self) -> Result<()> {
+        self.gate().thaw();
         self.ipc.command(&[json!("playlist-prev")]).await?;
         Ok(())
     }
@@ -1022,6 +1243,11 @@ impl super::Player for MpvPlayer {
         Ok(())
     }
     async fn progress(&self) -> Result<Progress> {
+        // While a paused chime sounds, `time-pos` moves with it and comes
+        // back after (measured): the core reads the pause's.
+        if let Some(frozen) = self.gate().frozen() {
+            return Ok(frozen);
+        }
         // Two round trips per second on a local Unix socket: the cost is
         // nil next to the interval. A poll rather than an
         // `observe_property` because mpv does not pace its `time-pos`
@@ -1042,6 +1268,7 @@ impl super::Player for MpvPlayer {
     }
 
     async fn seek_relative(&self, delta_s: i64) -> Result<()> {
+        self.gate().thaw();
         self.ipc
             .command(&[json!("seek"), json!(delta_s), json!("relative")])
             .await
@@ -1049,6 +1276,7 @@ impl super::Player for MpvPlayer {
     }
 
     async fn seek_absolute(&self, position_s: u32) -> Result<()> {
+        self.gate().thaw();
         self.ipc
             .command(&[json!("seek"), json!(position_s), json!("absolute")])
             .await
@@ -1056,6 +1284,7 @@ impl super::Player for MpvPlayer {
     }
 
     async fn set_chapter(&self, n: i64) -> Result<()> {
+        self.gate().thaw();
         self.ipc.command(&[json!("set_property"), json!("chapter"), json!(n)]).await?;
         Ok(())
     }
@@ -1147,11 +1376,25 @@ impl super::Player for MpvPlayer {
     /// send a `replace` cutting the file just asked for. The answer is
     /// `Silent`, without a question; and again after mpv's answer, should a
     /// load have been sent meanwhile. The chime is lost, never the load.
-    async fn chime_route(&self) -> Result<super::ChimeRoute> {
+    ///
+    /// **Paused** (`pause` true, audio parameters known), three more
+    /// questions: `time-pos`, `duration`, `seekable`. A seekable file is put
+    /// back at `time-pos` after the chime, and is `Silent` when it ends
+    /// sooner than the chime plus `super::PAUSED_CHIME_END_MARGIN_S` (or has no
+    /// position to go back to); a stream that is not seekable has no
+    /// `resume_at` and no guard, its `duration` being the end of its cache
+    /// (measured, mpv 0.37). Only an explicit `seekable: false` makes a
+    /// stream: an unavailable or non-boolean answer is `Silent`.
+    ///
+    /// **A paused chime sounding is `Silent`, without a question**: mpv,
+    /// unpaused for it, would answer `Live`, and a chime mixed over the
+    /// music at full gain would bring the music back. The core, which knows
+    /// it started that chime, handles a second one itself.
+    async fn chime_route(&self, chime: std::time::Duration) -> Result<super::ChimeRoute> {
         use super::ChimeRoute;
         let settled = |route: ChimeRoute| {
             let gate = self.gate();
-            if gate.loading() {
+            if gate.loading() || gate.in_paused_chime() {
                 ChimeRoute::Silent
             } else if gate.sounding_aside() {
                 ChimeRoute::Idle
@@ -1159,13 +1402,13 @@ impl super::Player for MpvPlayer {
                 route
             }
         };
-        if self.gate().loading() {
+        if self.gate().loading() || self.gate().in_paused_chime() {
             return Ok(ChimeRoute::Silent);
         }
         if self.gate().sounding_aside() {
             return Ok(ChimeRoute::Idle);
         }
-        let route = self.ask_chime_route().await?;
+        let route = self.ask_chime_route(chime).await?;
         Ok(settled(route))
     }
 
@@ -1184,6 +1427,95 @@ impl super::Player for MpvPlayer {
             return Err(e);
         }
         Ok(())
+    }
+
+    /// The paused spike's sequence on mpv 0.37 (`kf48`, 20/20 clean): the
+    /// chain, then the flush seek `absolute+keyframes`, then the unpause.
+    ///
+    /// **The flush.** Without it, the audio mpv had queued at the pause
+    /// (`audio-buffer`, filtered by the chain of that moment) played at the
+    /// unpause, at full gain, before the chime — every cycle. A seek to where
+    /// the file stands drops it. **`+keyframes`, not `+exact`**: mpv trims
+    /// an exact seek's lead-in samples after the filter chain, which cut up
+    /// to a packet (512 frames of WAV there; 1152 for MP3, up to 4608 for
+    /// FLAC) off the chime's attack in 8 of 20 cycles. A keyframe seek trims
+    /// nothing, and the music it lands on early is at gain 0. The number is
+    /// sent as `time-pos` gave it.
+    ///
+    /// The gate is set **before** the chain is written, so nothing of it can
+    /// reach the core, and `progress` is read once, at the first chime.
+    /// Within `PAUSED_CHIME_START_BUDGET`: a step past it is not sent and
+    /// the call fails, the core then ends the chime at once. Nothing is
+    /// touched before the pause's progress has been read in time: the gate
+    /// is armed only then, so a start that gave up there leaves it as it
+    /// was.
+    async fn sound_while_paused(&self, chain: &str, resume_at: Option<f64>) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + PAUSED_CHIME_START_BUDGET;
+        if !self.gate().in_paused_chime() {
+            // What `progress` answers: the kept pause point after a restore.
+            let frozen = self.gate().frozen();
+            let progress = match frozen {
+                Some(kept) => kept,
+                None => {
+                    let position = number_or_none(self.ask_until("time-pos", deadline).await);
+                    let duration = number_or_none(self.ask_until("duration", deadline).await);
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(CommandTimeout.into());
+                    }
+                    Progress { position_s: position, duration_s: duration }
+                }
+            };
+            self.gate().begin_paused_chime(progress);
+        }
+        self.act_until(&[json!("set_property"), json!("af"), json!(chain)], deadline).await?;
+        if let Some(t) = resume_at {
+            self.act_until(&[json!("seek"), json!(t), json!("absolute+keyframes")], deadline).await?;
+        }
+        self.act_until(&[json!("set_property"), json!("pause"), json!(false)], deadline).await?;
+        Ok(())
+    }
+
+    /// The pause, the chain, its `audio-reconfig` awaited
+    /// (`RESTORE_RECONFIG_WAIT`), then the restore seek `absolute+exact`:
+    /// played back 0 or −1 sample from `resume_at` in every measured cycle
+    /// (the −1 is the exact seek's float rounding, always so at 44.1 kHz).
+    /// Never checked by reading `time-pos` afterwards: it once reported the
+    /// restored value while the audio resumed 2.7 s off.
+    ///
+    /// Within `PAUSED_CHIME_END_BUDGET`, every step **written** even past
+    /// it, only not awaited: mpv applies its commands in order, so one that
+    /// answers late still ends paused, on the plain chain, put back. The
+    /// restore seek counts as sent (its `playback-restart` to swallow) once
+    /// written, unless mpv refused it.
+    async fn end_sound_while_paused(&self, chain: &str, resume_at: Option<f64>) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + PAUSED_CHIME_END_BUDGET;
+        let mut first_error = None;
+        let mut keep = |r: Result<Value>| {
+            let ok = r.is_ok();
+            if let Err(e) = r {
+                first_error.get_or_insert(e);
+            }
+            ok
+        };
+        keep(self.ipc.command_until(&[json!("set_property"), json!("pause"), json!(true)], deadline).await);
+        let mut rebuilt = self.ipc.reconfigs.subscribe();
+        let chain_written = keep(self.ipc.command_until(&[json!("set_property"), json!("af"), json!(chain)], deadline).await);
+        let mut restore_sent = false;
+        if let Some(t) = resume_at {
+            let wait = RESTORE_RECONFIG_WAIT.min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+            if chain_written && tokio::time::timeout(wait, rebuilt.changed()).await.is_err() {
+                tracing::debug!("lock sound while paused: no audio-reconfig after the chain, seeking anyway");
+            }
+            let seek = self.ipc.command_until(&[json!("seek"), json!(t), json!("absolute+exact")], deadline).await;
+            // Unanswered is not refused: written, mpv may still apply it.
+            restore_sent = match &seek {
+                Ok(_) => true,
+                Err(e) => e.is::<CommandTimeout>(),
+            };
+            keep(seek);
+        }
+        self.gate().end_paused_chime(restore_sent);
+        first_error.map_or(Ok(()), Err)
     }
 }
 
@@ -2401,7 +2733,7 @@ pub(crate) mod tests {
         let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
         prepare(&mut player.gate());
         let server = answering(server, answers);
-        let route = player.chime_route().await;
+        let route = player.chime_route(A_LOCK).await;
         drop(player);
         (route, server.await.unwrap())
     }
@@ -2534,7 +2866,7 @@ pub(crate) mod tests {
                 w.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
             }
         });
-        assert_eq!(player.chime_route().await.unwrap(), ChimeRoute::Silent);
+        assert_eq!(player.chime_route(A_LOCK).await.unwrap(), ChimeRoute::Silent);
         drop(player);
         server.await.unwrap();
     }
@@ -2564,16 +2896,18 @@ pub(crate) mod tests {
             }
             seen
         });
-        assert_eq!(player.chime_route().await.unwrap(), ChimeRoute::Idle);
+        assert_eq!(player.chime_route(A_LOCK).await.unwrap(), ChimeRoute::Idle);
         drop(player);
         assert_eq!(server.await.unwrap().len(), 3, "armed only when asked: mpv was asked");
     }
 
     #[tokio::test]
-    async fn route_is_silent_when_paused_or_loading() {
+    async fn route_is_silent_while_loading() {
         use crate::player::ChimeRoute;
-        let (route, _) = route_with(vec![("idle-active", json!(false)), ("pause", json!(true))]).await;
+        // Paused but still loading: no audio parameters, nothing more asked.
+        let (route, sent) = route_with(vec![("idle-active", json!(false)), ("pause", json!(true))]).await;
         assert_eq!(route.unwrap(), ChimeRoute::Silent);
+        assert_eq!(sent.len(), 3, "{sent:?}");
         // Loading: no audio parameters yet, as an error or as a `null`.
         let (route, _) = route_with(vec![("idle-active", json!(false)), ("pause", json!(false))]).await;
         assert_eq!(route.unwrap(), ChimeRoute::Silent);
@@ -2608,6 +2942,666 @@ pub(crate) mod tests {
         // mpv unreachable on the first question: a failure, not a route.
         let (route, _) = route_with(vec![]).await;
         assert!(route.is_err());
+    }
+
+    /// The chime of `A_LOCK`'s length: 0.74 s.
+    const A_LOCK: std::time::Duration = std::time::Duration::from_millis(740);
+
+    /// What mpv answers for a paused file, the paused spike's values (kf48
+    /// cycle 0: 48 kHz stereo, paused at 4.416 of 150 s, seekable).
+    fn paused_answers(position: Value, duration: Value, seekable: Value) -> Vec<(&'static str, Value)> {
+        let mut answers = vec![
+            ("idle-active", json!(false)),
+            ("pause", json!(true)),
+            (
+                "audio-params",
+                json!({"samplerate":48000,"channel-count":2,"channels":"stereo","hr-channels":"stereo","format":"float"}),
+            ),
+        ];
+        for (name, value) in [("time-pos", position), ("duration", duration), ("seekable", seekable)] {
+            if !value.is_null() {
+                answers.push((name, value));
+            }
+        }
+        answers
+    }
+
+    /// **[MUTATION]** each branch of the paused mapping: `resume_at` taken
+    /// from a non-seekable stream, the near-end guard dropped or applied to
+    /// a stream, or a seekable file without a position let through.
+    #[tokio::test]
+    async fn the_route_of_a_paused_file_says_where_to_put_it_back() {
+        use crate::player::ChimeRoute;
+        let paused = |resume_at| ChimeRoute::Paused { sample_rate: 48000, channels: 2, resume_at };
+
+        let (route, sent) = route_with(paused_answers(json!(4.416), json!(150.0), json!(true))).await;
+        assert_eq!(route.unwrap(), paused(Some(4.416)));
+        let get = |name: &str| json!(["get_property", name]);
+        assert_eq!(
+            sent,
+            ["idle-active", "pause", "audio-params", "time-pos", "duration", "seekable"].map(get).to_vec(),
+            "the paused spike's order"
+        );
+
+        // A stream (`seekable` false): no position to go back to, and its
+        // `duration`, the cache end, never silences it (spike: 1.386667).
+        let (route, _) = route_with(paused_answers(json!(1.2), json!(1.386667), json!(false))).await;
+        assert_eq!(route.unwrap(), paused(None));
+        // `seekable` unavailable, or not a boolean, says nothing: a file may
+        // be taken for a stream there, not put back and not guarded against
+        // its end. Silent.
+        let (route, _) = route_with(paused_answers(json!(1.2), json!(150.0), Value::Null)).await;
+        assert_eq!(route.unwrap(), ChimeRoute::Silent, "seekable unavailable");
+        let (route, _) = route_with(paused_answers(json!(1.2), json!(150.0), json!("yes"))).await;
+        assert_eq!(route.unwrap(), ChimeRoute::Silent, "seekable not a boolean");
+
+        // The near-end guard: 0.74 s + 1 s must remain.
+        let (route, _) = route_with(paused_answers(json!(148.0), json!(149.73), json!(true))).await;
+        assert_eq!(route.unwrap(), ChimeRoute::Silent, "1.73 s left");
+        let (route, _) = route_with(paused_answers(json!(148.0), json!(149.75), json!(true))).await;
+        assert_eq!(route.unwrap(), paused(Some(148.0)), "1.75 s left");
+        // The guard follows the chime's length.
+        let (client_route, _) = {
+            use crate::player::Player;
+            let (client, server) = UnixStream::pair().unwrap();
+            let (tx, _rx) = mpsc::channel(16);
+            let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+            let server = answering(server, paused_answers(json!(148.0), json!(149.75), json!(true)));
+            let route = player.chime_route(std::time::Duration::from_millis(1630)).await;
+            drop(player);
+            (route, server.await.unwrap())
+        };
+        assert_eq!(client_route.unwrap(), ChimeRoute::Silent, "a 1.63 s chime needs 2.63 s");
+        // No duration known: no guard.
+        let (route, _) = route_with(paused_answers(json!(148.0), Value::Null, json!(true))).await;
+        assert_eq!(route.unwrap(), paused(Some(148.0)));
+        // Seekable but no position: nowhere to put it back.
+        let (route, _) = route_with(paused_answers(Value::Null, json!(150.0), json!(true))).await;
+        assert_eq!(route.unwrap(), ChimeRoute::Silent);
+    }
+
+    /// A second lock change after a paused chime, still paused: the pause
+    /// point is the one the gate kept, not `time-pos`, which right after a
+    /// restore read 0.17 s short (see `end_paused_chime`). **[MUTATION]**
+    /// the frozen position ignored → the second chime restores 0.17 s early.
+    /// Also the near-end guard reads it.
+    #[tokio::test]
+    async fn after_a_restore_the_route_puts_the_file_back_at_the_kept_pause_point() {
+        use crate::player::ChimeRoute;
+        let kept = |g: &mut AsideGate| {
+            g.begin_paused_chime(Progress { position_s: Some(4.416), duration_s: Some(150.0) });
+            g.end_paused_chime(true);
+        };
+        let (route, _) = route_with_gate(paused_answers(json!(4.25), json!(150.0), json!(true)), kept).await;
+        assert_eq!(route.unwrap(), ChimeRoute::Paused { sample_rate: 48000, channels: 2, resume_at: Some(4.416) });
+        // A guard on the kept point: 1.73 s left from 4.416, not from 4.25.
+        let (route, _) = route_with_gate(paused_answers(json!(4.25), json!(6.146), json!(true)), kept).await;
+        assert_eq!(route.unwrap(), ChimeRoute::Silent);
+        // A stream keeps no position to go back to.
+        let (route, _) = route_with_gate(paused_answers(json!(4.25), json!(5.0), json!(false)), kept).await;
+        assert_eq!(route.unwrap(), ChimeRoute::Paused { sample_rate: 48000, channels: 2, resume_at: None });
+    }
+
+    /// **[MUTATION]** the `in_paused_chime` checks removed from
+    /// `chime_route` → mpv, unpaused for the chime, answers like a playing
+    /// file and the route is `Live`: a chime mixed over the music at full
+    /// gain.
+    #[tokio::test]
+    async fn a_paused_chime_sounding_is_silent_without_a_question() {
+        use crate::player::ChimeRoute;
+        let (route, sent) = route_with_gate(answers_during_a_chime(), |g| g.begin_paused_chime(Progress::default())).await;
+        assert_eq!(route.unwrap(), ChimeRoute::Silent);
+        assert_eq!(sent, Vec::<Value>::new());
+        // And once it ended, mpv is asked again.
+        let (route, _) = route_with_gate(answers_during_a_chime(), |g| {
+            g.begin_paused_chime(Progress::default());
+            g.end_paused_chime(true);
+        })
+        .await;
+        assert_eq!(route.unwrap(), ChimeRoute::Live { sample_rate: 48000, channels: 1 });
+    }
+
+    /// A paused chime, from the chain write to just before the re-pause.
+    /// Captured on mpv 0.37.0 by the lock-sound 9b spike, 2026-11-17 (kf48,
+    /// cycle 0, the recommended sequence; all 20 cycles have this shape):
+    /// set af (16), flush seek (17), unpause (18), the spike's own
+    /// `get time-pos` mid-chime (19).
+    const PAUSED_CHIME_SOUNDING: &str = r#"{"request_id":16,"error":"success"}
+{"event":"audio-reconfig"}
+{"data":null,"request_id":17,"error":"success"}
+{"request_id":18,"error":"success"}
+{"event":"seek"}
+{"event":"playback-restart"}
+{"data":6.304000,"request_id":19,"error":"success"}"#;
+
+    /// Same capture: re-pause (20), set af (21), restore seek (22), the
+    /// spike's `get time-pos` (23).
+    const PAUSED_CHIME_ENDING: &str = r#"{"request_id":20,"error":"success"}
+{"request_id":21,"error":"success"}
+{"event":"audio-reconfig"}
+{"data":null,"request_id":22,"error":"success"}
+{"data":4.416000,"request_id":23,"error":"success"}
+{"event":"seek"}"#;
+
+    /// Same capture: the user's resume (`cycle pause`, 24), then the restore
+    /// seek's `playback-restart`, 0.29 s later.
+    const PAUSED_CHIME_RESUME: &str = r#"{"data":null,"request_id":24,"error":"success"}
+{"event":"playback-restart"}"#;
+
+    /// A non-seekable stream's paused chime (the spike's st48, 20 cycles):
+    /// two `audio-reconfig`, nothing else, nothing after the resume. The
+    /// spike reported the shape, not the lines: these are mpv's own form
+    /// of that event.
+    const PAUSED_STREAM_CHIME: &str = r#"{"event":"audio-reconfig"}
+{"event":"audio-reconfig"}"#;
+
+    /// The lines the pump turns into events (the rest it drops).
+    fn reaching_the_core(lines: Vec<Value>) -> Vec<Value> {
+        let kinds = ["property-change", "file-loaded", "start-file", "playback-restart"];
+        lines.into_iter().filter(|l| kinds.iter().any(|k| l["event"] == json!(k))).collect()
+    }
+
+    /// **[MUTATION]** the `playback-restart` swallowing removed, or the
+    /// pending restore not set at the end → the flush's or the restore's
+    /// `PlaybackRestarted` reaches the core. And exactly one is swallowed
+    /// after the chime: the user's next seek gets through.
+    #[test]
+    fn a_paused_chime_reaches_the_core_as_nothing() {
+        let mut gate = AsideGate::default();
+        let startup = lines_of(STARTUP);
+        assert_eq!(feed(&mut gate, &startup), startup);
+        gate.begin_paused_chime(Progress { position_s: Some(4.416), duration_s: Some(150.0) });
+        assert_eq!(reaching_the_core(feed(&mut gate, &lines_of(PAUSED_CHIME_SOUNDING))), Vec::<Value>::new());
+        assert_eq!(reaching_the_core(feed(&mut gate, &lines_of(PAUSED_CHIME_ENDING))), Vec::<Value>::new());
+        gate.end_paused_chime(true);
+        let pause_point = Some(Progress { position_s: Some(4.416), duration_s: Some(150.0) });
+        assert_eq!(gate.frozen(), pause_point, "frozen after the chime");
+        assert_eq!(reaching_the_core(feed(&mut gate, &lines_of(PAUSED_CHIME_RESUME))), Vec::<Value>::new());
+        assert_eq!(gate.frozen(), pause_point, "still the pause's until the user moves (`thaw`)");
+        let later = json!({"event":"playback-restart"});
+        assert!(gate.admit(&later), "only the restore's playback-restart is swallowed");
+    }
+
+    /// **[MUTATION]** `restore_pending` set whatever `restore_sent` says →
+    /// the next real `playback-restart` (a seek after the resume) is lost.
+    #[test]
+    fn a_stream_chime_leaves_nothing_pending() {
+        let mut gate = AsideGate::default();
+        gate.begin_paused_chime(Progress::default());
+        assert_eq!(reaching_the_core(feed(&mut gate, &lines_of(PAUSED_STREAM_CHIME))), Vec::<Value>::new());
+        gate.end_paused_chime(false);
+        assert!(gate.admit(&json!({"event":"playback-restart"})));
+    }
+
+    /// The user changes source during a paused chime: the new file's
+    /// `start-file` passes, ends the chime for the gate, and that file's own
+    /// `playback-restart` passes too. **[MUTATION]** the reset at
+    /// `start-file` removed → its `playback-restart` is swallowed.
+    #[test]
+    fn a_real_file_started_during_a_paused_chime_passes_through() {
+        let mut gate = AsideGate::default();
+        gate.begin_paused_chime(Progress { position_s: Some(4.416), duration_s: Some(150.0) });
+        feed(&mut gate, &lines_of(PAUSED_CHIME_SOUNDING));
+        let start = json!({"event":"start-file","playlist_entry_id":2});
+        assert!(gate.admit(&start));
+        assert!(!gate.in_paused_chime());
+        assert_eq!(gate.frozen(), None, "the new file's progress is mpv's");
+        assert!(gate.admit(&json!({"event":"playback-restart"})));
+
+        // The same after the chime, before the restore's `playback-restart`
+        // came: the new file's is real.
+        let mut gate = AsideGate::default();
+        gate.begin_paused_chime(Progress::default());
+        gate.end_paused_chime(true);
+        assert!(gate.admit(&start));
+        assert!(gate.admit(&json!({"event":"playback-restart"})));
+    }
+
+    /// mpv went on to the next file by itself during a paused chime: the
+    /// core ends the chime in place after that `start-file` (paused again,
+    /// plain chain, no seek). Nothing is left pending: the new file's
+    /// `playback-restart` and its progress are mpv's, and so are those of
+    /// the user's next resume.
+    #[test]
+    fn a_paused_chime_ended_after_mpvs_own_file_start_leaves_nothing_pending() {
+        let mut gate = AsideGate::default();
+        gate.begin_paused_chime(Progress { position_s: Some(148.5), duration_s: None });
+        assert!(gate.admit(&json!({"event":"start-file","playlist_entry_id":2})));
+        gate.end_paused_chime(false);
+        assert!(!gate.in_paused_chime());
+        assert_eq!(gate.frozen(), None);
+        assert!(gate.admit(&json!({"event":"playback-restart"})), "the new file's own");
+        assert!(gate.admit(&json!({"event":"playback-restart"})), "the user's resume");
+    }
+
+    /// A second chime keeps the first one's frozen progress: the file was
+    /// paused there, whatever `time-pos` says mid-chime.
+    #[test]
+    fn a_second_paused_chime_keeps_the_first_pause_point() {
+        let mut gate = AsideGate::default();
+        let first = Progress { position_s: Some(4.416), duration_s: Some(150.0) };
+        gate.begin_paused_chime(first);
+        gate.begin_paused_chime(Progress { position_s: Some(6.304), duration_s: Some(150.0) });
+        assert_eq!(gate.frozen(), Some(first));
+        gate.end_paused_chime(true);
+        assert_eq!(gate.frozen(), Some(first));
+    }
+
+    /// After the chime, the frozen progress lasts until the user moves
+    /// playback (`thaw`) — never while a chime sounds — and a stream's
+    /// ends with the chime (no restore to wait for). **[MUTATION]** `thaw`
+    /// emptied → a resume whose `playback-restart` never comes keeps the bar
+    /// still while the music plays; `thaw` unconditional → the chime moves
+    /// the bar.
+    #[test]
+    fn the_frozen_progress_ends_with_the_users_next_move() {
+        let mut gate = AsideGate::default();
+        let first = Progress { position_s: Some(4.416), duration_s: Some(150.0) };
+        gate.begin_paused_chime(first);
+        gate.thaw();
+        assert_eq!(gate.frozen(), Some(first), "a chime sounds: nothing thaws it");
+        gate.end_paused_chime(true);
+        gate.thaw();
+        assert_eq!(gate.frozen(), None);
+
+        gate.begin_paused_chime(first);
+        gate.end_paused_chime(false);
+        assert_eq!(gate.frozen(), None, "a stream: nothing to wait for");
+    }
+
+    /// Every transport call thaws: the user's resume among them.
+    #[tokio::test]
+    async fn a_resume_thaws_the_progress() {
+        use crate::player::Player;
+        let (client, server) = UnixStream::pair().unwrap();
+        let (tx, _rx) = mpsc::channel(16);
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        let _server = scripted(server, vec![("time-pos", json!(4.5)), ("duration", json!(150.0))], &[], None);
+        let first = Progress { position_s: Some(4.416), duration_s: Some(150.0) };
+        player.gate().begin_paused_chime(first);
+        player.gate().end_paused_chime(true);
+        assert_eq!(player.progress().await.unwrap(), first);
+        player.toggle_pause().await.unwrap();
+        assert_eq!(player.progress().await.unwrap(), Progress { position_s: Some(4.5), duration_s: Some(150.0) });
+    }
+
+    /// Through the pump, the captured chime end to end: nothing reaches the
+    /// core, then a real load does.
+    #[tokio::test]
+    async fn a_paused_chime_through_the_pump() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let (tx, mut rx) = mpsc::channel(64);
+        let ipc = MpvIpc::from_stream(client, tx);
+        let (_r, mut w) = server.into_split();
+        ipc.gate.lock().unwrap().begin_paused_chime(Progress::default());
+        w.write_all(format!("{PAUSED_CHIME_SOUNDING}\n{PAUSED_CHIME_ENDING}\n").as_bytes()).await.unwrap();
+        // The pump has read them once the counter moved twice.
+        let mut reconfigs = ipc.reconfigs.subscribe();
+        tokio::time::timeout(std::time::Duration::from_secs(2), reconfigs.wait_for(|n| *n == 2)).await.unwrap().unwrap();
+        ipc.gate.lock().unwrap().end_paused_chime(true);
+        w.write_all(format!("{PAUSED_CHIME_RESUME}\n").as_bytes()).await.unwrap();
+        w.write_all(b"{\"event\":\"start-file\",\"playlist_entry_id\":2}\n").await.unwrap();
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await;
+        assert_eq!(ev.unwrap().unwrap(), Event::FileStarting, "nothing of the chime came before");
+    }
+
+    /// A fake mpv answering every command with success (`data` from
+    /// `answers` for a `get_property`), and writing `after_af` events that
+    /// long after each `set_property af` response. Records each command with
+    /// when it arrived.
+    #[allow(clippy::type_complexity)]
+    fn scripted(
+        server: UnixStream,
+        answers: Vec<(&'static str, Value)>,
+        refuse: &'static [&'static str],
+        after_af: Option<std::time::Duration>,
+    ) -> tokio::task::JoinHandle<Vec<(std::time::Instant, Value)>> {
+        tokio::spawn(async move {
+            let (r, w) = server.into_split();
+            let w = Arc::new(Mutex::new(w));
+            let mut lines = BufReader::new(r).lines();
+            let mut seen = Vec::new();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let req: Value = serde_json::from_str(&line).unwrap();
+                let cmd = req["command"].clone();
+                let id = req["request_id"].clone();
+                let name = cmd[1].as_str().unwrap_or_default();
+                // A property's name for `set_property`, the command's own otherwise.
+                let key = if cmd[0] == json!("set_property") { name } else { cmd[0].as_str().unwrap_or_default() };
+                let resp = if cmd[0] == json!("get_property") {
+                    match answers.iter().find(|(k, _)| *k == name) {
+                        Some((_, data)) => json!({"data": data, "request_id": id, "error": "success"}),
+                        None => json!({"request_id": id, "error": "property unavailable"}),
+                    }
+                } else if refuse.contains(&key) {
+                    json!({"request_id": id, "error": "error running command"})
+                } else {
+                    json!({"data": null, "request_id": id, "error": "success"})
+                };
+                w.lock().await.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
+                if cmd[0] == json!("set_property")
+                    && name == "af"
+                    && let Some(delay) = after_af
+                {
+                    let w = w.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(delay).await;
+                        let _ = w.lock().await.write_all(b"{\"event\":\"audio-reconfig\"}\n").await;
+                    });
+                }
+                seen.push((std::time::Instant::now(), cmd));
+            }
+            seen
+        })
+    }
+
+    fn commands(seen: &[(std::time::Instant, Value)]) -> Vec<Value> {
+        seen.iter().map(|(_, c)| c.clone()).collect()
+    }
+
+    /// An mpv that answers its first `answered` commands at once (a
+    /// `get_property` from `answers`, anything else as a success), then stops
+    /// answering: the rest are read and recorded, and answered `late` after
+    /// they came, or never. Records every command it read, in order.
+    fn stalling(
+        server: UnixStream,
+        answers: Vec<(&'static str, Value)>,
+        answered: usize,
+        late: Option<std::time::Duration>,
+    ) -> (tokio::task::JoinHandle<()>, Arc<std::sync::Mutex<Vec<Value>>>) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = seen.clone();
+        let task = tokio::spawn(async move {
+            let (r, w) = server.into_split();
+            let w = Arc::new(Mutex::new(w));
+            let mut lines = BufReader::new(r).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let req: Value = serde_json::from_str(&line).unwrap();
+                let cmd = req["command"].clone();
+                let id = req["request_id"].clone();
+                let n = {
+                    let mut seen = record.lock().unwrap();
+                    seen.push(cmd.clone());
+                    seen.len()
+                };
+                let resp = match answers.iter().find(|(k, _)| cmd[0] == json!("get_property") && cmd[1] == json!(k)) {
+                    Some((_, data)) => json!({"data": data, "request_id": id, "error": "success"}),
+                    None if cmd[0] == json!("get_property") => json!({"request_id": id, "error": "property unavailable"}),
+                    None => json!({"data": null, "request_id": id, "error": "success"}),
+                };
+                let delay = if n <= answered { Some(std::time::Duration::ZERO) } else { late };
+                if let Some(delay) = delay {
+                    let w = w.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(delay).await;
+                        let _ = w.lock().await.write_all(format!("{resp}\n").as_bytes()).await;
+                    });
+                }
+            }
+        });
+        (task, seen)
+    }
+
+    fn stalling_player(
+        answers: Vec<(&'static str, Value)>,
+        answered: usize,
+        late: Option<std::time::Duration>,
+    ) -> (MpvPlayer, Arc<std::sync::Mutex<Vec<Value>>>) {
+        let (client, server) = UnixStream::pair().unwrap();
+        let (tx, _rx) = mpsc::channel(16);
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        let (_task, seen) = stalling(server, answers, answered, late);
+        (player, seen)
+    }
+
+    /// Slack over a budget for the test machine's scheduling.
+    const SLACK: std::time::Duration = std::time::Duration::from_millis(400);
+
+    /// mpv stops answering at the start's first question: the start gives
+    /// up within its budget — not 5 s per command — before touching
+    /// anything: no chain, no unpause, the gate as it was.
+    /// **[MUTATION]** the start's budget replaced by the 5 s per command →
+    /// about 10 s.
+    #[tokio::test]
+    async fn a_paused_chime_start_gives_up_within_its_budget_before_touching_anything() {
+        use crate::player::Player;
+        let (player, seen) = stalling_player(vec![], 0, None);
+        let began = std::time::Instant::now();
+        let result = player.sound_while_paused("eq,@chime:x", Some(4.416)).await;
+        let took = began.elapsed();
+        assert!(result.unwrap_err().is::<CommandTimeout>());
+        assert!(took >= PAUSED_CHIME_START_BUDGET && took < PAUSED_CHIME_START_BUDGET + SLACK, "{took:?}");
+        assert_eq!(*seen.lock().unwrap(), vec![json!(["get_property", "time-pos"])], "nothing more sent");
+        assert!(!player.gate().in_paused_chime());
+        assert_eq!(player.gate().frozen(), None);
+    }
+
+    /// mpv stops answering after the chain and the flush seek were sent:
+    /// the start gives up within its budget without the unpause; the end
+    /// that follows (the core calls it at once) gives up within its own and
+    /// still **writes** the pause, the plain chain and the restore seek —
+    /// in that order, so an mpv that answers late ends paused, on the
+    /// plain chain, put back — and closes the gate, the restore's
+    /// `playback-restart` still to swallow and the pause's progress kept.
+    /// **[MUTATION]** the end's steps not written past the budget (`act_until`
+    /// in place of `command_until`) → the seek, then the chain, missing;
+    /// an unanswered seek counted as not sent → nothing to swallow.
+    #[tokio::test]
+    async fn a_paused_chime_cut_short_by_a_silent_mpv_ends_within_its_budget_with_every_step_written() {
+        use crate::player::Player;
+        let answers = vec![("time-pos", json!(4.416)), ("duration", json!(150.0))];
+        let (player, seen) = stalling_player(answers, 3, None);
+        let began = std::time::Instant::now();
+        assert!(player.sound_while_paused("eq,@chime:x", Some(4.416)).await.is_err());
+        assert!(began.elapsed() < PAUSED_CHIME_START_BUDGET + SLACK, "{:?}", began.elapsed());
+        assert!(player.gate().in_paused_chime());
+        let began = std::time::Instant::now();
+        assert!(player.end_sound_while_paused("eq", Some(4.416)).await.is_err());
+        let took = began.elapsed();
+        assert!(took < PAUSED_CHIME_END_BUDGET + SLACK, "{took:?}");
+        // Give the server the time to read the last writes.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                json!(["get_property", "time-pos"]),
+                json!(["get_property", "duration"]),
+                json!(["set_property", "af", "eq,@chime:x"]),
+                json!(["seek", 4.416, "absolute+keyframes"]),
+                json!(["set_property", "pause", true]),
+                json!(["set_property", "af", "eq"]),
+                json!(["seek", 4.416, "absolute+exact"]),
+            ],
+            "no unpause; the end written whole, in order"
+        );
+        let mut gate = player.gate();
+        assert!(!gate.in_paused_chime());
+        assert_eq!(gate.frozen(), Some(Progress { position_s: Some(4.416), duration_s: Some(150.0) }));
+        assert!(!gate.admit(&json!({"event":"playback-restart"})), "the restore's, should mpv apply it late");
+        assert!(gate.admit(&json!({"event":"playback-restart"})));
+    }
+
+    /// The end, mpv silent from its first command: within its budget, the
+    /// chain wait cut to what is left. A stream: no seek.
+    #[tokio::test]
+    async fn a_paused_chime_end_on_a_silent_mpv_stays_within_its_budget() {
+        use crate::player::Player;
+        let (player, seen) = stalling_player(vec![], 0, None);
+        player.gate().begin_paused_chime(Progress::default());
+        let began = std::time::Instant::now();
+        assert!(player.end_sound_while_paused("", None).await.is_err());
+        assert!(began.elapsed() < PAUSED_CHIME_END_BUDGET + SLACK, "{:?}", began.elapsed());
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(*seen.lock().unwrap(), vec![json!(["set_property", "pause", true]), json!(["set_property", "af", ""])]);
+        assert!(!player.gate().in_paused_chime());
+        assert!(player.gate().admit(&json!({"event":"playback-restart"})), "no seek: nothing pending");
+    }
+
+    /// The route's questions share one budget; past it, `seekable` is not
+    /// asked and a paused file gets no chime — never one without its
+    /// near-end guard because `duration` came too late.
+    /// **[MUTATION]** the route's budget off → 5 s per question.
+    #[tokio::test]
+    async fn the_route_on_a_silent_mpv_gives_up_within_its_budget_and_stays_silent() {
+        use crate::player::{ChimeRoute, Player};
+        let (player, seen) = stalling_player(vec![], 0, None);
+        let began = std::time::Instant::now();
+        assert!(player.chime_route(A_LOCK).await.unwrap_err().is::<CommandTimeout>());
+        assert!(began.elapsed() < CHIME_ROUTE_BUDGET + SLACK, "{:?}", began.elapsed());
+        assert_eq!(*seen.lock().unwrap(), vec![json!(["get_property", "idle-active"])]);
+
+        // mpv stalls at `duration`.
+        let answers = paused_answers(json!(4.416), json!(150.0), json!(true));
+        let (player, seen) = stalling_player(answers, 4, None);
+        let began = std::time::Instant::now();
+        assert_eq!(player.chime_route(A_LOCK).await.unwrap(), ChimeRoute::Silent);
+        assert!(began.elapsed() < CHIME_ROUTE_BUDGET + SLACK, "{:?}", began.elapsed());
+        assert!(!seen.lock().unwrap().contains(&json!(["get_property", "seekable"])), "{:?}", seen.lock().unwrap());
+    }
+
+    /// Answers that come back after their command gave up answer nothing,
+    /// and mpv's next answers reach their own commands: a late mpv leaves
+    /// the connection usable.
+    #[tokio::test]
+    async fn late_answers_after_a_given_up_chime_leave_the_connection_usable() {
+        use crate::player::Player;
+        let (player, _seen) = stalling_player(vec![("time-pos", json!(4.416))], 0, Some(std::time::Duration::from_secs(2)));
+        assert!(player.sound_while_paused("eq,@chime:x", Some(4.416)).await.is_err());
+        // Answered 2 s after it came, within the 5 s of an ordinary command,
+        // after the start's late answer has come back.
+        let began = std::time::Instant::now();
+        player.set_volume(40).await.expect("the connection still works");
+        assert!(began.elapsed() >= std::time::Duration::from_millis(1500), "answered late, as scripted");
+    }
+
+    /// The spike's sequence (kf48): the pause's progress read and frozen,
+    /// the chain, the flush seek `absolute+keyframes` at the number as given,
+    /// the unpause; and `progress` asks mpv nothing until the end. A stream:
+    /// no flush. **[MUTATION]** the flush seek dropped, or sent `+exact`.
+    #[tokio::test]
+    async fn sound_while_paused_sends_the_measured_sequence() {
+        use crate::player::Player;
+        let (client, server) = UnixStream::pair().unwrap();
+        let (tx, _rx) = mpsc::channel(16);
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        let server = scripted(server, vec![("time-pos", json!(4.416)), ("duration", json!(150.0))], &[], None);
+        player.sound_while_paused("eqchain,@chime:x", Some(4.416)).await.unwrap();
+        let frozen = Progress { position_s: Some(4.416), duration_s: Some(150.0) };
+        assert_eq!(player.progress().await.unwrap(), frozen);
+        // A second chime: no new progress read, the chain again.
+        player.sound_while_paused("eqchain,@chime:y", Some(4.416)).await.unwrap();
+        assert_eq!(player.progress().await.unwrap(), frozen);
+        drop(player);
+        assert_eq!(
+            commands(&server.await.unwrap()),
+            vec![
+                json!(["get_property", "time-pos"]),
+                json!(["get_property", "duration"]),
+                json!(["set_property", "af", "eqchain,@chime:x"]),
+                json!(["seek", 4.416, "absolute+keyframes"]),
+                json!(["set_property", "pause", false]),
+                json!(["set_property", "af", "eqchain,@chime:y"]),
+                json!(["seek", 4.416, "absolute+keyframes"]),
+                json!(["set_property", "pause", false]),
+            ]
+        );
+
+        let (client, server) = UnixStream::pair().unwrap();
+        let (tx, _rx) = mpsc::channel(16);
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        let server = scripted(server, vec![("time-pos", json!(12.0))], &[], None);
+        player.sound_while_paused("@chime:x", None).await.unwrap();
+        assert!(player.gate().in_paused_chime());
+        drop(player);
+        assert_eq!(
+            commands(&server.await.unwrap()),
+            vec![
+                json!(["get_property", "time-pos"]),
+                json!(["get_property", "duration"]),
+                json!(["set_property", "af", "@chime:x"]),
+                json!(["set_property", "pause", false]),
+            ]
+        );
+    }
+
+    /// The end: re-pause, the plain chain, **its `audio-reconfig` awaited**,
+    /// then the restore seek `absolute+exact`; the gate left waiting for the
+    /// restore's `playback-restart`, `progress` still frozen.
+    /// **[MUTATION]** the wait removed → the seek arrives with the af write,
+    /// before mpv rebuilt the chain (the spike's lost restore).
+    #[tokio::test]
+    async fn the_restore_seek_waits_for_the_chain_rebuild() {
+        use crate::player::Player;
+        let (client, server) = UnixStream::pair().unwrap();
+        let (tx, _rx) = mpsc::channel(16);
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        player.gate().begin_paused_chime(Progress::default());
+        let server = scripted(server, vec![], &[], Some(std::time::Duration::from_millis(300)));
+        player.end_sound_while_paused("eqchain", Some(4.416)).await.unwrap();
+        assert!(!player.gate().in_paused_chime());
+        assert_eq!(player.gate().frozen(), Some(Progress::default()));
+        assert!(!player.gate().admit(&json!({"event":"playback-restart"})), "the restore's is still to come");
+        assert_eq!(player.gate().frozen(), Some(Progress::default()), "still paused: frozen until the user moves");
+        drop(player);
+        let seen = server.await.unwrap();
+        assert_eq!(
+            commands(&seen),
+            vec![
+                json!(["set_property", "pause", true]),
+                json!(["set_property", "af", "eqchain"]),
+                json!(["seek", 4.416, "absolute+exact"]),
+            ]
+        );
+        let waited = seen[2].0 - seen[1].0;
+        assert!(waited >= std::time::Duration::from_millis(250), "the seek did not wait for the rebuild: {waited:?}");
+    }
+
+    /// No `audio-reconfig` at all: the seek still goes, after the bound.
+    #[tokio::test]
+    async fn the_restore_wait_is_bounded() {
+        use crate::player::Player;
+        let (client, server) = UnixStream::pair().unwrap();
+        let (tx, _rx) = mpsc::channel(16);
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        player.gate().begin_paused_chime(Progress::default());
+        let server = scripted(server, vec![], &[], None);
+        let started = std::time::Instant::now();
+        player.end_sound_while_paused("eqchain", Some(4.416)).await.unwrap();
+        let took = started.elapsed();
+        drop(player);
+        assert_eq!(commands(&server.await.unwrap()).len(), 3);
+        assert!(took >= RESTORE_RECONFIG_WAIT && took < RESTORE_RECONFIG_WAIT * 3, "{took:?}");
+    }
+
+    /// Every step is tried: a refused re-pause still writes the plain chain
+    /// (the music must never stay at gain 0) and the first error comes
+    /// back; a stream has no seek and nothing pending; a refused seek leaves
+    /// nothing pending either. **[MUTATION]** `?` on the pause → the chain
+    /// is never written.
+    #[tokio::test]
+    async fn the_end_tries_every_step() {
+        use crate::player::Player;
+        let (client, server) = UnixStream::pair().unwrap();
+        let (tx, _rx) = mpsc::channel(16);
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        player.gate().begin_paused_chime(Progress::default());
+        let server = scripted(server, vec![], &["pause"], Some(std::time::Duration::ZERO));
+        assert!(player.end_sound_while_paused("eqchain", None).await.is_err());
+        assert!(!player.gate().in_paused_chime());
+        assert!(player.gate().admit(&json!({"event":"playback-restart"})), "no seek: nothing pending");
+        drop(player);
+        assert_eq!(
+            commands(&server.await.unwrap()),
+            vec![json!(["set_property", "pause", true]), json!(["set_property", "af", "eqchain"])]
+        );
+
+        let (client, server) = UnixStream::pair().unwrap();
+        let (tx, _rx) = mpsc::channel(16);
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        player.gate().begin_paused_chime(Progress::default());
+        let _server = scripted(server, vec![], &["seek"], Some(std::time::Duration::ZERO));
+        assert!(player.end_sound_while_paused("eqchain", Some(4.416)).await.is_err());
+        assert!(player.gate().admit(&json!({"event":"playback-restart"})), "a refused seek leaves nothing pending");
     }
 
     /// The form measured by the lock-sound spike on mpv 0.37: the file-local
@@ -2764,7 +3758,7 @@ pub(crate) mod tests {
         let onset = x.iter().position(|v| v.abs() > 0.01).expect("the output is silent");
         let first_note = tone_amplitude(&x[onset..(onset + 4800).min(x.len())], 659.25, 48000.0);
         assert!(first_note > 0.05, "no energy at 659.25 Hz: {first_note}");
-        assert_eq!(player.chime_route().await.unwrap(), ChimeRoute::Idle);
+        assert_eq!(player.chime_route(A_LOCK).await.unwrap(), ChimeRoute::Idle);
 
         // The gate is open again: a real load reaches the core.
         player.play("av://lavfi:sine=frequency=440:duration=1").await.unwrap();
@@ -2805,7 +3799,7 @@ pub(crate) mod tests {
         let idle = player.ipc.command(&[json!("get_property"), json!("idle-active")]).await.unwrap();
         assert_eq!(idle, json!(false), "the chime is still sounding, or the test proves nothing");
         assert!(player.gate().sounding_aside(), "the gate saw the chime start");
-        assert_eq!(player.chime_route().await.unwrap(), ChimeRoute::Idle);
+        assert_eq!(player.chime_route(A_LOCK).await.unwrap(), ChimeRoute::Idle);
     }
 
     #[tokio::test]
@@ -2822,7 +3816,7 @@ pub(crate) mod tests {
         let (tx, mut rx) = mpsc::channel(1024);
         let (player, _child) =
             start_test_mpv(&mpv, d, "", tx).await;
-        assert_eq!(player.chime_route().await.unwrap(), ChimeRoute::Idle);
+        assert_eq!(player.chime_route(A_LOCK).await.unwrap(), ChimeRoute::Idle);
         player.play("av://lavfi:sine=frequency=440:sample_rate=44100:duration=30").await.unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while let Some(ev) = rx.recv().await {
@@ -2835,13 +3829,118 @@ pub(crate) mod tests {
         .await
         .expect("no playback-restart within 10 s");
         tokio::spawn(async move { while rx.recv().await.is_some() {} });
-        assert_eq!(player.chime_route().await.unwrap(), ChimeRoute::Live { sample_rate: 44100, channels: 1 });
+        assert_eq!(player.chime_route(A_LOCK).await.unwrap(), ChimeRoute::Live { sample_rate: 44100, channels: 1 });
         player.toggle_pause().await.unwrap();
-        assert_eq!(player.chime_route().await.unwrap(), ChimeRoute::Silent);
+        let route = player.chime_route(A_LOCK).await.unwrap();
+        // A lavfi source is seekable but its `duration` is how far it was
+        // decoded (1.4 s here, measured): the near-end guard reads that as
+        // the end and keeps it silent. A paused file: `a_paused_chime_on_a_real_mpv_reaches_no_one`.
+        assert_eq!(route, ChimeRoute::Silent);
         player.stop().await.unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while player.chime_route().await.unwrap() != ChimeRoute::Idle {
+        while player.chime_route(A_LOCK).await.unwrap() != ChimeRoute::Idle {
             assert!(std::time::Instant::now() < deadline, "mpv never went back to idle");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// The real thing for a paused chime, on a seekable file with a timed
+    /// output: the route says where the file stands; during the chime mpv
+    /// really plays (`time-pos` moves) while `progress` stays at the pause;
+    /// after it mpv is paused at that position again; and not one event
+    /// reaches the channel — not even after the user resumes, when mpv sends
+    /// the restore seek's `playback-restart`, which the gate consumes. A
+    /// later seek of the user's reaches the core again.
+    #[tokio::test]
+    async fn a_paused_chime_on_a_real_mpv_reaches_no_one() {
+        use crate::lock_sound::{mix_filter_over_silence, LockSound, Motif};
+        use crate::player::{ChimeRoute, Player};
+        if mpv_missing() || std::process::Command::new("ffmpeg").arg("-version").output().is_err() {
+            eprintln!("mpv or ffmpeg missing: skipping test");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let bed = d.join("bed.wav");
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "aevalsrc=exprs='0.3*sin(2*PI*1000*t)|0.3*sin(2*PI*1000*t)':s=48000:d=20"])
+            .arg(&bed)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let mpv = d.join("mpv");
+        wrapper(&mpv, "#!/bin/sh\nexec mpv --no-config --ao=null \"$@\"\n");
+        let (tx, mut rx) = mpsc::channel(1024);
+        let (player, _child) = start_test_mpv(&mpv, d, "", tx).await;
+        player.play(bed.to_str().unwrap()).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while let Some(ev) = rx.recv().await {
+                if ev == Event::PlaybackRestarted {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("no playback-restart within 10 s");
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let collect = seen.clone();
+        tokio::spawn(async move {
+            while let Some(ev) = rx.recv().await {
+                collect.lock().unwrap().push(ev);
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        player.toggle_pause().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        seen.lock().unwrap().clear();
+
+        let route = player.chime_route(A_LOCK).await.unwrap();
+        let ChimeRoute::Paused { sample_rate: 48000, channels: 2, resume_at: Some(t) } = route else {
+            panic!("not a paused seekable file: {route:?}");
+        };
+        let at_pause = player.progress().await.unwrap();
+        assert_eq!(at_pause.position_s, Some(t));
+        assert!((0.5..3.0).contains(&t), "{t}");
+
+        let chain = mix_filter_over_silence(LockSound::A, Motif::Lock, 48000, 2).unwrap();
+        player.sound_while_paused(&chain, Some(t)).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        let real = number_or_none(player.ipc.command(&[json!("get_property"), json!("time-pos")]).await).unwrap();
+        assert!(real > t + 0.2, "mpv did not play the chime: time-pos {real} from {t}");
+        assert_eq!(player.progress().await.unwrap(), at_pause, "the core saw the chime move the position");
+        tokio::time::sleep(std::time::Duration::from_millis(640)).await;
+        player.end_sound_while_paused("", Some(t)).await.unwrap();
+
+        let paused = player.ipc.command(&[json!("get_property"), json!("pause")]).await.unwrap();
+        assert_eq!(paused, json!(true));
+        let af = player.ipc.command(&[json!("get_property"), json!("af")]).await.unwrap();
+        assert_eq!(af, json!([]), "the plain chain is back");
+        // Not `time-pos` while paused: right after the restore it read
+        // 0.17 s short in about one run in four here, the playback then
+        // resuming at the restored point all the same (see
+        // `end_paused_chime`). The core reads the pause's.
+        assert_eq!(player.progress().await.unwrap(), at_pause);
+
+        // The user resumes: the restore's `playback-restart` comes and is
+        // consumed by the gate, and the music plays on from where it was
+        // paused (`ao=null` is timed).
+        let resumed = std::time::Instant::now();
+        player.toggle_pause().await.unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while player.gate().restore_pending {
+            assert!(std::time::Instant::now() < deadline, "mpv never sent the restore's playback-restart");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let now = player.progress().await.unwrap().position_s.unwrap();
+        let expected = t + resumed.elapsed().as_secs_f64();
+        assert!((now - expected).abs() < 0.15, "playing at {now}, expected about {expected} (paused at {t})");
+        assert_eq!(*seen.lock().unwrap(), Vec::<Event>::new(), "an event of the paused chime reached the core");
+
+        player.seek_relative(2).await.unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !seen.lock().unwrap().contains(&Event::PlaybackRestarted) {
+            assert!(std::time::Instant::now() < deadline, "the user's seek never reached the core");
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }

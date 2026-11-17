@@ -43,8 +43,16 @@ pub(super) struct FakePlayer {
     pub(super) af_cmd_fails_for: Arc<Mutex<Option<String>>>,
     /// What `chime_route` answers (`Idle` by default).
     pub(super) route: Arc<Mutex<crate::player::ChimeRoute>>,
+    /// The chime length each `chime_route` was asked with.
+    pub(super) route_asked: Arc<Mutex<Vec<std::time::Duration>>>,
     /// When true, `chime_route` fails — mpv unreachable.
     pub(super) route_fails: Arc<std::sync::atomic::AtomicBool>,
+    /// When true, `sound_while_paused` fails after recording the call — an
+    /// IPC timeout, which says nothing about whether mpv took the chain.
+    pub(super) paused_chime_fails: Arc<std::sync::atomic::AtomicBool>,
+    /// When true, `end_sound_while_paused` fails after recording the call:
+    /// which of its steps failed is unknown, so is `af`.
+    pub(super) paused_chime_end_fails: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[async_trait::async_trait]
@@ -147,8 +155,10 @@ impl crate::player::Player for FakePlayer {
         }
         Ok(())
     }
-    /// Records nothing: a question, not an action.
-    async fn chime_route(&self) -> anyhow::Result<crate::player::ChimeRoute> {
+    /// Records nothing in `calls`: a question, not an action. The chime's
+    /// length asked about goes to `route_asked`.
+    async fn chime_route(&self, chime: std::time::Duration) -> anyhow::Result<crate::player::ChimeRoute> {
+        self.route_asked.lock().unwrap().push(chime);
         if self.route_fails.load(std::sync::atomic::Ordering::SeqCst) {
             anyhow::bail!("mpv: command timeout");
         }
@@ -156,6 +166,20 @@ impl crate::player::Player for FakePlayer {
     }
     async fn play_aside(&self, uri: &str) -> anyhow::Result<()> {
         self.calls.lock().unwrap().push(format!("aside {uri}"));
+        Ok(())
+    }
+    async fn sound_while_paused(&self, chain: &str, resume_at: Option<f64>) -> anyhow::Result<()> {
+        self.calls.lock().unwrap().push(format!("paused-chime {chain} {resume_at:?}"));
+        if self.paused_chime_fails.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("mpv: command timeout");
+        }
+        Ok(())
+    }
+    async fn end_sound_while_paused(&self, chain: &str, resume_at: Option<f64>) -> anyhow::Result<()> {
+        self.calls.lock().unwrap().push(format!("paused-chime-end {chain} {resume_at:?}"));
+        if self.paused_chime_end_fails.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("mpv: command timeout");
+        }
         Ok(())
     }
 }

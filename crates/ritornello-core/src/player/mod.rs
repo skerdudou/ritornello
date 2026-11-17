@@ -15,7 +15,7 @@ pub struct Progress {
 }
 
 /// Where a chime can play at this instant (see `crate::lock_sound`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum ChimeRoute {
     /// Nothing loaded: the chime is loaded on its own (`Player::play_aside`).
     #[default]
@@ -23,9 +23,36 @@ pub enum ChimeRoute {
     /// A file plays: the chime is mixed into its chain, at its rate and
     /// channel count (`lock_sound::mix_filter`).
     Live { sample_rate: u32, channels: u32 },
-    /// Something is loaded but nothing is heard (paused, or still loading):
-    /// no chime can play.
+    /// A file is paused: the chime is mixed over the music silenced
+    /// (`lock_sound::mix_filter_over_silence`), mpv unpaused for it
+    /// (`Player::sound_while_paused`), then paused again
+    /// (`Player::end_sound_while_paused`). `resume_at` is where to put the
+    /// file back, `time-pos` at the pause, when mpv says it is seekable;
+    /// `None` for a stream that is not (a radio): the chime then consumes
+    /// that much of the stream, and the audio mpv had queued at the pause
+    /// plays at full gain before the chime (no flush is possible).
+    Paused { sample_rate: u32, channels: u32, resume_at: Option<f64> },
+    /// Nothing can carry a chime now: still loading (no audio parameters),
+    /// a real load in flight, a paused seekable file too close to its end
+    /// (the chime would end it and advance the playlist), or a paused chime
+    /// already sounding (see `Player::chime_route`).
     Silent,
+}
+
+/// How much of a paused seekable file must remain after the chime for it to
+/// play (`ChimeRoute::Paused`). Measured by the paused spike on mpv 0.37,
+/// paused 0.2 s before the end: the unpause reaches the end within 6 ms,
+/// `end-file` then idle reach the core (which advances to the next track),
+/// and not one sample of the chime comes out (`amix duration=first` ends
+/// with the music). `keep-open` saves no chime either.
+pub const PAUSED_CHIME_END_MARGIN_S: f64 = 1.0;
+
+/// Whether a chime of `chime` played from `position` of a paused seekable
+/// file ends before the file does, by `PAUSED_CHIME_END_MARGIN_S`. No
+/// `duration` known: no guard. The one rule for the route's first chime
+/// (`MpvPlayer::chime_route`) and the core's second (`core::lock_sound`).
+pub fn paused_chime_fits(position: f64, duration: Option<f64>, chime: std::time::Duration) -> bool {
+    duration.is_none_or(|d| d - position >= chime.as_secs_f64() + PAUSED_CHIME_END_MARGIN_S)
 }
 
 #[async_trait::async_trait]
@@ -99,11 +126,40 @@ pub trait Player: Send + Sync + 'static {
     /// Where a chime can play now: `Idle` when mpv has nothing loaded or
     /// plays only an earlier chime (`play_aside`, replaced by the next);
     /// `Live` while a file plays (rate and channels from `audio-params`);
-    /// `Silent` when paused, or when the file has no audio parameters yet
-    /// (loading).
-    async fn chime_route(&self) -> Result<ChimeRoute>;
+    /// `Paused` while a file is paused; `Silent` when the file has no audio
+    /// parameters yet (loading), or when a paused seekable file ends sooner
+    /// than `chime` + 1 s from where it stands.
+    async fn chime_route(&self, chime: std::time::Duration) -> Result<ChimeRoute>;
     /// Loads a generated sound while mpv is idle; none of that load's events
     /// reach the core (mpv's `AsideGate`), so the core keeps believing
     /// nothing plays — which is the truth it acts on.
     async fn play_aside(&self, uri: &str) -> Result<()>;
+    /// Starts a chime on a paused file (`ChimeRoute::Paused`): writes
+    /// `chain` (the chain mpv holds with `lock_sound::mix_filter_over_silence`
+    /// after it), puts the file back at `resume_at` when `Some` (a seek that
+    /// flushes the audio queued at the pause, which would otherwise play at
+    /// full gain before the chime), and unpauses. From the first call until
+    /// `end_sound_while_paused`, the core sees none of it: no
+    /// `PlaybackRestarted`, and `progress` answers what it answered at the
+    /// pause. A second call while one sounds (another lock change) does the
+    /// same again and keeps the first frozen progress.
+    ///
+    /// **Whatever this returns, `end_sound_while_paused` must follow**: an
+    /// error may come after mpv applied the chain, and the music would stay
+    /// at gain 0. Bounded in time as a whole (mpv's: 1.5 s), never mpv's 5 s
+    /// per command: it runs on the core loop.
+    async fn sound_while_paused(&self, chain: &str, resume_at: Option<f64>) -> Result<()>;
+    /// Ends a paused chime: pauses again, writes `chain` (the plain chain
+    /// mpv held before the chime), waits (bounded) for mpv to rebuild it,
+    /// then puts the file back at `resume_at` exactly when `Some`. Every
+    /// step is tried even when one fails, so the plain chain is written
+    /// whatever happens; the first error is returned. The restore seek's
+    /// `PlaybackRestarted`, which mpv sends only once the user resumes,
+    /// never reaches the core either, unless a new file starts first; and
+    /// when the file was put back, `progress` stays at the pause's until the
+    /// user's next transport call (pause toggle, seek, next, prev, chapter,
+    /// stop, a load) or a file start. Bounded in time as a whole too (mpv's:
+    /// 1.5 s); on an error, `af` is unknown and the caller must rewrite it
+    /// before the music resumes.
+    async fn end_sound_while_paused(&self, chain: &str, resume_at: Option<f64>) -> Result<()>;
 }

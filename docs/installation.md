@@ -1514,8 +1514,10 @@ ffmpeg 6.1.1:
   path is unverified;
 - whether changing the audio output keeps the live gains is unknown: mpv may
   rebuild the chain from `af` when it reloads the output, so the core rewrites
-  the chain after every output change while the equalizer is on — a rewrite
-  that the output change's own cut hides, but whose need nobody has observed;
+  the chain after every output change while the equalizer is on, or while a
+  lock chime is mixed in (equalizer off included, to drop the chime) — a
+  rewrite that the output change's own cut hides, but whose need nobody has
+  observed;
 - the full chain cost about +3 % of one core on WSL. **That is not measured
   on the Pi 2 B (mpv 0.40)**, where it may be 10 to 20 times more, and the
   Audio dropouts section applies;
@@ -2276,7 +2278,44 @@ latency, so neither the live mix nor the idle chime was heard through a real
 sound card (under `ao=pcm` the idle chime runs untimed). Unverified on the Pi:
 the mix rebuild, the idle load's event order behind the gate, and the
 `loadfile` named options there; and whether a seek within the ~1.2 s the chime
-stays in the chain replays it. A second chime during an idle one replaces it
+stays in the chain replays it. After a band moved live (`af-command`, which
+mpv's `af` never records), the core mixes the chime into the chain `af`
+holds, not the setting's, so the equalizer's entries are written with the
+arguments they already had. That mpv then keeps those entries, and the live
+gains in them, was measured on the same machine (20 chimes after a live
+`af-command`, rock preset, 48 kHz): no click at the add nor the removal
+(largest residual 0.0023 against 0.01), and the 1 kHz level stayed at the
+live gain (0.3885, against 0.2750 for the gain written whole) through both.
+Rebuilding the entries from the setting instead clicked at every chime
+(20/20, residual up to 0.237), and any whole write that changes an entry's
+arguments clicked 19/20.
+**The chime while paused** was measured on the same machine only (mpv 0.37,
+`ao=pcm`), never heard on the Pi. A seekable file at 48 kHz with the equalizer
+was clean 20/20: no music in the chime section (1 kHz energy 0 against a 3e-4
+threshold), the chime bit-identical to a pure render, the position restored to
+0 or -1 sample; 44.1 kHz with the equalizer off and unlock sound C, 5/5 each.
+That needed a flush seek (`absolute+keyframes`) before unpausing and waiting for
+the restored chain's `audio-reconfig` before the exact seek back; without the
+wait the restore seek was lost once in about 49, and the guard is reasoned, not
+proven. A non-seekable stream (radio) is not seeked: the listener may hear about
+one audio buffer of music (about 0.2 s on the device, unverified) at the unpause
+before the chime, and the stream ends up about 1.4 s further behind live. A
+radio paused long enough for its server to drop the connection, woken by a
+paused chime, may reach the end of what it holds: mpv would then go idle and
+the core's stream retry would restart the radio by itself. Not measured; the
+~1.4 s the chime consumes is likely covered by the read-ahead. Each
+step of a paused chime runs on the core loop within a total budget of its
+own (the route's questions 1 s, the start 1.5 s, the end 1.5 s), so an mpv
+that stops answering holds the loop at most about 4 s on a lock press; an
+end that gave up has still written its pause, chain and seek for an mpv
+that answers late, and the resume rewrites the chain before the music can
+be heard. Tested against a scripted socket that stops answering, on the dev
+machine; the budgets were never spent against a real mpv, and how long the
+Pi's mpv takes to answer these commands under load is not measured. A chime
+mixed into
+playback is built on the filter chain mpv actually holds (rebuilding the
+equalizer entries after a live band change clicked 20/20).
+A second chime during an idle one replaces it
 (the core does not ask mpv, which answers then as for a real file); that was
 run on WSL against mpv 0.37 with the timed `ao=null` output only, and a chime
 asked for in the few milliseconds between an idle chime's load and its

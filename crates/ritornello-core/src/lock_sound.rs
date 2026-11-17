@@ -13,6 +13,9 @@
 //! the plan): while something plays, [`mix_filter`] mixes the chime into the
 //! audio chain without a click (`amix`, `normalize=0`, the main stream
 //! untouched); while mpv is idle, [`idle_uri`] is loaded as a one-off file.
+//! A third, measured by the paused spike: while paused, the chime is mixed
+//! over the music silenced ([`mix_filter_over_silence`]) and mpv is unpaused
+//! for its length.
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -199,10 +202,28 @@ pub fn idle_uri(sound: LockSound, motif: Motif) -> Option<String> {
 /// after the equalizer with a comma, alone when the equalizer is off). The
 /// expression is repeated once per channel of the stream being played.
 pub fn mix_filter(sound: LockSound, motif: Motif, sample_rate: u32, channels: u32) -> Option<String> {
+    chime_graph("anull", sound, motif, sample_rate, channels)
+}
+
+/// [`mix_filter`] with the music silenced (`volume=0`): the filter of a
+/// chime played while paused, for which mpv is unpaused the chime's length
+/// (`player::Player::sound_while_paused`). Measured by the paused spike
+/// (mpv 0.37 / FFmpeg 6.1, 48 and 44.1 kHz, equalizer on and off): the music
+/// at gain 0 is silent bit-exactly and the chime comes out sample for sample
+/// as the pure `aevalsrc` render. `amix duration=first` still follows the
+/// music, so the chime sounds only while mpv decodes the paused file — hence
+/// the end-of-file guard of `player::ChimeRoute::Paused`.
+pub fn mix_filter_over_silence(sound: LockSound, motif: Motif, sample_rate: u32, channels: u32) -> Option<String> {
+    chime_graph("volume=volume=0", sound, motif, sample_rate, channels)
+}
+
+/// The `@chime` entry; `music` is the filter the playing stream goes through
+/// before it is mixed with the chime.
+fn chime_graph(music: &str, sound: LockSound, motif: Motif, sample_rate: u32, channels: u32) -> Option<String> {
     let e = expression(sound, motif)?;
     let exprs = vec![e; channels.max(1) as usize].join("|");
     Some(format!(
-        "@chime:lavfi=[anull[m];aevalsrc=exprs='{exprs}':s={sample_rate}:d={}[c];[m][c]amix=inputs=2:duration=first:dropout_transition=0:normalize=0]",
+        "@chime:lavfi=[{music}[m];aevalsrc=exprs='{exprs}':s={sample_rate}:d={}[c];[m][c]amix=inputs=2:duration=first:dropout_transition=0:normalize=0]",
         num(duration_secs(sound, motif))
     ))
 }
@@ -316,6 +337,64 @@ mod tests {
         assert_eq!(mono.matches(&e).count(), 1);
         assert!(mono.contains(&format!("exprs='{e}'")));
         assert!(!mono.contains('|'), "no channel separator with one channel");
+    }
+
+    #[test]
+    fn the_paused_graph_is_the_measured_one() {
+        // Verbatim from the paused spike (9b, Task 1, kf48: 20/20 clean).
+        let a_lock = expression(LockSound::A, Motif::Lock).unwrap();
+        assert_eq!(
+            mix_filter_over_silence(LockSound::A, Motif::Lock, 48000, 2).unwrap(),
+            format!(
+                "@chime:lavfi=[volume=volume=0[m];aevalsrc=exprs='{a_lock}|{a_lock}':s=48000:d=0.74[c];[m][c]amix=inputs=2:duration=first:dropout_transition=0:normalize=0]"
+            )
+        );
+        let mono = mix_filter_over_silence(LockSound::C, Motif::Unlock, 44100, 1).unwrap();
+        assert!(mono.contains(":s=44100:d=1.63[c]"), "{mono}");
+        assert!(!mono.contains('|'));
+        for motif in [Motif::Lock, Motif::Unlock, Motif::Preview] {
+            assert_eq!(mix_filter_over_silence(LockSound::None, motif, 48000, 2), None);
+        }
+    }
+
+    /// Through ffmpeg, the graph inside the `@chime:lavfi=[…]` entry, fed a
+    /// 1 kHz sine at 0.3: the music branch comes out silent (−60 dB re the
+    /// sine, the spike's threshold), the chime is there, and after the chime
+    /// the output is exact silence. The same graph with the music at gain 1
+    /// is the positive control: the detector sees the sine.
+    #[test]
+    fn the_paused_graph_silences_the_music() {
+        if Command::new("ffmpeg").arg("-version").output().is_err() {
+            eprintln!("ffmpeg is not installed: the render test is skipped");
+            return;
+        }
+        let run = |filter: &str| -> Vec<f32> {
+            let graph = filter.strip_prefix("@chime:lavfi=[").and_then(|g| g.strip_suffix(']')).expect("an @chime entry");
+            let dir = tempfile::tempdir().unwrap();
+            let out = dir.path().join("out.raw");
+            let status = Command::new("ffmpeg")
+                .args(["-v", "error", "-y", "-f", "lavfi", "-i", "aevalsrc=exprs='0.3*sin(2*PI*1000*t)':s=48000:d=2"])
+                .args(["-filter_complex"])
+                .arg(format!("[0:a]{graph}"))
+                .args(["-ac", "1", "-ar", "48000", "-f", "f32le"])
+                .arg(&out)
+                .status()
+                .unwrap();
+            assert!(status.success(), "ffmpeg refused {graph}");
+            let bytes = std::fs::read(&out).unwrap();
+            bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect()
+        };
+        let paused = mix_filter_over_silence(LockSound::A, Motif::Lock, 48000, 1).unwrap();
+        let x = run(&paused);
+        assert!(x.len() >= 95_000, "the output follows the music's length: {}", x.len());
+        let leak = goertzel(&x, 48000.0, 0.0, 1.9, 1000.0);
+        assert!(leak <= 0.3e-3, "the music leaks at 1 kHz: {leak}");
+        let peak = x[..35_520].iter().fold(0f32, |p, s| p.max(s.abs()));
+        assert!(peak > 0.1, "the chime is missing: peak {peak}");
+        assert!(x[36_000..].iter().all(|s| *s == 0.0), "after the chime the output is not exact silence");
+        // Positive control: the music branch at gain 1 is seen.
+        let control = run(&paused.replace("volume=volume=0[m]", "anull[m]"));
+        assert!(goertzel(&control, 48000.0, 0.8, 1.9, 1000.0) > 0.25, "the detector does not see the music");
     }
 
     /// Renders `aevalsrc` to mono f32 samples at 48 kHz, or `None` without ffmpeg.

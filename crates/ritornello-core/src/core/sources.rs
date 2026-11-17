@@ -111,6 +111,8 @@ impl<P: Player> Core<P> {
     /// twice, and a cd whose arrival setting says "play nothing" must not be
     /// muted by it when the disc asked to play.
     pub(super) async fn cycle_source(&mut self, next: Option<String>, arrival: SourceReq) -> Result<()> {
+        // A paused chime ends before the stop (`lock_sound.rs`).
+        self.finish_paused_chime().await;
         // Changing source always means changing what plays — and it is the
         // core that stops, without depending on the plugins' answers. Before,
         // the action returned by `Deactivate` (the radio plugin's `Stop`) was
@@ -480,6 +482,11 @@ impl<P: Player> Core<P> {
     }
 
     pub(super) async fn apply(&mut self, action: SourceAction) -> Result<()> {
+        // Every action moves the transport, which a paused chime has
+        // unpaused: it ends first (`lock_sound.rs`).
+        if !matches!(action, SourceAction::Noop) {
+            self.finish_paused_chime().await;
+        }
         match action {
             SourceAction::Noop => {}
             SourceAction::Play { uri, start, finite, playlist, loopable, ytdl_path } => {
