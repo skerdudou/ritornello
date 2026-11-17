@@ -141,6 +141,8 @@ impl<P: Player> Core<P> {
             // has nothing pending since no restore seek is sent. Then the
             // usual rewrite, should the setting differ from that chain.
             Event::FileStarting => {
+                // mpv's held tags described the file it is leaving.
+                self.held_file_tags = None;
                 self.finish_paused_chime_in_place().await;
                 self.reapply_equalizer().await
             }

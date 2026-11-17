@@ -251,6 +251,22 @@ impl Metadata {
     /// must work without any plugin, and without the Source having to declare
     /// anything. That is what makes it useful to any source playing a tagged
     /// file, including a future source that would know nothing of all this.
+    /// Forgets everything the file's own tags brought — text, embedded
+    /// cover, lyrics — and nothing else: the Source's and the plugins' layers
+    /// stay. For a Source that declares another file for the same identity
+    /// (`Core::declare_media_path`): what the previous file said no longer
+    /// describes the track. `true` if something was held.
+    pub fn clear_file_tags(&mut self) -> bool {
+        let had = self.tags.is_some() || self.cover_tags.is_some() || self.lyrics_tags.is_some();
+        self.tags = None;
+        if self.cover_tags.take().is_some() {
+            self.cover_cle = None;
+        }
+        self.lyrics_tags = None;
+        self.refresh_lyrics_key();
+        had
+    }
+
     pub fn set_tags(&mut self, track: Track) -> bool {
         if self.tags.as_ref() == Some(&track) {
             return false;

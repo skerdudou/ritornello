@@ -759,10 +759,33 @@ pub struct MediaFile {
     pub cover: Option<crate::cover::CoverSource>,
 }
 
-/// The tag a reader of `file` consults: the format's primary one, or the
-/// first it carries. One choice for the cover, the text and the lyrics alike.
-fn tag_of(file: &lofty::file::TaggedFile) -> Option<&lofty::tag::Tag> {
-    lofty::file::TaggedFileExt::primary_tag(file).or_else(|| lofty::file::TaggedFileExt::first_tag(file))
+/// Every tag `file` carries, the format's primary one first. FFmpeg merges
+/// the tags a file carries (an mp3's ID3v2 and APE, a flac's Vorbis comments
+/// and a stray ID3), so a field is looked up in each, in this order, and the
+/// first that has it wins — for the cover, the text and the lyrics alike.
+fn tags_of(file: &lofty::file::TaggedFile) -> Vec<&lofty::tag::Tag> {
+    use lofty::file::TaggedFileExt;
+    let primary = file.primary_tag();
+    let primary_type = primary.map(lofty::tag::Tag::tag_type);
+    primary.into_iter().chain(file.tags().iter().filter(|t| Some(t.tag_type()) != primary_type)).collect()
+}
+
+/// The words an mp3's ID3v2 tag carries in `TXXX` frames, which `lofty`
+/// keeps out of its generic tag (it maps no `TXXX` description to its
+/// lyrics keys but `USLT`): `(words, plain)`, from `TXXX:LYRICS` and
+/// `TXXX:UNSYNCEDLYRICS`, descriptions compared without regard to case, as
+/// FFmpeg exposes them as `LYRICS` and `UNSYNCEDLYRICS` and `file_lyrics`
+/// reads them. Some taggers write them there.
+fn id3_user_lyrics(tag: &lofty::id3::v2::Id3v2Tag) -> (Option<String>, Option<String>) {
+    let user = |name: &str| {
+        tag.into_iter().find_map(|frame| match frame {
+            lofty::id3::v2::Frame::UserText(f) if f.description.eq_ignore_ascii_case(name) => {
+                Some(f.content.to_string())
+            }
+            _ => None,
+        })
+    };
+    (user("lyrics"), user("unsyncedlyrics"))
 }
 
 /// The embedded picture, as a cover the core can serve.
@@ -783,8 +806,8 @@ fn tag_of(file: &lofty::file::TaggedFile) -> Option<&lofty::tag::Tag> {
 /// and `cover::key` hashes only the latter — see its doc. Computing it still
 /// costs one `lofty` read per track, that part is irreducible: the bytes must
 /// be in hand to be hashed, whether or not they end up written anywhere.
-fn cover_of(path: &str, file: &lofty::file::TaggedFile) -> Option<crate::cover::CoverSource> {
-    let image = tag_of(file)?.pictures().first()?;
+fn cover_of(path: &str, tags: &[&lofty::tag::Tag]) -> Option<crate::cover::CoverSource> {
+    let image = tags.iter().find_map(|t| t.pictures().first())?;
     Some(crate::cover::CoverSource::Embedded {
         audio: std::path::PathBuf::from(path),
         content: crate::cover::content_key(image.data()),
@@ -809,11 +832,16 @@ fn cover_of(path: &str, file: &lofty::file::TaggedFile) -> Option<crate::cover::
 ///   `UNSYNCEDLYRICS` is `UnsyncLyrics`, the plain text beside them, as
 ///   `file_lyrics` reads `unsyncedlyrics`;
 /// - m4a: the iTunes atom `©lyr` is `Lyrics` (the words).
-fn lyrics_of(tag: &lofty::tag::Tag) -> Option<Lyrics> {
+///
+/// `id3_user` is what `id3_user_lyrics` found in an mp3's `TXXX` frames:
+/// FFmpeg exposes `TXXX:LYRICS` as `lyrics`, ahead of a `USLT` frame's
+/// `lyrics-<lang>` in `file_lyrics`' precedence, so it comes first here too.
+fn lyrics_of(tag: &lofty::tag::Tag, id3_user: &(Option<String>, Option<String>)) -> Option<Lyrics> {
     use lofty::tag::{ItemKey, TagType};
     let text = |key: ItemKey| tag.get_string(key).map(str::to_string);
     let (words, plain) = if tag.tag_type() == TagType::Id3v2 {
-        (text(ItemKey::Lyrics).or_else(|| text(ItemKey::UnsyncLyrics)), None)
+        let (user_words, user_plain) = id3_user.clone();
+        (user_words.or_else(|| text(ItemKey::Lyrics)).or_else(|| text(ItemKey::UnsyncLyrics)), user_plain)
     } else {
         (text(ItemKey::Lyrics), text(ItemKey::UnsyncLyrics))
     };
@@ -848,27 +876,43 @@ pub fn read_media_file(path: &str) -> Option<MediaFile> {
     if !std::fs::metadata(path).ok()?.is_file() {
         return None;
     }
-    let file = lofty::probe::Probe::open(path).ok()?.read().ok()?;
-    let tag = tag_of(&file);
+    // An mp3 is read as such, still in one parse: its ID3v2 tag keeps the
+    // `TXXX` frames lofty's generic tag leaves out (`id3_user_lyrics`).
+    let probe = lofty::probe::Probe::open(path).ok()?.guess_file_type().ok()?;
+    let (file, id3_user) = if probe.file_type() == Some(lofty::file::FileType::Mpeg) {
+        use std::io::Seek;
+        let mut reader = probe.into_inner();
+        reader.rewind().ok()?;
+        let mpeg = lofty::mpeg::MpegFile::read_from(&mut reader, lofty::config::ParseOptions::new()).ok()?;
+        let user = mpeg.id3v2().map(id3_user_lyrics).unwrap_or_default();
+        (lofty::file::TaggedFile::from(mpeg), user)
+    } else {
+        (probe.read().ok()?, (None, None))
+    };
+    let tags = tags_of(&file);
     let clean = |value: Option<std::borrow::Cow<'_, str>>| {
         value.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
     };
+    // The first tag that has the field, as FFmpeg's merged view gives it.
+    fn first<T>(tags: &[&lofty::tag::Tag], read: impl Fn(&lofty::tag::Tag) -> Option<T>) -> Option<T> {
+        tags.iter().find_map(|t| read(t))
+    }
     // Truncated, as the core truncates mpv's measured duration
     // (`refresh_position`): rounding would show 3:34 armed for a track
     // that shows 3:33 once it plays.
     let seconds = u32::try_from(file.properties().duration().as_secs()).unwrap_or(u32::MAX);
     let track = Track {
-        artist: clean(tag.and_then(|t| t.artist())),
-        title: clean(tag.and_then(|t| t.title())),
-        album: clean(tag.and_then(|t| t.album())),
+        artist: first(&tags, |t| clean(t.artist())),
+        title: first(&tags, |t| clean(t.title())),
+        album: first(&tags, |t| clean(t.album())),
         duration_s: (seconds > 0).then_some(seconds),
         // The raw text, as FFmpeg hands `date` to `file_tags`: the same
         // `valid_year` then judges `"1971"` and `"1971-08-17"` alike.
-        year: tag
-            .and_then(|t| {
-                t.get_string(lofty::tag::ItemKey::RecordingDate).or_else(|| t.get_string(lofty::tag::ItemKey::Year))
-            })
-            .and_then(ritornello_proto::valid_year),
+        year: first(&tags, |t| {
+            t.get_string(lofty::tag::ItemKey::RecordingDate)
+                .or_else(|| t.get_string(lofty::tag::ItemKey::Year))
+                .and_then(ritornello_proto::valid_year)
+        }),
         links: Vec::new(),
         origin: Some(crate::metadata::ORIGIN_TAGS.to_string()),
         cover_href: None,
@@ -881,8 +925,8 @@ pub fn read_media_file(path: &str) -> Option<MediaFile> {
     };
     Some(MediaFile {
         tags: (!track.is_empty()).then_some(track),
-        lyrics: tag.and_then(lyrics_of),
-        cover: cover_of(path, &file),
+        lyrics: tags.iter().find_map(|t| lyrics_of(t, &id3_user)),
+        cover: cover_of(path, &tags),
     })
 }
 

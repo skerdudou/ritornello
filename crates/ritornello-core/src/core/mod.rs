@@ -464,6 +464,24 @@ pub struct Core<P: Player> {
     /// next one — and `handle_file_tags` ignores mpv's tags while it is set,
     /// since the declared read is then the one description of that file.
     media_path: Option<String>,
+    /// The declared read of `media_path` came back empty-handed — the file
+    /// could not be read, or the share did not answer in time. mpv's tags
+    /// then describe that track again (`handle_file_tags`), as they did
+    /// before the Source declared its files, rather than leaving it untitled
+    /// for its whole duration; and the same file declared again (Play on the
+    /// armed track a sleeping share failed to read) is read again
+    /// (`declare_media_path`). Forgotten with `media_path`.
+    media_read_failed: bool,
+    /// The last tags mpv announced while a declared file kept them out
+    /// (`handle_file_tags`), kept for one use: if the declared read then
+    /// fails, they are what describes the track (`file_read_arrived`). mpv
+    /// announces a file's tags once, so ignored and not kept, they would be
+    /// gone for good. Kept across an identity change on purpose — mpv's tags
+    /// for the next file arrive before the Source declares it, which is the
+    /// very race the declared read closes — and forgotten when mpv starts
+    /// loading another file (`Event::FileStarting`), so they only ever
+    /// describe the file mpv holds.
+    held_file_tags: Option<(Option<ritornello_proto::Track>, Option<ritornello_proto::Lyrics>)>,
     /// Circuit breaker that bounds the `lofty` call, strictly blocking and
     /// potentially on a network share: see `health.rs` and the comment on
     /// `spawn_file_read`.
@@ -730,6 +748,8 @@ impl<P: Player> Core<P> {
             cover_in_flight: None,
             file_read_tx,
             media_path: None,
+            media_read_failed: false,
+            held_file_tags: None,
             health: Arc::new(crate::health::Health::new()),
             source_cover_archivable: false,
             cover_archive_attempted: Arc::new(std::sync::Mutex::new(None)),

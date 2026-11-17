@@ -746,6 +746,44 @@ pub(super) fn test_mp3_with_cover(dir: &std::path::Path) -> Option<std::path::Pa
 /// The LRC `test_mp3_with_lyrics` embeds.
 pub(super) const EMBEDDED_LRC: &str = "[00:01.00]First line\n[00:02.50]Second line";
 
+/// A one-second mp3 whose ID3v2.3 tag carries a title and one `TXXX` frame
+/// described `description` holding `text` — the shape some taggers give
+/// lyrics (`TXXX:LYRICS`, `TXXX:UNSYNCEDLYRICS`). Written by hand like
+/// `test_mp3_with_lyrics`, since ffmpeg would choose the frame itself. `None`
+/// if ffmpeg is absent.
+pub(super) fn test_mp3_with_user_text(dir: &std::path::Path, name: &str, description: &str, text: &str) -> Option<std::path::PathBuf> {
+    let bare = dir.join(format!("{name}.bare.mp3"));
+    let ok = std::process::Command::new("ffmpeg")
+        .args(["-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1"])
+        .args(["-c:a", "libmp3lame", "-write_id3v2", "0"])
+        .arg(&bare)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        return None;
+    }
+    let frame = |id: &[u8; 4], body: &[u8]| {
+        let mut f = id.to_vec();
+        f.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
+        f.extend_from_slice(&[0, 0]);
+        f.extend_from_slice(body);
+        f
+    };
+    let mut frames = frame(b"TIT2", &[&[0u8][..], b"Title"].concat());
+    // Encoding, the description and its terminator, then the value.
+    frames.extend(frame(b"TXXX", &[&[0u8][..], description.as_bytes(), &[0u8][..], text.as_bytes()].concat()));
+    let n = frames.len();
+    let size = [(n >> 21) as u8 & 0x7f, (n >> 14) as u8 & 0x7f, (n >> 7) as u8 & 0x7f, n as u8 & 0x7f];
+    let mut file = b"ID3\x03\x00\x00".to_vec();
+    file.extend_from_slice(&size);
+    file.extend(frames);
+    file.extend(std::fs::read(&bare).ok()?);
+    let output = dir.join(format!("{name}.mp3"));
+    std::fs::write(&output, file).ok()?;
+    Some(output)
+}
+
 /// Generates, via ffmpeg, a one-second mp3 carrying a **real** ID3v2.3
 /// `USLT` frame (language `eng`, no descriptor) with `EMBEDDED_LRC`, plus a
 /// title and an artist. `None` if ffmpeg is absent, like

@@ -149,13 +149,23 @@ impl<P: Player> Core<P> {
     /// changed. The same file declared again for the same identity — a frame
     /// restated, Stop keeping the track armed, Play starting the armed track
     /// — is neither forgotten nor read again: the slate was kept, and so is
-    /// the read already launched or landed.
+    /// the read already launched or landed. **Unless that read failed**
+    /// (`media_read_failed`): a share asleep when the track was armed may
+    /// well answer when Play starts it, so the same file declared again is
+    /// read again.
+    ///
+    /// **Another file for the same identity** (the Source correcting the
+    /// path it declared) drops what the previous file's read brought — its
+    /// text, lyrics and embedded cover — before the new one is read: kept,
+    /// the old picture would hold the slot and the new file's would be
+    /// refused as "a cover is already held".
     ///
     /// A URL has nothing `lofty` can open, and a relative path names no file
     /// the core could find: either is ignored, as if nothing were declared,
     /// and mpv's own tags keep describing what plays.
     fn declare_media_path(&mut self, path: String) {
-        if self.media_path.as_deref() == Some(path.as_str()) {
+        let same_file = self.media_path.as_deref() == Some(path.as_str());
+        if same_file && !self.media_read_failed {
             return;
         }
         if path.contains("://") || !std::path::Path::new(&path).is_absolute() {
@@ -164,7 +174,12 @@ impl<P: Player> Core<P> {
         let Some(identity) = self.metadata.identity().cloned() else {
             return;
         };
+        if self.media_path.is_some() && !same_file && self.metadata.clear_file_tags() {
+            self.start_cover_fetch();
+            self.publish_state();
+        }
         self.media_path = Some(path.clone());
+        self.media_read_failed = false;
         self.spawn_file_read(identity, path);
     }
 
@@ -230,6 +245,13 @@ impl<P: Player> Core<P> {
     /// only when no cover is held — a Source's `folder.jpg`, declared with the
     /// identity, keeps priority by construction, and a cover already shown
     /// does not blink off while a second fetch of another image runs.
+    ///
+    /// **A read that came back empty-handed hands the track back to mpv**
+    /// (`media_read_failed`): its tags are let through again, and the ones it
+    /// already announced for this file, held meanwhile, are applied now.
+    /// Without this, a share too slow to answer in time left the track with
+    /// no title, artist or lyrics for its whole duration — worse than before
+    /// the Source declared its files, when only the cover was lost.
     pub async fn file_read_arrived(&mut self, read: FileRead) {
         if self.standby
             || self.metadata.identity() != Some(&read.identity)
@@ -239,6 +261,11 @@ impl<P: Player> Core<P> {
             return;
         }
         let Some(file) = read.file else {
+            self.media_read_failed = true;
+            tracing::info!("declared file: {} unread, mpv's own tags describe it", read.path);
+            if let Some((track, lyrics)) = self.held_file_tags.take() {
+                self.handle_file_tags(track, lyrics);
+            }
             return;
         };
         let mut changed = false;
@@ -286,6 +313,7 @@ impl<P: Player> Core<P> {
             self.preset_name = None;
             self.location = None;
             self.media_path = None;
+            self.media_read_failed = false;
         }
         if !self.metadata.set_identity(identity) {
             if was != armed {
@@ -298,6 +326,7 @@ impl<P: Player> Core<P> {
         // this call.
         self.location = None;
         self.media_path = None;
+        self.media_read_failed = false;
         self.publish_fresh_slate();
     }
 
@@ -465,20 +494,26 @@ impl<P: Player> Core<P> {
     /// Each frame describes the whole tag set, so its absence of lyrics is a
     /// fact, not silence.
     ///
-    /// **Ignored while the Source has declared the file it plays**
+    /// **Held back while the Source has declared the file it plays**
     /// (`media_path`): the core reads that file itself, tied to the identity
     /// (`declare_media_path`), and mpv's tags travel on another channel than
     /// the Source's identity — nothing orders the two, so tags of the next
     /// file could land on the track still declared, then be wiped by its
-    /// identity change. What has no declared file — an Ogg stream's Vorbis
-    /// comments, a Source that predates source 1.4 — keeps this layer as it
-    /// always was.
+    /// identity change. Held, not dropped (`held_file_tags`): if the declared
+    /// read fails, they describe the track after all, and so do the ones that
+    /// follow (`media_read_failed`). What has no declared file — an Ogg
+    /// stream's Vorbis comments, a Source that predates source 1.4 — keeps
+    /// this layer as it always was.
     pub(super) fn handle_file_tags(
         &mut self,
         track: Option<ritornello_proto::Track>,
         lyrics: Option<ritornello_proto::Lyrics>,
     ) {
-        if self.standby || !self.playback || self.media_path.is_some() {
+        if self.standby || !self.playback {
+            return;
+        }
+        if self.media_path.is_some() && !self.media_read_failed {
+            self.held_file_tags = Some((track, lyrics));
             return;
         }
         let title_before = self.title_before_frame();
@@ -2079,6 +2114,100 @@ mod tests {
         assert_eq!(core.player_state().track.title.as_deref(), Some("New"));
     }
 
+    /// A sleeping share: the declared read comes back empty-handed. mpv's
+    /// tags then describe the track — the ones it announced while the read
+    /// was in flight, held meanwhile, and the ones that follow — rather than
+    /// leaving it untitled for its whole duration.
+    ///
+    /// **[MUTATION]** the held tags not replayed on failure → the first
+    /// assertion fires; the `media_read_failed` exemption removed from
+    /// `handle_file_tags` → both fire.
+    #[tokio::test]
+    async fn a_failed_read_hands_the_track_back_to_mpv_s_tags() {
+        let (mut core, _state_rx, mut rx, tmp) = test_core_with_file_read();
+        let gone = tmp.path().join("gone.mp3").to_string_lossy().into_owned();
+        let song = |title: &str| ritornello_proto::Track { title: Some(title.into()), ..Default::default() };
+        core.playback = true;
+        core.handle_source_update("radio", plays_file(serde_json::json!({"path": gone}), &gone));
+        // mpv's tags, while the read is in flight: held, not shown.
+        core.handle_file_tags(Some(song("From mpv")), Some(lrc("[00:01.00]Words")));
+        assert_eq!(core.player_state().track.title, None, "held while the declared read may still describe the file");
+        let read = next_read(&mut rx).await.expect("the declared file's read");
+        assert!(read.file.is_none(), "a file that does not exist reads as nothing");
+        core.file_read_arrived(read).await;
+        let state = core.player_state();
+        assert_eq!(state.track.title.as_deref(), Some("From mpv"), "mpv's held tags must describe the unread file");
+        assert!(state.track.lyrics_href.is_some(), "and its held lyrics");
+        // The ones that follow pass too.
+        core.handle_file_tags(Some(song("Corrected by mpv")), None);
+        assert_eq!(core.player_state().track.title.as_deref(), Some("Corrected by mpv"));
+    }
+
+    /// mpv's held tags describe the file it holds: once it starts loading
+    /// another, they are gone, and a failed read has nothing stale to show.
+    #[tokio::test]
+    async fn mpv_s_held_tags_go_with_the_file_mpv_leaves() {
+        let (mut core, _state_rx, mut rx, tmp) = test_core_with_file_read();
+        let gone = tmp.path().join("gone.mp3").to_string_lossy().into_owned();
+        core.playback = true;
+        core.handle_source_update("radio", plays_file(serde_json::json!({"path": gone}), &gone));
+        core.handle_file_tags(Some(ritornello_proto::Track { title: Some("Before".into()), ..Default::default() }), None);
+        core.handle_event(Event::FileStarting).await;
+        core.playback = true;
+        let read = next_read(&mut rx).await.expect("the declared file's read");
+        core.file_read_arrived(read).await;
+        assert_eq!(core.player_state().track.title, None, "the previous file's tags landed");
+    }
+
+    /// The armed track's read failed (the share was asleep); Play starts that
+    /// very track: its file is read again, not left unread for good.
+    ///
+    /// **[MUTATION]** the `media_read_failed` exemption removed from
+    /// `declare_media_path`'s "already declared" guard → no second read, the
+    /// assertion fires.
+    #[tokio::test]
+    async fn playing_an_armed_track_whose_read_failed_reads_it_again() {
+        let (mut core, _state_rx, mut rx, tmp) = test_core_with_file_read();
+        let gone = tmp.path().join("gone.mp3").to_string_lossy().into_owned();
+        let identity = serde_json::json!({"path": gone});
+        core.handle_source_update("radio", arms_file(identity.clone(), &gone));
+        let read = next_read(&mut rx).await.expect("the armed file's read");
+        core.file_read_arrived(read).await;
+        core.handle_source_update("radio", plays_file(identity, &gone));
+        assert!(next_read(&mut rx).await.is_some(), "Play must read the file again");
+    }
+
+    /// The same identity re-declared with another file: what the first file's
+    /// read brought — its text and its embedded cover — no longer describes
+    /// the track, and must not hold the slot the new file's picture needs.
+    ///
+    /// **[MUTATION]** `clear_file_tags` not called on a path change → the
+    /// text assertion fires (and, past it, the old picture would still hold
+    /// the slot the new one needs).
+    #[tokio::test]
+    async fn another_file_for_the_same_identity_replaces_what_the_first_one_said() {
+        let (mut core, _state_rx, _rx, _d) = test_core_with_file_read();
+        let identity = serde_json::json!({"track": 1});
+        let embedded = |audio: &str| CoverSource::Embedded { audio: audio.into(), content: audio.into() };
+        core.handle_source_update("radio", plays_file(identity.clone(), "/old/a.mp3"));
+        let mut read = read_of(identity.clone(), "/old/a.mp3", "Old");
+        read.file.as_mut().unwrap().cover = Some(embedded("/old/a.mp3"));
+        core.file_read_arrived(read).await;
+        assert_eq!(core.metadata.selected_cover().map(|c| c.0), Some(embedded("/old/a.mp3")));
+
+        core.handle_source_update("radio", plays_file(identity.clone(), "/new/a.mp3"));
+        assert_eq!(core.player_state().track.title, None, "the old file's text must go");
+        let mut read = read_of(identity, "/new/a.mp3", "New");
+        read.file.as_mut().unwrap().cover = Some(embedded("/new/a.mp3"));
+        core.file_read_arrived(read).await;
+        assert_eq!(core.player_state().track.title.as_deref(), Some("New"));
+        assert_eq!(
+            core.metadata.selected_cover().map(|c| c.0),
+            Some(embedded("/new/a.mp3")),
+            "the new file's picture must replace the old one"
+        );
+    }
+
     /// The Source's `folder.jpg`, declared in the very frame that declares the
     /// playing file: the picture embedded in the file must not displace it.
     #[tokio::test]
@@ -2192,6 +2321,11 @@ mod tests {
             tagged("synced.flac", "flac", "LYRICS", lrc_text),
             tagged("plain.flac", "flac", "UNSYNCEDLYRICS", "Just words"),
             tagged("atom.m4a", "aac", "lyrics", lrc_text),
+            // What some taggers write in an mp3: `TXXX` frames, which lofty's
+            // generic tag leaves out and FFmpeg exposes as `LYRICS` and
+            // `UNSYNCEDLYRICS`.
+            test_mp3_with_user_text(dir.path(), "txxx_lyrics", "LYRICS", lrc_text),
+            test_mp3_with_user_text(dir.path(), "txxx_unsynced", "UNSYNCEDLYRICS", "Just words"),
         ];
         for f in files {
             let f = f.expect("ffmpeg must write each fixture");

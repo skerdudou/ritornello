@@ -42,10 +42,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Timeout granted to the extraction of an embedded cover.
+/// Timeout granted to the read of a declared file (its tags, lyrics and
+/// embedded cover).
 ///
 /// Under the five seconds that `MpvIpc::command` already tolerates for an mpv
-/// response: a stuck extraction must not become, on its own, the longest wait
+/// response: a stuck read must not become, on its own, the longest wait
 /// the core loop can suffer.
 pub const TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -129,7 +130,7 @@ impl Health {
         match tokio::time::timeout(self.timeout, &mut task).await {
             Ok(Ok(v)) => Some(v),
             Ok(Err(e)) => {
-                tracing::warn!("embedded cover extraction on {} failed: {e}", path.display());
+                tracing::warn!("read of the declared file {} failed: {e}", path.display());
                 None
             }
             Err(_) => {
