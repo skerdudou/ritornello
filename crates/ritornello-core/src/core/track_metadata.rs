@@ -1864,7 +1864,7 @@ mod tests {
         // or remove this line without replacing it with an equivalent proof.
         assert!(!core.metadata.known().cover, "the read must be detached, never synchronous");
 
-        let read = rx.recv().await.expect("declaring a playing file must launch its read");
+        let read = next_read(&mut rx).await.expect("declaring a playing file must launch its read");
         assert_eq!(read.path, path);
         let r = read.file.as_ref().and_then(|f| f.cover.clone()).expect("this file carries a picture");
         core.file_read_arrived(read).await;
@@ -1881,6 +1881,12 @@ mod tests {
         let state = state_rx.borrow_and_update().clone();
         assert_eq!(state.track.cover_href.as_deref(), Some(&format!("/api/cover/{key}")[..]));
         assert_eq!(state.track.cover_origin.as_deref(), Some(crate::metadata::ORIGIN_TAGS));
+    }
+
+    /// The next read on the channel, bounded: a read never launched must
+    /// fail a test, not hang it.
+    async fn next_read(rx: &mut mpsc::Receiver<FileRead>) -> Option<FileRead> {
+        tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await.ok().flatten()
     }
 
     /// Two real files, two different embedded pictures: A green, B red.
@@ -1902,7 +1908,7 @@ mod tests {
     ) -> String {
         core.playback = true;
         core.handle_source_update("radio", plays_file(serde_json::json!({"kind": "file", "path": a}), a));
-        let read = rx.recv().await.expect("A's read");
+        let read = next_read(rx).await.expect("A's read");
         let r = read.file.as_ref().and_then(|f| f.cover.clone()).expect("A carries a picture");
         core.file_read_arrived(read).await;
         let key = settle_cover(core, &r).await;
@@ -1922,9 +1928,9 @@ mod tests {
     /// identity change then wiped A's cover with nothing left to read B's.
     /// B played under a placeholder, with nothing in the log.
     ///
-    /// **[MUTATION]** `declare_playing` ignoring its `media_path` (B never
-    /// read, the old behaviour's outcome) → the `recv` below finds no read and
-    /// the cover assertion fires.
+    /// **[MUTATION]** `declare_playing` skipping the read on a track change
+    /// (an identity was already playing: B never read, the old behaviour's
+    /// outcome) → no read arrives and the cover assertion fires.
     #[tokio::test]
     async fn mpv_announcing_the_next_file_first_does_not_cost_its_cover() {
         let (mut core, _state_rx, mut rx, tmp) = test_core_with_file_read();
@@ -1949,12 +1955,7 @@ mod tests {
 
         // Then the Source: B, and the file it plays.
         core.handle_source_update("radio", plays_file(serde_json::json!({"kind": "file", "path": b}), &b));
-        // Bounded: a read never launched must fail this test, not hang it.
-        let read = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
-            .await
-            .ok()
-            .flatten();
-        if let Some(read) = read {
+        if let Some(read) = next_read(&mut rx).await {
             core.file_read_arrived(read).await;
         }
         let (selected, _, _) = core.metadata.selected_cover().expect("B's embedded cover must be held");
@@ -1986,7 +1987,7 @@ mod tests {
             ..Default::default()
         };
         core.handle_event(Event::FileTags { track: Some(Box::new(mpv_b)), lyrics: None }).await;
-        let read = rx.recv().await.expect("B's read");
+        let read = next_read(&mut rx).await.expect("B's read");
         core.file_read_arrived(read).await;
 
         let (selected, _, _) = core.metadata.selected_cover().expect("B's embedded cover must be held");
@@ -2015,8 +2016,8 @@ mod tests {
         core.handle_source_update("radio", plays_file(serde_json::json!({"kind": "file", "path": a}), &a));
         core.handle_source_update("radio", plays_file(serde_json::json!({"kind": "file", "path": b}), &b));
         // Both reads were launched; their order of arrival is the runtime's.
-        let first = rx.recv().await.expect("a read");
-        let second = rx.recv().await.expect("another read");
+        let first = next_read(&mut rx).await.expect("a read");
+        let second = next_read(&mut rx).await.expect("another read");
         let (read_a, read_b) = if first.path == a { (first, second) } else { (second, first) };
         assert_eq!(read_a.path, a);
         let cover_b = read_b.file.as_ref().and_then(|f| f.cover.clone()).expect("B carries a picture");
@@ -2058,6 +2059,24 @@ mod tests {
         core.handle_source_update("radio", plays_file(second, a));
         core.file_read_arrived(read_of(first, a, "Alpha")).await;
         assert_ne!(core.player_state().track.title.as_deref(), Some("Alpha"), "a read landed on another identity");
+    }
+
+    /// The same identity re-declared with another file (the track moved on
+    /// the share, a Source correcting itself): the read of the file it no
+    /// longer names describes nothing current — the path is compared too.
+    ///
+    /// **[MUTATION]** the path comparison removed from `file_read_arrived` →
+    /// the assertion fires.
+    #[tokio::test]
+    async fn a_read_of_a_file_the_identity_no_longer_names_is_dropped() {
+        let (mut core, _state_rx, _rx, _d) = test_core_with_file_read();
+        let identity = serde_json::json!({"track": 1});
+        core.handle_source_update("radio", plays_file(identity.clone(), "/old/a.mp3"));
+        core.handle_source_update("radio", plays_file(identity.clone(), "/new/a.mp3"));
+        core.file_read_arrived(read_of(identity.clone(), "/old/a.mp3", "Old")).await;
+        assert_ne!(core.player_state().track.title.as_deref(), Some("Old"), "the old file's read landed");
+        core.file_read_arrived(read_of(identity, "/new/a.mp3", "New")).await;
+        assert_eq!(core.player_state().track.title.as_deref(), Some("New"));
     }
 
     /// The Source's `folder.jpg`, declared in the very frame that declares the
@@ -2131,7 +2150,7 @@ mod tests {
         let path = f.to_string_lossy().into_owned();
         core.playback = true;
         core.handle_source_update("radio", plays_file(serde_json::json!({"path": path}), &path));
-        let read = rx.recv().await.expect("the declared file's read");
+        let read = next_read(&mut rx).await.expect("the declared file's read");
         core.file_read_arrived(read).await;
         let state = core.player_state();
         assert_eq!(state.track.title.as_deref(), Some("Title"));
@@ -2207,7 +2226,7 @@ mod tests {
         core.handle_source_update("radio", arms_file(identity.clone(), a));
         core.handle_source_update("radio", plays_file(identity.clone(), a));
         core.handle_source_update("radio", plays_file(identity, a));
-        let first = rx.recv().await.expect("the first declaration must launch a read");
+        let first = next_read(&mut rx).await.expect("the first declaration must launch a read");
         assert_eq!(first.path, a);
         drop(core);
         let mut more = 0;
@@ -2646,7 +2665,7 @@ mod tests {
         };
         let path = f.to_str().unwrap().to_string();
         core.handle_source_update("radio", arms_file(serde_json::json!({"path": path}), &path));
-        let read = rx.recv().await.expect("arming a file must launch its read");
+        let read = next_read(&mut rx).await.expect("arming a file must launch its read");
         assert_eq!(read.path, path);
         core.file_read_arrived(read).await;
         let state = core.player_state();
@@ -2735,7 +2754,7 @@ mod tests {
         let a = "/music/a.mp3";
         core.handle_source_update("radio", arms_file(serde_json::json!({"path": a}), a));
         core.handle_source_update("radio", arms_file(serde_json::json!({"path": a}), a));
-        let first = rx.recv().await.expect("the first arming must launch a read");
+        let first = next_read(&mut rx).await.expect("the first arming must launch a read");
         assert_eq!(first.path, a);
         drop(core);
         let mut more = 0;
