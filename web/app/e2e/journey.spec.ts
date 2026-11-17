@@ -258,6 +258,27 @@ test('light/dark toggle, applied and persisted', async ({ page }) => {
   expect(await page.evaluate(() => document.documentElement.classList.contains('dark'))).toBe(true)
 })
 
+test('auto mode follows the system, live and after a reload', async ({ page }) => {
+  await page.emulateMedia({ colorScheme: 'light' })
+  const isDark = () => page.evaluate(() => document.documentElement.classList.contains('dark'))
+  // Stored as `auto`, not as the mode it resolves to: the core carries the
+  // word, each browser resolves it.
+  const put = await page.request.put('/api/theme', { data: { theme: 'northern-lights', mode: 'auto' } })
+  expect(put.status()).toBe(204)
+  await page.goto('/')
+  await expect(page.locator('[data-theme-mode="auto"]')).toBeVisible()
+  await expect(page.locator('[data-theme-mode-auto]')).toHaveText('A')
+  expect(await isDark()).toBe(false)
+  // The system turns dark at sunset, the page stays open.
+  await page.emulateMedia({ colorScheme: 'dark' })
+  await expect.poll(isDark).toBe(true)
+  // And a fresh load resolves it before the first paint.
+  await page.reload()
+  await expect(page.locator('[data-theme-mode="auto"]')).toBeVisible()
+  expect(await isDark()).toBe(true)
+  await page.request.put('/api/theme', { data: { theme: 'northern-lights', mode: 'light' } })
+})
+
 test('picking a theme in the popover, applied and persisted', async ({ page }) => {
   await page.goto('/')
   await page.getByLabel('pick theme').click()

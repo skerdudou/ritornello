@@ -4,7 +4,9 @@ import {
   DEFAULT_MODE,
   DEFAULT_PRESET,
   fontFamilies,
+  MODE_CHOICES,
   presets,
+  resolveMode,
   resolveVars,
   withFallback,
 } from './engine'
@@ -182,5 +184,21 @@ describe('fonts', () => {
     expect(withFallback('font-sans', 'Inter, sans-serif')).toBe('Inter, sans-serif')
     // Non-typographic key: value unchanged.
     expect(withFallback('background', '#fff')).toBe('#fff')
+  })
+})
+
+describe('resolveMode', () => {
+  it('a fixed mode ignores the system preference', () => {
+    expect(resolveMode('light', true)).toBe('light')
+    expect(resolveMode('dark', false)).toBe('dark')
+  })
+
+  it('auto follows the system preference, both ways', () => {
+    expect(resolveMode('auto', true)).toBe('dark')
+    expect(resolveMode('auto', false)).toBe('light')
+  })
+
+  it('the cycle visits the three choices, auto last', () => {
+    expect(MODE_CHOICES).toEqual(['light', 'dark', 'auto'])
   })
 })

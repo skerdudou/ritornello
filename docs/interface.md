@@ -2611,11 +2611,22 @@ external TOML text, decentralized per component, read from **one root**:
 
 ## Theme
 
-The interface offers a **light/dark** toggle and a picker opening a dialog
-with the **42 themes** from [tweakcn](https://tweakcn.com) (Apache-2.0).
-This is a **device** setting, like the language: it is persisted in
-`state.json` (`theme` and `mode` fields) and therefore applies to every
-browser visiting the interface. Default: `northern-lights`, light mode.
+The interface offers a mode key and a picker opening a dialog with the
+**42 themes** from [tweakcn](https://tweakcn.com) (Apache-2.0). This is a
+**device** setting, like the language: it is persisted in `state.json`
+(`theme` and `mode` fields) and therefore applies to every browser visiting
+the interface. Default: `northern-lights`, light mode.
+
+The mode key cycles through **light, dark and auto**. It shows the current
+state, not the next one: the sun or the moon of the mode actually painted,
+with a small **A** over it in auto, and the state spelled out in its
+tooltip. Auto is stored as the word `auto`, which the core only validates:
+each browser resolves it against its own system preference
+(`prefers-color-scheme`) before the first paint, and repaints when that
+preference changes while the page is open. One device can therefore be dark
+on a phone at night and light on a desk at the same moment — the setting is
+shared, its resolution is not. A core older than this mode reads `auto` as
+unknown and falls back to light, keeping the theme.
 
 The fonts declared by the themes are loaded from a CDN — the interface's
 only external resource. Offline, the display falls back to the system font

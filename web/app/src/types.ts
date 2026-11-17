@@ -1,4 +1,4 @@
-import type { Mode } from '@ritornello/ui'
+import type { ModeChoice } from '@ritornello/ui'
 
 /** Wire names of the five contracts a plugin can serve. */
 export type Contract = 'source' | 'display' | 'input' | 'metadata' | 'admin'
@@ -379,7 +379,7 @@ export interface LanguageBusy {
   language: string
   action: 'install' | 'remove'
 }
-export interface ThemePayload { theme: string; mode: Mode }
+export interface ThemePayload { theme: string; mode: ModeChoice }
 export interface LogsPayload { lines: string[] }
 /** The three values of `settings.startup_power`, on the core side as on the UI side. */
 export type StartupPower = 'on' | 'standby' | 'previous'

@@ -17,6 +17,36 @@ function mockFetch() {
   return spy
 }
 
+/**
+ * A window whose `prefers-color-scheme` the test drives. jsdom has no
+ * `matchMedia`; only `window.__RITORNELLO_THEME__` is read from the real one.
+ */
+function fakeSystem(dark: boolean) {
+  const listeners = new Set<(e: MediaQueryListEvent) => void>()
+  const query = {
+    matches: dark,
+    addEventListener: (_: string, f: (e: MediaQueryListEvent) => void) => listeners.add(f),
+    removeEventListener: (_: string, f: (e: MediaQueryListEvent) => void) => listeners.delete(f),
+  }
+  const win = {
+    get __RITORNELLO_THEME__() {
+      return window.__RITORNELLO_THEME__
+    },
+    matchMedia: (q: string) => {
+      expect(q).toBe('(prefers-color-scheme: dark)')
+      return query
+    },
+  } as unknown as Window
+  return {
+    win,
+    change(next: boolean) {
+      query.matches = next
+      for (const f of listeners) f({ matches: next } as MediaQueryListEvent)
+    },
+    listeners: () => listeners.size,
+  }
+}
+
 describe('useTheme', () => {
   beforeEach(() => {
     vi.unstubAllGlobals()
@@ -34,10 +64,10 @@ describe('useTheme', () => {
     expect(document.documentElement.style.getPropertyValue('--primary')).toBe('#34a85a')
   })
 
-  it('toggleMode toggles the mode, applies and persists', async () => {
+  it('cycleMode goes light, dark, auto and round again, applying and persisting', async () => {
     const spy = mockFetch()
-    const { mode, toggleMode } = useTheme()
-    await toggleMode()
+    const { mode, cycleMode } = useTheme()
+    await cycleMode()
     expect(mode.value).toBe('dark')
     expect(document.documentElement.classList.contains('dark')).toBe(true)
     expect(spy).toHaveBeenCalledWith(
@@ -47,8 +77,55 @@ describe('useTheme', () => {
         body: JSON.stringify({ theme: 'northern-lights', mode: 'dark' }),
       }),
     )
-    await toggleMode()
+    await cycleMode()
+    expect(mode.value).toBe('auto')
+    // `auto` is stored as `auto`, never as the mode it resolved to here.
+    expect(spy).toHaveBeenLastCalledWith(
+      '/api/theme',
+      expect.objectContaining({ body: JSON.stringify({ theme: 'northern-lights', mode: 'auto' }) }),
+    )
+    // jsdom has no `matchMedia`: the system counts as light.
+    expect(document.documentElement.classList.contains('dark')).toBe(false)
+    await cycleMode()
     expect(mode.value).toBe('light')
+  })
+
+  it('auto paints what the system prefers, from the first render', () => {
+    const system = fakeSystem(true)
+    window.__RITORNELLO_THEME__ = { theme: 'northern-lights', mode: 'auto' }
+    initTheme(system.win)
+    const { mode, effectiveMode } = useTheme()
+    expect(mode.value).toBe('auto')
+    expect(effectiveMode.value).toBe('dark')
+    expect(document.documentElement.classList.contains('dark')).toBe(true)
+  })
+
+  it('auto follows the system when it changes while the page is open', () => {
+    const system = fakeSystem(false)
+    window.__RITORNELLO_THEME__ = { theme: 'northern-lights', mode: 'auto' }
+    initTheme(system.win)
+    expect(document.documentElement.classList.contains('dark')).toBe(false)
+    system.change(true)
+    expect(document.documentElement.classList.contains('dark')).toBe(true)
+    system.change(false)
+    expect(document.documentElement.classList.contains('dark')).toBe(false)
+  })
+
+  it('a fixed mode ignores the system changing', () => {
+    const system = fakeSystem(false)
+    window.__RITORNELLO_THEME__ = { theme: 'northern-lights', mode: 'light' }
+    initTheme(system.win)
+    system.change(true)
+    expect(document.documentElement.classList.contains('dark')).toBe(false)
+    expect(useTheme().effectiveMode.value).toBe('light')
+  })
+
+  it('initialising again drops the previous subscription', () => {
+    const first = fakeSystem(false)
+    window.__RITORNELLO_THEME__ = { theme: 'northern-lights', mode: 'auto' }
+    initTheme(first.win)
+    initTheme(fakeSystem(false).win)
+    expect(first.listeners()).toBe(0)
   })
 
   it('changing the preset keeps the current mode', async () => {
