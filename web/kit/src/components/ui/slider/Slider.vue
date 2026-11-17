@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import type { SliderRootEmits, SliderRootProps } from "reka-ui"
 import type { HTMLAttributes } from "vue"
-import { reactiveOmit } from "@vueuse/core"
+import { reactiveOmit, unrefElement } from "@vueuse/core"
 import { SliderRange, SliderRoot, SliderThumb, SliderTrack, useForwardPropsEmits } from "reka-ui"
-import { computed, useAttrs } from "vue"
+import { computed, onBeforeUnmount, onMounted, ref, useAttrs } from "vue"
 import { cn } from "@/lib/utils"
 
 defineOptions({
@@ -89,6 +89,30 @@ function keepGestureAway(event: PointerEvent) {
   if (event.type !== "pointermove") keptAway.delete(event.pointerId)
   event.stopImmediatePropagation()
 }
+
+// Plain DOM listeners, not `@pointerdown.capture` in the template: Vue's own
+// listener wrapper stamps the event with the time it first sees it, and every
+// later Vue listener ignores an event stamped no later than its own
+// attachment (its guard against an event that caused the listener to be
+// attached). A Vue capture listener here would stamp the event first, and
+// reka-ui's listener, attached in the same millisecond as a pointerdown that
+// follows the mount at once (a test, never a finger), would then drop it:
+// measured as a progress bar that missed one seek in fifteen runs.
+const root = ref()
+const listeners = [
+  ["pointerdown", keepTouchForScrolling],
+  ["pointermove", keepGestureAway],
+  ["pointerup", keepGestureAway],
+  ["pointercancel", keepGestureAway],
+] as const
+let listenedOn: HTMLElement | SVGElement | null | undefined = null
+onMounted(() => {
+  listenedOn = unrefElement(root)
+  for (const [type, fn] of listeners) listenedOn?.addEventListener(type, fn as EventListener, true)
+})
+onBeforeUnmount(() => {
+  for (const [type, fn] of listeners) listenedOn?.removeEventListener(type, fn as EventListener, true)
+})
 </script>
 
 <template>
@@ -100,10 +124,7 @@ function keepGestureAway(event: PointerEvent) {
       'data-[orientation=vertical]:w-auto data-[orientation=vertical]:touch-manipulation data-[orientation=vertical]:flex-col data-[orientation=vertical]:px-[19px] data-[orientation=vertical]:py-0',
       props.class,
     )"
-    @pointerdown.capture="keepTouchForScrolling"
-    @pointermove.capture="keepGestureAway"
-    @pointerup.capture="keepGestureAway"
-    @pointercancel.capture="keepGestureAway"
+    ref="root"
   >
     <SliderTrack data-slot="slider-track" class="relative h-1.5 w-full grow overflow-hidden rounded-full bg-muted data-[orientation=vertical]:h-full data-[orientation=vertical]:w-1.5">
       <SliderRange data-slot="slider-range" class="absolute h-full bg-primary data-[orientation=vertical]:h-auto data-[orientation=vertical]:w-full" />
