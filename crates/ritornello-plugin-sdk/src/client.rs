@@ -715,16 +715,18 @@ async fn write_lock_frames(mut write: OwnedWriteHalf, mut state: watch::Receiver
             return;
         }
         // Wait for a change of the field itself: a publish that touched only
-        // the volume wakes `changed()` but is not written. After a slow write
-        // the field may have moved meanwhile: that counts as a change too.
+        // the volume wakes `changed()` but is not written. A change that landed
+        // during a slow write left `changed()` pending (nothing marked it seen
+        // since the last `borrow_and_update`), so it fires at once here and the
+        // current value is compared with what was written.
         loop {
+            if state.changed().await.is_err() {
+                return;
+            }
             let now = state.borrow_and_update().input_locked;
             if now != last {
                 last = now;
                 break;
-            }
-            if state.changed().await.is_err() {
-                return;
             }
         }
     }
@@ -2197,43 +2199,47 @@ mod tests {
         assert_eq!(msg.cmd, ritornello_proto::Command::Next);
     }
 
-    /// The write deadline itself, and what follows it. The test below this one
-    /// never fills the socket buffer (an even number of flips between two
-    /// yields means the writer sees no change), so it cannot reach the
-    /// timeout. Here the writer runs against a peer that stops reading, and
-    /// it gets a change to write after **every** flip, until well past the
-    /// socket's buffer: a write blocks and times out. The writer must not give up: the lock then
-    /// changes once more, and when the peer resumes reading, the **last**
-    /// frame it reads is that current value, not a stale one.
+    /// The write deadline itself, and what follows it. The socket buffer is
+    /// filled to the byte with blank lines before the writer starts, so its
+    /// very first frame (`locked:false`, the initial state) is, by
+    /// construction, the one stuck mid-write and timing out. The writer must
+    /// not give up: the lock then changes to `true`, and when the peer resumes
+    /// reading, the **last** frame it reads is that current value, never the
+    /// stale one the writer was stuck on.
     #[tokio::test]
     async fn a_writer_that_timed_out_still_relays_the_current_lock_once_the_peer_reads() {
         let timeout = std::time::Duration::from_millis(100);
         let (ours, peer) = tokio::net::UnixStream::pair().unwrap();
         let (_read, write) = ours.into_split();
+        let mut filler = 0usize;
+        while let Ok(1) = write.try_write(b"\n") {
+            filler += 1;
+        }
+        // A Unix socket charges each small write its own buffer overhead, so
+        // a few hundred one-byte writes already fill it.
+        assert!(filler > 100, "the buffer must have been filled, {filler} bytes");
         let (tx, rx) = watch::channel(state_with_lock(false));
         let writer = tokio::spawn(write_lock_frames(write, rx, timeout));
-        for _ in 0..100_000u32 {
-            tx.send_modify(|s| s.input_locked = !s.input_locked);
-            tokio::task::yield_now().await;
-        }
-        // Well past the deadline: the in-flight write has timed out.
+        // Well past the deadline: the first write has timed out.
         tokio::time::sleep(timeout * 4).await;
         assert!(!writer.is_finished(), "a write timeout must not end the writer");
-        // The value the writer is stuck on is the last one it saw; change it.
-        let final_value = !tx.borrow().input_locked;
-        tx.send_modify(|s| s.input_locked = final_value);
+        tx.send_modify(|s| s.input_locked = true);
 
         let (read, _w) = peer.into_split();
         let mut lines = BufReader::new(read).lines();
-        let mut count = 0usize;
-        let mut last = String::new();
-        while let Ok(Ok(Some(line))) = tokio::time::timeout(std::time::Duration::from_millis(500), lines.next_line()).await {
-            count += 1;
-            last = line;
+        let mut frames = Vec::new();
+        while let Ok(Ok(Some(line))) =
+            tokio::time::timeout(std::time::Duration::from_millis(500), lines.next_line()).await
+        {
+            if !line.is_empty() {
+                frames.push(line);
+            }
         }
-        // Far fewer than the 100 000 flips: the writer was stuck, the watch coalesced.
-        assert!((100..50_000).contains(&count), "the writer must have been stuck on a full buffer, {count} frames read");
-        assert_eq!(last, format!(r#"{{"frame":"lock","locked":{final_value}}}"#));
+        assert_eq!(
+            frames,
+            [r#"{"frame":"lock","locked":false}"#, r#"{"frame":"lock","locked":true}"#],
+            "the stuck frame completes, then the current value follows"
+        );
         assert!(!writer.is_finished());
     }
 
