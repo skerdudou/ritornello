@@ -16,11 +16,17 @@ const props = defineProps<{
   /** "Download" is greyed out (no share, nothing ticked). */
   downloadBlocked: boolean
   noShare: boolean
+  /**
+   * Moves a preset to the 1-based position `to`; settles once the page has
+   * the plugin's answer and its table read again. A function and not an
+   * emit: the drag list shows the dropped order, and takes no second drag,
+   * until it settles.
+   */
+  moveRow: (preset: number, url: string, to: number) => Promise<void>
 }>()
 
 const emit = defineEmits<{
   remove: [preset: number, url: string]
-  move: [preset: number, url: string, to: number]
   rename: [preset: number, url: string, title: string]
   toggle: [url: string]
   choose: [line: number, url: string]
@@ -33,7 +39,12 @@ const emit = defineEmits<{
 // refuses (`stale`) one that no longer matches its table. Reordering: the
 // preset **is** the position, so moving a row changes its number. The handle
 // grabs a row, finger and mouse alike; ▲▼ are the keyboard path. `to` is the
-// 1-based position the preset ends at.
+// 1-based position the preset ends at. A drop names its row by the `item` the
+// drag list hands over, never by `entries[from]`: a poll during the drag
+// replaces `entries`, and `from` counts the list as it was when it began.
+//
+// Rows, ticks and the title's draft are keyed by address: the table holds
+// each address once (the plugin refuses an add of one already there).
 
 // The title field holds a draft of its own while it has focus: a read that
 // arrives meanwhile (the page polls) must not overwrite what is being typed.
@@ -108,12 +119,13 @@ function onEnter(e: Entry, ev: KeyboardEvent): void {
           <th class="w-28" />
         </tr>
       </thead>
+      <!-- Keyed by address: unique in the table (an add of one already there is refused). -->
       <ReorderList
         tag="tbody"
         class="max-md:block"
         :items="entries"
         :item-key="(e) => e.url"
-        @move="(from, to) => emit('move', entries[from]!.preset, entries[from]!.url, to + 1)"
+        :on-move="(_from: number, to: number, item: Entry) => moveRow(item.preset, item.url, to + 1)"
         v-slot="{ item: r, index: i, itemAttrs }"
       >
         <tr
@@ -161,7 +173,7 @@ function onEnter(e: Entry, ev: KeyboardEvent): void {
               data-entry-up
               :aria-label="t('move_up')"
               :disabled="frozen || i === 0"
-              @click="emit('move', r.preset, r.url, i)"
+              @click="moveRow(r.preset, r.url, i)"
             >
               ▲
             </Button>
@@ -171,7 +183,7 @@ function onEnter(e: Entry, ev: KeyboardEvent): void {
               data-entry-down
               :aria-label="t('move_down')"
               :disabled="frozen || i === entries.length - 1"
-              @click="emit('move', r.preset, r.url, i + 2)"
+              @click="moveRow(r.preset, r.url, i + 2)"
             >
               ▼
             </Button>

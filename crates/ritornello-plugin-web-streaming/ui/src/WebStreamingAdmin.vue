@@ -33,7 +33,11 @@ const GRACE_READS = 3
 const TARGETS_RETRY_MS = 10_000
 
 const data = ref<Data | null>(null)
-/** Addresses of the presets ticked: a number changes under a move, an address does not. */
+/**
+ * Addresses of the presets ticked: a number changes under a move, an address
+ * does not, and the table holds each address once (the plugin refuses a
+ * second add of it).
+ */
 const selected = ref<Set<string>>(new Set())
 const message = ref('')
 const dialogOpen = ref(false)
@@ -204,11 +208,22 @@ function choose(line: number, url: string): Promise<void> {
 const noShare = computed(() => (data.value?.targets.length ?? 0) === 0)
 const downloadBlocked = computed(() => noShare.value || selected.value.size === 0)
 
+/**
+ * The presets ticked for download, in order, as they were when the dialog
+ * opened: the dialog keys its names and cuts by these numbers, so a poll
+ * must not renumber them under it. A preset that moved meanwhile is the
+ * plugin's to refuse (`stale`).
+ */
+const chosen = ref<Item[]>([])
+
 function openDialog(): void {
   // Before the early return: asking is what makes a share that just
   // appeared usable.
   void refreshTargets()
   if (downloadBlocked.value) return
+  chosen.value = entries.value
+    .filter((e) => selected.value.has(e.url))
+    .map((e) => ({ preset: e.preset, url: e.url, title: e.title, kind: e.kind }))
   dialogOpen.value = true
 }
 
@@ -221,13 +236,6 @@ async function createDir(target: Target, name: string): Promise<void> {
   const err = await send({ op: 'create_dir', target, name })
   if (err) message.value = err
 }
-
-/** The presets ticked for download, in order: what the dialog names. */
-const chosen = computed<Item[]>(() =>
-  entries.value
-    .filter((e) => selected.value.has(e.url))
-    .map((e) => ({ preset: e.preset, url: e.url, title: e.title, kind: e.kind })),
-)
 
 async function download(target: Target, choices: Choices): Promise<void> {
   const items = chosen.value.map(({ preset, url }) => ({ preset, url }))
@@ -296,8 +304,8 @@ async function recheck(): Promise<void> {
             :frozen="loadFailed"
             :download-blocked="downloadBlocked"
             :no-share="noShare"
+            :move-row="moveTo"
             @remove="remove"
-            @move="moveTo"
             @rename="rename"
             @toggle="toggle"
             @choose="choose"

@@ -59,21 +59,54 @@ describe('WebStreamingAdmin', () => {
     expect(s.gets()).toBeGreaterThan(reads)
   })
 
+  /** The drop handler the page hands the drag list. */
+  function onMoveOf(w: Awaited<ReturnType<typeof mountAdmin>>['w']) {
+    // `ReorderList` is generic, which `findComponent`'s typing cannot follow.
+    return (
+      w.findComponent(ReorderList as never) as unknown as { props(k: string): unknown }
+    ).props('onMove') as (from: number, to: number, item: Entry) => unknown
+  }
+
   it('moves by arrow and by drag, by number and link', async () => {
     const { w, s } = await mountAdmin({ entries: [video(1, 'A'), video(2, 'B'), video(3, 'C')] })
     await w.findAll('[data-entry-down]')[0]!.trigger('click')
     await w.findAll('[data-entry-up]')[2]!.trigger('click')
-    // `ReorderList` is generic, which `findComponent`'s typing cannot follow.
-    const onMove = (
-      w.findComponent(ReorderList as never) as unknown as { props(k: string): unknown }
-    ).props('onMove') as (from: number, to: number) => Promise<void>
-    await onMove(0, 2)
+    await onMoveOf(w)(0, 2, video(1, 'A'))
     await flushPromises()
     expect(s.putsOf('move')).toEqual([
       { op: 'move', preset: 1, url: videoUrl(1), to: 2 },
       { op: 'move', preset: 3, url: videoUrl(3), to: 2 },
       { op: 'move', preset: 1, url: videoUrl(1), to: 3 },
     ])
+  })
+
+  it('a drop names the row the finger held, and is answered once the plugin is', async () => {
+    const { w, s } = await mountAdmin({ entries: [video(1, 'A'), video(2, 'B'), video(3, 'C')] })
+    // A poll during the drag: another page moved B to the top. The drag list
+    // still counts the rows as they were, and hands over the row it held.
+    s.data.entries = [{ ...video(2, 'B'), preset: 1 }, { ...video(1, 'A'), preset: 2 }, video(3, 'C')]
+    // Any action reads again (this removal is not applied by the stand-in).
+    await w.find('[data-entry-delete]').trigger('click')
+    await flushPromises()
+    expect(titles(w)).toEqual(['B', 'A', 'C'])
+    // Hold the plugin's answer to the move.
+    let release: () => void = () => {}
+    const gate = new Promise<void>((r) => (release = r))
+    const answer = s.spy.getMockImplementation() as (u: string, init?: RequestInit) => Promise<Response>
+    s.spy.mockImplementation(async (u: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') await gate
+      return answer(u, init)
+    })
+    const settled = vi.fn()
+    const dropped = onMoveOf(w)(0, 2, video(1, 'A'))
+    expect(dropped, 'the drag list waits for what it is handed').toBeInstanceOf(Promise)
+    void (dropped as Promise<void>).then(settled)
+    await flushPromises()
+    expect(settled, 'answered before the plugin was').not.toHaveBeenCalled()
+    expect(s.putsOf('move')).toEqual([{ op: 'move', preset: 1, url: videoUrl(1), to: 3 }])
+    release()
+    await flushPromises()
+    expect(settled).toHaveBeenCalled()
   })
 
   it('the first row cannot go up and the last cannot go down', async () => {
@@ -623,6 +656,30 @@ describe('WebStreamingAdmin', () => {
     await typeDialog('[data-name="1"]', 'Zoo, first video')
     await clickDialog('[data-download-here]')
     expect(s.putsOf('download')[0]).toMatchObject({ names: { 1: 'Zoo, first video', 2: 'List 2' } })
+  })
+
+  it('downloads the presets as they were when the dialog opened, whatever a poll brings meanwhile', async () => {
+    const { w, s } = await mountAdmin({
+      entries: [video(1), video(2), video(3)],
+      targets: ['nas'],
+      default_names: { 1: 'Video 1', 2: 'Video 2', 3: 'Video 3' },
+    })
+    await w.findAll('[data-entry-select]')[0]!.setValue(true)
+    await w.findAll('[data-entry-select]')[2]!.setValue(true)
+    // Another page removed preset 2: the read the dialog's opening asks for
+    // brings preset 3 as number 2.
+    s.data.entries = [video(1), { ...video(3), preset: 2 }]
+    s.data.default_names = { 1: 'Video 1', 2: 'Video 3' }
+    await w.find('[data-download]').trigger('click')
+    await flushPromises()
+    expect(w.findAll('[data-entry-num]').map((n) => n.text()), 'the poll landed').toEqual(['1', '2'])
+    await clickDialog('[data-next]')
+    await clickDialog('[data-download-here]')
+    // The numbers the dialog keyed its names by: the plugin judges them (`stale`).
+    expect(s.putsOf('download')[0]).toMatchObject({
+      items: [{ preset: 1, url: videoUrl(1) }, { preset: 3, url: videoUrl(3) }],
+      names: { 1: 'Video 1', 3: 'Video 3' },
+    })
   })
 
   /** The dialog opened on its options for the presets given, all ticked. */
