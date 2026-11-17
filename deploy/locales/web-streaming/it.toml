@@ -20,11 +20,12 @@ play_failed_ytdlp_failed = "riproduzione impossibile: yt-dlp non è riuscito a l
 bad_request = "richiesta non valida: {detail}"
 no_links = "incolla almeno un link"
 too_many_links = "al massimo {max} link per volta"
-probe_busy = "sono già in lettura dei link"
 too_many_entries = "al massimo 99 preselezioni"
 duplicate_preset = "la preselezione {preset} compare due volte"
 save_failed = "non è stato possibile salvare le preselezioni"
 stale = "le preselezioni sono cambiate nel frattempo: mostrate come sono"
+already_present = "già nell’elenco"
+table_full = "al massimo 99 preselezioni"
 empty_title = "una preselezione ha bisogno di un titolo"
 nothing_selected = "seleziona almeno una preselezione"
 
@@ -60,6 +61,9 @@ fault_trim_playlist = "una playlist non si taglia: solo un singolo video"
 fault_trim_outside = "la parte da tenere è fuori dal video"
 fault_bad_entry = "l’indirizzo della preselezione non è leggibile"
 fault_unreadable_output = "yt-dlp ha dato una risposta illeggibile ({detail})"
+fault_already_present = "già nell’elenco"
+fault_table_full = "al massimo 99 preselezioni"
+fault_save_failed = "non è stato possibile salvarlo"
 row_preset = "Preselezione {preset}"
 
 # why the last update of yt-dlp failed

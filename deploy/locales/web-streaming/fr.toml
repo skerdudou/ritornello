@@ -20,11 +20,12 @@ play_failed_ytdlp_failed = "lecture impossible : yt-dlp n’a pas pu lire le lie
 bad_request = "requête invalide : {detail}"
 no_links = "collez au moins un lien"
 too_many_links = "{max} liens au plus à la fois"
-probe_busy = "des liens sont déjà en cours de lecture"
 too_many_entries = "99 préréglages au plus"
 duplicate_preset = "le préréglage {preset} apparaît deux fois"
 save_failed = "les préréglages n’ont pas pu être enregistrés"
 stale = "les préréglages ont changé entre-temps : affichés tels qu’ils sont"
+already_present = "déjà dans la liste"
+table_full = "99 préréglages au plus"
 empty_title = "un préréglage doit avoir un titre"
 nothing_selected = "sélectionnez au moins un préréglage"
 
@@ -60,6 +61,9 @@ fault_trim_playlist = "une liste de lecture ne se coupe pas : seulement une vid�
 fault_trim_outside = "la partie à garder est en dehors de la vidéo"
 fault_bad_entry = "l’adresse du préréglage est illisible"
 fault_unreadable_output = "yt-dlp a donné une réponse illisible ({detail})"
+fault_already_present = "déjà dans la liste"
+fault_table_full = "99 préréglages au plus"
+fault_save_failed = "non enregistré"
 row_preset = "Préréglage {preset}"
 
 # why the last update of yt-dlp failed

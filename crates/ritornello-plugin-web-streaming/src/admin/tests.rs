@@ -234,29 +234,45 @@ async fn no_admin_op_waits_for_yt_dlp() {
 
 // ---- probe ------------------------------------------------------------------
 
+impl World {
+    /// Sends the links and waits for the worker to be done with them.
+    async fn probe_all(&mut self, text: &str) -> Value {
+        self.op(json!({ "op": "probe", "text": text })).await.unwrap();
+        self.until("probe done", |d| d["probe"]["running"] == false).await
+    }
+}
+
+/// The lines the page still shows.
+fn lines(d: &Value) -> Vec<Value> {
+    d["probe"]["results"].as_array().unwrap().clone()
+}
+
 #[tokio::test]
 async fn each_refused_line_has_its_own_error_and_the_valid_ones_are_probed() {
     let mut w = world(&answering()).await;
     let text = format!(
         "{VIDEO}\nnot a link\nhttps://studio.youtube.com/watch?v=jNQXAC9IVRw\nhttps://www.youtube.com/live/jNQXAC9IVRw\n{LIST}\nhttp://192.168.1.1/x\n"
     );
-    w.op(json!({ "op": "probe", "text": text })).await.unwrap();
-    let d = w.until("probe done", |d| d["probe"]["running"] == false).await;
-    let results = d["probe"]["results"].as_array().unwrap();
-    assert_eq!(results.len(), 6);
-    assert_eq!(results[0]["state"], "found");
-    assert_eq!(results[0]["choices"][0]["kind"], "video");
-    assert_eq!(results[0]["choices"][0]["title"], "Me at the zoo");
-    assert_eq!((results[1]["state"].clone(), results[1]["code"].clone()), (json!("error"), json!("not_a_url")));
-    assert_eq!(results[2]["code"], "foreign_host");
-    assert_eq!(results[2]["detail"], "studio.youtube.com");
-    assert_eq!(results[3]["code"], "live_stream");
-    assert_eq!(results[4]["choices"][0]["kind"], "playlist");
-    assert_eq!(results[4]["choices"][0]["count"], 12);
-    assert_eq!(results[4]["choices"][0]["url"], LIST);
-    assert_eq!(results[4]["choices"][0]["site"], "YoutubeTab");
-    assert_eq!(results[4]["choices"][0]["identity"], Value::Null);
-    assert_eq!((results[5]["code"].clone(), results[5]["detail"].clone()), (json!("local_network"), json!("192.168.1.1")));
+    let d = w.probe_all(&text).await;
+    // The recognised ones went into the table, in the order sent.
+    let rows = d["entries"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!((rows[0]["url"].clone(), rows[0]["kind"].clone(), rows[0]["title"].clone()), (json!(VIDEO), json!("video"), json!("Me at the zoo")));
+    assert_eq!((rows[1]["url"].clone(), rows[1]["kind"].clone(), rows[1]["count"].clone()), (json!(LIST), json!("playlist"), json!(12)));
+    assert_eq!(rows[1]["site"], "YoutubeTab");
+    assert_eq!(rows[1].get("identity"), None);
+    // The refused ones stay as errors, each with its own id.
+    let results = lines(&d);
+    assert_eq!(results.len(), 4, "{results:?}");
+    assert_eq!((results[0]["state"].clone(), results[0]["code"].clone()), (json!("error"), json!("not_a_url")));
+    assert_eq!(results[0]["line"], "not a link");
+    assert_eq!(results[1]["code"], "foreign_host");
+    assert_eq!(results[1]["detail"], "studio.youtube.com");
+    assert_eq!(results[2]["code"], "live_stream");
+    assert_eq!((results[3]["code"].clone(), results[3]["detail"].clone()), (json!("local_network"), json!("192.168.1.1")));
+    let mut ids: Vec<u64> = results.iter().map(|l| l["id"].as_u64().unwrap()).collect();
+    ids.dedup();
+    assert_eq!(ids.len(), 4, "distinct ids");
 }
 
 /// A yt-dlp that answers with the SoundCloud and Bandcamp captures, by the
@@ -275,38 +291,30 @@ const SC_SET: &str = "https://soundcloud.com/the-concept-band/sets/the-royal-con
 async fn another_site_s_link_is_whatever_yt_dlp_says_it_is() {
     let mut w = world(&answering_web()).await;
     let text = format!("{SC_TRACK}#t=1\n{SC_SET}\nhttps://example.org/live\n");
-    w.op(json!({ "op": "probe", "text": text })).await.unwrap();
-    let d = w.until("probe done", |d| d["probe"]["running"] == false).await;
-    let results = d["probe"]["results"].as_array().unwrap();
-    let track = &results[0]["choices"];
-    assert_eq!(track.as_array().unwrap().len(), 1, "probed once, one choice");
-    assert_eq!(track[0]["kind"], "video");
-    assert_eq!(track[0]["url"], SC_TRACK, "normalised: no fragment");
-    assert_eq!(track[0]["title"], "Flickermood");
-    assert_eq!(track[0]["site"], "Soundcloud");
-    assert_eq!(track[0]["identity"], "Soundcloud:293");
-    let set = &results[1]["choices"];
-    assert_eq!(set.as_array().unwrap().len(), 1);
-    assert_eq!((set[0]["kind"].clone(), set[0]["count"].clone()), (json!("playlist"), json!(6)));
-    assert_eq!(set[0]["site"], "SoundcloudSet");
-    assert_eq!(set[0]["identity"], Value::Null);
-    assert_eq!(results[2]["code"], "live_stream");
+    let d = w.probe_all(&text).await;
+    let rows = d["entries"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    let track = &rows[0];
+    assert_eq!(track["kind"], "video");
+    assert_eq!(track["url"], SC_TRACK, "normalised: no fragment");
+    assert_eq!(track["title"], "Flickermood");
+    assert_eq!(track["site"], "Soundcloud");
+    assert_eq!(track["identity"], "Soundcloud:293");
+    let set = &rows[1];
+    assert_eq!((set["kind"].clone(), set["count"].clone()), (json!("playlist"), json!(6)));
+    assert_eq!(set["site"], "SoundcloudSet");
+    assert_eq!(set.get("identity"), None);
+    let results = lines(&d);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["code"], "live_stream");
     let calls = std::fs::read_to_string(w.data.join("bin/calls")).unwrap();
     assert_eq!(calls, format!("{SC_TRACK}\n{SC_SET}\nhttps://example.org/live\n"), "each link probed once");
 
-    // Saving the set caches it under its own key: the first select plays.
-    let mut found = entry(1, SC_SET, Kind::Playlist);
-    found.site = Some("SoundcloudSet".into());
-    let mut video = entry(2, SC_TRACK, Kind::Video);
-    video.identity = Some("Soundcloud:293".into());
-    w.add(vec![found, video]).await.unwrap();
+    // The set was cached on its way in, under its own key: the first select plays.
     let key = ritornello_plugin_web_streaming::link::parse_link(SC_SET).unwrap().cache_key().unwrap();
     assert_eq!(ListCache::new(&w.data).load(&key).unwrap().len(), 6);
     let mut source = WebStreamingSource::new(w.data.clone(), w.entries.clone(), Some(w.saved.clone()));
-    assert!(matches!(source.select(1).await.action, SourceAction::Play { .. }));
-    let d = w.admin.get_data().await;
-    assert_eq!(d["entries"][0]["site"], "SoundcloudSet");
-    assert_eq!(d["entries"][1]["identity"], "Soundcloud:293");
+    assert!(matches!(source.select(2).await.action, SourceAction::Play { .. }));
 }
 
 #[tokio::test]
@@ -320,19 +328,176 @@ async fn a_web_link_fits_either_kind_and_a_local_one_does_not_save() {
 }
 
 #[tokio::test]
-async fn a_link_naming_a_video_and_its_playlist_offers_both() {
+async fn a_recognised_video_becomes_a_preset_and_its_line_goes() {
     let mut w = world(&answering()).await;
-    w.op(json!({ "op": "probe", "text": format!("{VIDEO}&list={LIST_ID}") })).await.unwrap();
-    let d = w.until("probe done", |d| d["probe"]["running"] == false).await;
-    let kinds: Vec<&Value> = d["probe"]["results"][0]["choices"].as_array().unwrap().iter().map(|c| &c["kind"]).collect();
-    assert_eq!(kinds, [&json!("video"), &json!("playlist")]);
+    let d = w.probe_all(VIDEO).await;
+    let rows = w.entries.read().await.entry.clone();
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].preset, rows[0].url.as_str(), rows[0].kind, rows[0].title.as_str()), (1, VIDEO, Kind::Video, "Me at the zoo"));
+    assert_eq!(lines(&d), Vec::<Value>::new());
+    assert!(w.saved.has_changed().unwrap(), "the source half is told");
+    assert_eq!(Entries::load(&w.data.join("entries.toml")).unwrap().entry, rows, "the disk is the memory");
+}
+
+#[tokio::test]
+async fn a_recognised_playlist_is_cached_on_its_way_in() {
+    let mut w = world(&answering()).await;
+    w.probe_all(LIST).await;
+    assert_eq!(w.rows().await, [(1, LIST.to_string())]);
+    assert_eq!(ListCache::new(&w.data).load(LIST_ID).unwrap().len(), 12);
+    // The very first select, before any background refresh could have run.
+    let mut source = WebStreamingSource::new(w.data.clone(), w.entries.clone(), Some(w.saved.clone()));
+    let outcome = source.select(1).await;
+    assert!(matches!(outcome.action, SourceAction::Play { .. }), "{:?}", outcome.status_text);
+}
+
+const BOTH: &str = "https://www.youtube.com/watch?v=jNQXAC9IVRw&list=PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI";
+
+#[tokio::test]
+async fn a_link_naming_a_video_and_its_playlist_waits_for_a_choice() {
+    let mut w = world(&answering()).await;
+    let d = w.probe_all(BOTH).await;
+    let line = &lines(&d)[0];
+    assert_eq!(line["state"], "found");
+    let choices = line["choices"].as_array().unwrap();
+    assert_eq!(choices.len(), 2);
+    assert_eq!((choices[0]["kind"].clone(), choices[0]["url"].clone(), choices[0]["present"].clone()), (json!("video"), json!(VIDEO), json!(false)));
+    assert_eq!((choices[1]["kind"].clone(), choices[1]["url"].clone(), choices[1]["present"].clone()), (json!("playlist"), json!(LIST), json!(false)));
+    assert!(w.rows().await.is_empty(), "nothing added before the operator chose");
+    assert!(!w.saved.has_changed().unwrap());
+
+    let id = line["id"].clone();
+    w.op(json!({ "op": "choose", "line": id, "url": LIST })).await.unwrap();
+    assert_eq!(w.rows().await, [(1, LIST.to_string())]);
+    assert_eq!(ListCache::new(&w.data).load(LIST_ID).unwrap().len(), 12, "cached on its way in");
+    assert_eq!(lines(&w.admin.get_data().await), Vec::<Value>::new(), "the line is gone");
+    // Chosen once: the line is not there any more.
+    assert_eq!(key_of(w.op(json!({ "op": "choose", "line": id, "url": VIDEO })).await), "stale");
+}
+
+#[tokio::test]
+async fn a_choice_the_line_does_not_offer_is_stale() {
+    let mut w = world(&answering()).await;
+    let d = w.probe_all(BOTH).await;
+    let id = lines(&d)[0]["id"].clone();
+    assert_eq!(key_of(w.op(json!({ "op": "choose", "line": id, "url": OTHER })).await), "stale");
+    assert_eq!(key_of(w.op(json!({ "op": "choose", "line": 999, "url": VIDEO })).await), "stale");
+    assert!(w.rows().await.is_empty());
+    assert_eq!(lines(&w.admin.get_data().await).len(), 1, "the line stays");
+}
+
+#[tokio::test]
+async fn the_choice_already_in_the_table_is_marked_present() {
+    let mut w = world(&answering()).await;
+    w.seed(vec![entry(1, VIDEO, Kind::Video)]).await;
+    let d = w.probe_all(BOTH).await;
+    let line = &lines(&d)[0];
+    assert_eq!(line["state"], "found");
+    assert_eq!(line["choices"][0]["present"], true);
+    assert_eq!(line["choices"][1]["present"], false);
+    let r = w.op(json!({ "op": "choose", "line": line["id"], "url": VIDEO })).await;
+    assert_eq!(key_of(r), "already_present");
+    assert_eq!(w.rows().await, [(1, VIDEO.to_string())]);
+    assert_eq!(lines(&w.admin.get_data().await).len(), 1, "a refused choice leaves the line");
+    assert!(!w.saved.has_changed().unwrap());
+}
+
+#[tokio::test]
+async fn a_link_whose_two_choices_are_both_present_is_an_error_line() {
+    let mut w = world(&answering()).await;
+    w.seed(vec![entry(1, VIDEO, Kind::Video), entry(2, LIST, Kind::Playlist)]).await;
+    let d = w.probe_all(BOTH).await;
+    let line = &lines(&d)[0];
+    assert_eq!((line["state"].clone(), line["code"].clone()), (json!("error"), json!("already_present")));
+}
+
+#[tokio::test]
+async fn a_recognised_duplicate_is_an_error_line() {
+    let mut w = world(&answering()).await;
+    w.seed(vec![entry(1, VIDEO, Kind::Video)]).await;
+    let d = w.probe_all(VIDEO).await;
+    let line = &lines(&d)[0];
+    assert_eq!((line["state"].clone(), line["code"].clone()), (json!("error"), json!("already_present")));
+    assert_eq!(w.rows().await, [(1, VIDEO.to_string())]);
+    assert!(!w.saved.has_changed().unwrap(), "nothing ticked");
+}
+
+#[tokio::test]
+async fn the_same_link_twice_in_one_send_is_added_once() {
+    let mut w = world(&answering()).await;
+    let d = w.probe_all(&format!("{VIDEO}\n{VIDEO}")).await;
+    assert_eq!(w.rows().await, [(1, VIDEO.to_string())]);
+    let results = lines(&d);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["code"], "already_present");
+}
+
+#[tokio::test]
+async fn the_hundredth_is_a_table_full_line() {
+    let mut w = world(&answering()).await;
+    // 99 distinct videos: an 11-character id each.
+    let rows: Vec<Entry> = (1..=99u8).map(|i| entry(i, &format!("https://www.youtube.com/watch?v=video{i:06}"), Kind::Video)).collect();
+    w.seed(rows).await;
+    let d = w.probe_all(VIDEO).await;
+    let line = &lines(&d)[0];
+    assert_eq!((line["state"].clone(), line["code"].clone()), (json!("error"), json!("table_full")));
+    assert_eq!(w.entries.read().await.entry.len(), 99);
+    assert!(!w.saved.has_changed().unwrap());
+}
+
+#[tokio::test]
+async fn a_dismissed_pending_line_is_not_added() {
+    let mut w = world(&format!("sleep 1\n{}", answering())).await;
+    w.op(json!({ "op": "probe", "text": VIDEO })).await.unwrap();
+    let id = w.admin.get_data().await["probe"]["results"][0]["id"].clone();
+    w.op(json!({ "op": "dismiss", "line": id })).await.unwrap();
+    assert_eq!(lines(&w.admin.get_data().await), Vec::<Value>::new(), "gone at once");
+    w.until("probe done", |d| d["probe"]["running"] == false).await;
+    assert!(w.rows().await.is_empty(), "the answer that came after added nothing");
+    assert_eq!(lines(&w.admin.get_data().await), Vec::<Value>::new());
+    // An id already gone is no error.
+    w.op(json!({ "op": "dismiss", "line": id })).await.unwrap();
+}
+
+#[tokio::test]
+async fn an_error_line_is_dismissed() {
+    let mut w = world("exit 1").await;
+    let d = w.probe_all("not a link").await;
+    let id = lines(&d)[0]["id"].clone();
+    w.op(json!({ "op": "dismiss", "line": id })).await.unwrap();
+    assert_eq!(lines(&w.admin.get_data().await), Vec::<Value>::new());
+}
+
+#[tokio::test]
+async fn a_second_send_while_probing_is_queued() {
+    let mut w = world(&format!("sleep 1\n{}", answering())).await;
+    w.op(json!({ "op": "probe", "text": VIDEO })).await.unwrap();
+    let d = w.until("probing", |d| d["probe"]["results"][0]["state"] == "probing").await;
+    assert_eq!(d["probe"]["running"], true);
+    w.op(json!({ "op": "probe", "text": OTHER })).await.unwrap();
+    let d = w.admin.get_data().await;
+    let results = lines(&d);
+    assert_eq!(results.len(), 2);
+    assert_eq!((results[1]["line"].clone(), results[1]["state"].clone()), (json!(OTHER), json!("pending")));
+    assert_ne!(results[0]["id"], results[1]["id"]);
+    w.until("both added", |d| d["entries"].as_array().unwrap().len() == 2 && d["probe"]["running"] == false).await;
+    assert_eq!(w.rows().await, [(1, VIDEO.to_string()), (2, OTHER.to_string())], "in the order sent");
+}
+
+#[tokio::test]
+async fn a_failed_write_leaves_an_error_line() {
+    let mut w = world(&answering()).await;
+    std::fs::create_dir(w.data.join("entries.toml")).unwrap();
+    let d = w.probe_all(VIDEO).await;
+    let line = &lines(&d)[0];
+    assert_eq!((line["state"].clone(), line["code"].clone()), (json!("error"), json!("save_failed")));
+    assert!(w.rows().await.is_empty());
 }
 
 #[tokio::test]
 async fn a_failing_tool_is_a_line_error_with_its_last_line() {
     let mut w = world("echo 'ERROR: Video unavailable' >&2; exit 1").await;
-    w.op(json!({ "op": "probe", "text": VIDEO })).await.unwrap();
-    let d = w.until("probe done", |d| d["probe"]["running"] == false).await;
+    let d = w.probe_all(VIDEO).await;
     let line = &d["probe"]["results"][0];
     assert_eq!((line["state"].clone(), line["code"].clone()), (json!("error"), json!("failed")));
     assert!(line["detail"].as_str().unwrap().contains("Video unavailable"));
@@ -344,27 +509,24 @@ async fn a_failing_tool_is_a_line_error_with_its_last_line() {
 #[tokio::test]
 async fn the_plugins_own_probe_failures_reach_the_page_as_codes() {
     let mut w = world("exit 1").await;
-    w.op(json!({ "op": "probe", "text": VIDEO })).await.unwrap();
-    let d = w.until("probe done", |d| d["probe"]["running"] == false).await;
+    let d = w.probe_all(VIDEO).await;
     let line = &d["probe"]["results"][0];
     assert_eq!((line["code"].clone(), line["detail"].clone()), (json!("exited"), json!("exit status: 1")));
 
     let refused = "echo 'ERROR: [generic] Unable to download webpage: [Errno 13] local network refused: 10.0.0.7' >&2; exit 1";
     let mut w = world(refused).await;
-    w.op(json!({ "op": "probe", "text": "https://router.example/x" })).await.unwrap();
-    let d = w.until("probe done", |d| d["probe"]["running"] == false).await;
+    let d = w.probe_all("https://router.example/x").await;
     let line = &d["probe"]["results"][0];
     assert_eq!((line["code"].clone(), line["detail"].clone()), (json!("local_network"), json!("10.0.0.7")));
 }
 
 #[tokio::test]
-async fn a_second_probe_while_one_runs_is_refused_and_too_many_links_are() {
+async fn too_many_links_and_no_links_are_refused() {
     let mut w = world("exec sleep 10").await;
-    w.op(json!({ "op": "probe", "text": VIDEO })).await.unwrap();
-    assert_eq!(key_of(w.op(json!({ "op": "probe", "text": VIDEO })).await), "probe_busy");
     let many = (0..=MAX_LINKS).map(|_| VIDEO).collect::<Vec<_>>().join("\n");
     assert_eq!(key_of(w.op(json!({ "op": "probe", "text": many })).await), "too_many_links");
     assert_eq!(key_of(w.op(json!({ "op": "probe", "text": "  \n " })).await), "no_links");
+    assert_eq!(lines(&w.admin.get_data().await), Vec::<Value>::new(), "a refused send adds no line");
 }
 
 // ---- the table's operations -------------------------------------------------
@@ -508,14 +670,12 @@ async fn a_change_that_runs_does_not_hold_back_a_reader() {
         .unwrap();
 }
 
-/// The playlist was probed, saved (so its videos are on disk), and is saved
+/// The playlist was probed, so added and cached, and the table is saved
 /// again later in another order without being probed again: its cache stays.
 #[tokio::test]
 async fn a_cached_playlist_not_probed_this_session_keeps_its_cache_when_the_table_is_saved_again() {
     let mut w = world(&answering()).await;
-    w.op(json!({ "op": "probe", "text": LIST })).await.unwrap();
-    w.until("probe done", |d| d["probe"]["running"] == false).await;
-    w.add(vec![entry(1, LIST, Kind::Playlist)]).await.unwrap();
+    w.probe_all(LIST).await;
     let cached = ListCache::new(&w.data).load(LIST_ID).unwrap();
     assert_eq!(cached.len(), 12);
 
@@ -534,24 +694,6 @@ async fn a_change_notifies_the_source_and_survives_a_restart() {
     assert_eq!(Entries::load(&w.data.join("entries.toml")).unwrap().entry.len(), 1);
     let d = w.admin.get_data().await;
     assert_eq!(d["entries"][0]["preset"], 1, "numbered by position");
-}
-
-#[tokio::test]
-async fn a_saved_playlist_is_cached_so_the_first_select_plays() {
-    let mut w = world(&answering()).await;
-    w.op(json!({ "op": "probe", "text": LIST })).await.unwrap();
-    w.until("probe done", |d| d["probe"]["running"] == false).await;
-    assert!(ListCache::new(&w.data).load(LIST_ID).is_none(), "nothing is cached by a probe alone");
-
-    let mut found = entry(1, LIST, Kind::Playlist);
-    found.count = Some(12);
-    w.add(vec![found]).await.unwrap();
-    assert_eq!(ListCache::new(&w.data).load(LIST_ID).unwrap().len(), 12);
-
-    // The very first select, before any background refresh could have run.
-    let mut source = WebStreamingSource::new(w.data.clone(), w.entries.clone(), Some(w.saved.clone()));
-    let outcome = source.select(1).await;
-    assert!(matches!(outcome.action, SourceAction::Play { .. }), "{:?}", outcome.status_text);
 }
 
 #[tokio::test]
@@ -919,7 +1061,7 @@ fn the_english_catalogue_has_every_message_the_page_derives_from_a_code() {
         "not_a_url", "foreign_host", "no_media", "live_stream", "tool_missing", "timeout", "failed", "unknown_root",
         "not_writable", "not_mounted", "escapes", "unresponsive", "io", "wrong_kind", "unavailable", "invalid_id",
         "timed_out", "interrupted", "job_lost", "no_such_preset", "preset_no_playlist", "preset_no_video",
-        "bad_entry", "failed_silent", "exited", "local_network",
+        "bad_entry", "failed_silent", "exited", "local_network", "already_present", "table_full", "save_failed",
     ] {
         assert!(en.contains_key(&format!("fault_{code}")), "fault_{code}");
     }

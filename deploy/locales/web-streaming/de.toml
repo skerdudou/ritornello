@@ -20,11 +20,12 @@ play_failed_ytdlp_failed = "Wiedergabe nicht möglich: yt-dlp konnte den Link ni
 bad_request = "ungültige Anfrage: {detail}"
 no_links = "füge mindestens einen Link ein"
 too_many_links = "höchstens {max} Links auf einmal"
-probe_busy = "es werden bereits Links gelesen"
 too_many_entries = "höchstens 99 Voreinstellungen"
 duplicate_preset = "Voreinstellung {preset} kommt doppelt vor"
 save_failed = "die Voreinstellungen konnten nicht gespeichert werden"
 stale = "die Voreinstellungen haben sich inzwischen geändert: so angezeigt, wie sie jetzt sind"
+already_present = "schon in der Liste"
+table_full = "höchstens 99 Voreinstellungen"
 empty_title = "eine Voreinstellung braucht einen Titel"
 nothing_selected = "wähle mindestens eine Voreinstellung aus"
 
@@ -60,6 +61,9 @@ fault_trim_playlist = "eine Playlist wird nicht geschnitten: nur ein einzelnes V
 fault_trim_outside = "der zu behaltende Teil liegt außerhalb des Videos"
 fault_bad_entry = "die Adresse der Voreinstellung ist nicht lesbar"
 fault_unreadable_output = "yt-dlp hat eine unlesbare Antwort gegeben ({detail})"
+fault_already_present = "schon in der Liste"
+fault_table_full = "höchstens 99 Voreinstellungen"
+fault_save_failed = "konnte nicht gespeichert werden"
 row_preset = "Voreinstellung {preset}"
 
 # why the last update of yt-dlp failed

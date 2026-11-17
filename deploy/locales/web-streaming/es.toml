@@ -20,11 +20,12 @@ play_failed_ytdlp_failed = "no se pudo reproducir: yt-dlp no pudo leer el enlace
 bad_request = "solicitud no válida: {detail}"
 no_links = "pega al menos un enlace"
 too_many_links = "{max} enlaces como máximo a la vez"
-probe_busy = "ya se están leyendo enlaces"
 too_many_entries = "99 preajustes como máximo"
 duplicate_preset = "el preajuste {preset} aparece dos veces"
 save_failed = "no se pudieron guardar los preajustes"
 stale = "los preajustes cambiaron entretanto: se muestran tal como están"
+already_present = "ya está en la lista"
+table_full = "99 preajustes como máximo"
 empty_title = "un preajuste necesita un título"
 nothing_selected = "selecciona al menos un preajuste"
 
@@ -60,6 +61,9 @@ fault_trim_playlist = "una lista de reproducción no se corta: solo un vídeo su
 fault_trim_outside = "la parte que se conserva está fuera del vídeo"
 fault_bad_entry = "la dirección del preajuste no se puede leer"
 fault_unreadable_output = "yt-dlp dio una respuesta ilegible ({detail})"
+fault_already_present = "ya está en la lista"
+fault_table_full = "99 preajustes como máximo"
+fault_save_failed = "no se pudo guardar"
 row_preset = "Preajuste {preset}"
 
 # why the last update of yt-dlp failed

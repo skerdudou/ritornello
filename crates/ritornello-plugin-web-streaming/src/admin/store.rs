@@ -12,6 +12,7 @@ use ritornello_plugin_web_streaming::link::parse_link;
 use ritornello_plugin_web_streaming::targets;
 use ritornello_plugin_web_streaming::ytdlp::Kind;
 use ritornello_proto::Text;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock as AsyncRwLock;
@@ -98,6 +99,11 @@ impl Store {
         // drops what did not change.
         self.saved.send_replace(());
         Ok(())
+    }
+
+    /// The addresses the table holds now.
+    pub async fn urls(&self) -> HashSet<String> {
+        self.entries.read().await.entry.iter().map(|e| e.url.clone()).collect()
     }
 }
 

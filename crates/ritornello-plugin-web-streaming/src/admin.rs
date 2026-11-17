@@ -9,7 +9,9 @@
 //!
 //! | op | does, in the call | spawns |
 //! |---|---|---|
-//! | `probe` | parses the lines (pure) | one task: yt-dlp, a line at a time |
+//! | `probe` | parses the lines (pure) and queues them | one worker unless one runs: yt-dlp, a line at a time; adds what names one thing through `Store::change` |
+//! | `choose` | adds a choice of a `found` line through `Store::change`, drops the line | nothing |
+//! | `dismiss` | drops a line, whatever its state | nothing |
 //! | `remove`, `move`, `rename` | one change of the table through `Store::change`: validates, writes `entries.toml` and the playlist caches | nothing |
 //! | `list_targets` | nothing | read the share roots and `/proc/mounts` (also spawned by `get_data` when the cache is stale) |
 //! | `list_dirs`, `create_dir` | nothing | the share's I/O, each under a deadline |
@@ -67,8 +69,14 @@ const LAST_COVER: &str = "last_cover";
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum Op {
-    /// Reads the links, one per line; the answers arrive through `get_data`.
+    /// Reads the links, one per line, queued behind those already being
+    /// read; the answers arrive through `get_data`.
     Probe { text: String },
+    /// Adds the choice `url` of the `found` line `line`, which then goes
+    /// (`stale` when the line or the choice is not there).
+    Choose { line: u64, url: String },
+    /// Drops a line, whatever its state (none of it is added afterwards).
+    Dismiss { line: u64 },
     /// Drops a preset; those after it move up. `preset` and `url` name the row
     /// as the page drew it (`stale` when the table moved meanwhile).
     Remove { preset: u8, url: String },
@@ -403,7 +411,16 @@ impl AdminPlugin for WebStreamingAdmin {
         let op: Op =
             serde_json::from_value(data).map_err(|e| keyed_with("bad_request", "detail", e.to_string()))?;
         match op {
-            Op::Probe { text } => probe::start(&self.shared, &self.ytdlp, &text),
+            Op::Probe { text } => probe::start(&self.shared, &self.ytdlp, &self.store, &text),
+            Op::Choose { line, url } => {
+                let found = self.shared.probe.lock().unwrap_or_else(|p| p.into_inner()).choice(line, &url);
+                let found = found.ok_or_else(|| keyed("stale"))?;
+                probe::add(&self.shared.probe, &self.store, line, found).await
+            }
+            Op::Dismiss { line } => {
+                self.shared.probe.lock().unwrap_or_else(|p| p.into_inner()).dismiss(line);
+                Ok(())
+            }
             Op::Remove { preset, url } => {
                 self.store
                     .change(&self.shared.probe, |rows| {

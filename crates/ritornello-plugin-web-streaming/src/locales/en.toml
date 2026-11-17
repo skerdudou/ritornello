@@ -20,11 +20,12 @@ play_failed_ytdlp_failed = "could not play: yt-dlp could not read the link (the 
 bad_request = "invalid request: {detail}"
 no_links = "paste at least one link"
 too_many_links = "{max} links at most at a time"
-probe_busy = "links are already being read"
 too_many_entries = "99 presets at most"
 duplicate_preset = "preset {preset} appears twice"
 save_failed = "the presets could not be saved"
 stale = "the presets changed meanwhile: shown again as they are"
+already_present = "already in the list"
+table_full = "99 presets at most"
 empty_title = "a preset needs a title"
 nothing_selected = "select at least one preset"
 
@@ -60,6 +61,9 @@ fault_trim_playlist = "a playlist cannot be cut: only a single video"
 fault_trim_outside = "the part to keep is outside the video"
 fault_bad_entry = "the preset's address cannot be read"
 fault_unreadable_output = "yt-dlp gave an answer that cannot be read ({detail})"
+fault_already_present = "already in the list"
+fault_table_full = "99 presets at most"
+fault_save_failed = "could not be saved"
 row_preset = "Preset {preset}"
 
 # why the last update of yt-dlp failed

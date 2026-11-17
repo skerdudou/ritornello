@@ -49,7 +49,7 @@ fn fault(e: &TargetError) -> Fault {
         TargetError::Unresponsive => ("unresponsive", None),
         TargetError::Io(detail) => ("io", Some(detail.clone())),
     };
-    Fault { code, detail }
+    Fault { code: code.into(), detail }
 }
 
 /// The roots the files plugin declared and the mount table, read together.
