@@ -2263,7 +2263,9 @@ a row by its handle with a finger (plugins table, `files` playlist, radio
 stations, web-streaming presets) is covered by Playwright journeys that
 dispatch touch gestures through the Chrome DevTools Protocol, in Chromium
 only. It has never been tried on a real phone or tablet, in iOS Safari, or in
-Firefox. Neither has the auto-scroll near the window's edge on a touch screen.
+Firefox. Neither has the auto-scroll near the window's edge on a touch screen,
+nor the 0.4 s press a finger now needs before a row is grabbed (its length, and
+the vibration that marks the grab, were chosen without a real phone in hand).
 The `ReorderList`/`ReorderHandle` kit components were added without bumping
 `UI_CONTRACT`, so a `files`, `radio` or `web-streaming` page built against
 this kit does not load on an older core; that was accepted, and the behaviour

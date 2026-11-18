@@ -1492,7 +1492,7 @@ component installable again.
 
 **The physical remote's source key now cycles through the sources in
 this table's own order, not alphabetically.** Reordering, by dragging a row's
-⠿ handle (finger or mouse) or with the ▲▼ arrows, changes both: which source the key lands on next, and (see
+⠿ handle (a finger holds it 0.4 s first; a mouse at once) or with the ▲▼ arrows, changes both: which source the key lands on next, and (see
 [plugins.md](plugins.md)) metadata priority for the fields more than one
 plugin can supply.
 
