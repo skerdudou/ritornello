@@ -28,7 +28,7 @@ import { usePlayer } from '../composables/usePlayer'
 import { usePlugins } from '../composables/usePlugins'
 import type {
   Alarm, AudioPayload, ContractGap, LanguageBusy, LanguagePackRow, LocalePayload,
-  Refusal, SettingsPayload, UpdatePayload,
+  LockSoundVolume, Refusal, SettingsPayload, UpdatePayload,
 } from '../types'
 
 const { t, reload } = useCatalog()
@@ -88,6 +88,7 @@ const settings = ref<SettingsPayload>({
   // value across a PUT anyway.
   sleep_timer_mode: 'fade',
   lock_sound: 'a',
+  lock_sound_volume: 2,
   alarms: [],
 })
 
@@ -307,6 +308,21 @@ function lockSoundText(v: string | undefined): string {
 }
 const lockSoundLabel = computed(() => lockSoundText(settings.value.lock_sound))
 
+const LOCK_SOUND_VOLUMES: LockSoundVolume[] = [1, 2, 3, 4]
+
+/** `2 · Normal`: the level's number, then its word. Level 2 is the reference. */
+function lockSoundVolumeText(v: LockSoundVolume): string {
+  return `${v} · ${t.value(`lock_sound_volume_${v}`)}`
+}
+/** The level picker reads and writes the number; the select speaks strings. */
+const lockSoundVolumeChoice = computed({
+  get: () => String(settings.value.lock_sound_volume),
+  set: (v: string) => {
+    settings.value.lock_sound_volume = Number(v) as LockSoundVolume
+  },
+})
+const lockSoundVolumeLabel = computed(() => lockSoundVolumeText(settings.value.lock_sound_volume))
+
 // The player's state decides whether a chime can be heard at all: the page
 // shows why nothing will sound rather than leaving a dead-looking button.
 const { state: player, ouvre: openPlayer } = usePlayer()
@@ -317,7 +333,10 @@ const lockSoundNote = computed(() => {
 
 /** Plays the value on screen on the device, saved or not. */
 async function previewLockSound() {
-  const { error, status } = await api.postWithStatus('/api/lock-sound/preview', { sound: settings.value.lock_sound })
+  const { error, status } = await api.postWithStatus('/api/lock-sound/preview', {
+    sound: settings.value.lock_sound,
+    volume: settings.value.lock_sound_volume,
+  })
   // 429: a preview is already queued (the route answers at once on a full
   // queue), so a press while it plays is a no-op, not a failure.
   if (error && status !== 429) toast.error(error)
@@ -2135,6 +2154,13 @@ function goTo(id: string) {
                   :disabled="settings.lock_sound === 'none'" @click="previewLockSound">
                   <PlayIcon class="size-4" />
                 </Button>
+                <Select v-model="lockSoundVolumeChoice">
+                  <SelectTrigger class="min-w-36" data-lock-sound-volume-select
+                    :aria-label="t('lock_sound_volume_label')"><SelectValue>{{ lockSoundVolumeLabel }}</SelectValue></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem v-for="v in LOCK_SOUND_VOLUMES" :key="v" :value="String(v)">{{ lockSoundVolumeText(v) }}</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
               <p v-if="lockSoundNote" data-lock-sound-note class="text-sm text-muted-foreground">{{ lockSoundNote }}</p>
             </div>

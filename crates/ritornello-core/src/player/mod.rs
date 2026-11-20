@@ -136,7 +136,7 @@ pub trait Player: Send + Sync + 'static {
     /// Loads a generated sound while mpv is idle; none of that load's events
     /// reach the core (mpv's `AsideGate`), so the core keeps believing
     /// nothing plays — which is the truth it acts on.
-    async fn play_aside(&self, uri: &str) -> Result<()>;
+    async fn play_aside(&self, uri: &str, af: Option<&str>) -> Result<()>;
     /// Starts a chime on a paused file (`ChimeRoute::Paused`): writes
     /// `chain` (the chain mpv holds with `lock_sound::mix_filter_over_silence`
     /// after it), puts the file back at `resume_at` when `Some` (a seek that

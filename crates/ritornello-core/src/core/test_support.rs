@@ -172,8 +172,11 @@ impl crate::player::Player for FakePlayer {
         }
         Ok(*self.route.lock().unwrap())
     }
-    async fn play_aside(&self, uri: &str) -> anyhow::Result<()> {
-        self.calls.lock().unwrap().push(format!("aside {uri}"));
+    async fn play_aside(&self, uri: &str, af: Option<&str>) -> anyhow::Result<()> {
+        // The file-local `af` is recorded only when there is one: the level-2
+        // load is the one the core tests always compared.
+        let af = af.map(|af| format!(" af={af}")).unwrap_or_default();
+        self.calls.lock().unwrap().push(format!("aside {uri}{af}"));
         Ok(())
     }
     async fn sound_while_paused(&self, chain: &str, resume_at: Option<f64>) -> anyhow::Result<()> {

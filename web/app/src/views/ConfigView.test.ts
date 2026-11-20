@@ -183,7 +183,7 @@ function payloads() {
       cover_source_max_mio: 20, cover_rendition: true, cover_max_edge_px: 640,
       cover_jpeg_quality: 85, cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16,
       update_policy: 'off', update_hour: 3, update_cadence: { kind: 'daily' },
-      update_prereleases: false, lock_sound: 'a',
+      update_prereleases: false, lock_sound: 'a', lock_sound_volume: 2,
     } as unknown,
     '/api/update': {
       outcome: { kind: 'never_checked' },
@@ -1660,7 +1660,7 @@ describe('ConfigView — language and display', () => {
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
           cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16, cover_rendition: true,
           update_policy: 'off', update_hour: 3, update_cadence: { kind: 'daily' },
-          update_prereleases: false, lock_sound: 'a',
+          update_prereleases: false, lock_sound: 'a', lock_sound_volume: 2,
         },
       },
       { url: '/api/locale', body: { locale: 'en' } },
@@ -2117,7 +2117,7 @@ describe('ConfigView — settings', () => {
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
           cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16, cover_rendition: true,
           update_policy: 'off', update_hour: 3, update_cadence: { kind: 'daily' },
-          update_prereleases: false, lock_sound: 'a',
+          update_prereleases: false, lock_sound: 'a', lock_sound_volume: 2,
         },
       },
     ])
@@ -2139,7 +2139,7 @@ describe('ConfigView — settings', () => {
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
           cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16, cover_rendition: true,
           update_policy: 'off', update_hour: 3, update_cadence: { kind: 'daily' },
-          update_prereleases: false, lock_sound: 'a',
+          update_prereleases: false, lock_sound: 'a', lock_sound_volume: 2,
         },
       },
     ])
@@ -2162,7 +2162,7 @@ describe('ConfigView — settings', () => {
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
           cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16, cover_rendition: true,
           update_policy: 'off', update_hour: 3, update_cadence: { kind: 'daily' },
-          update_prereleases: false, lock_sound: 'a',
+          update_prereleases: false, lock_sound: 'a', lock_sound_volume: 2,
         },
       },
     ])
@@ -2223,7 +2223,7 @@ describe('ConfigView — alarms', () => {
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
           cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16, cover_rendition: true,
           update_policy: 'off', update_hour: 3, update_cadence: { kind: 'daily' },
-          update_prereleases: false, lock_sound: 'a',
+          update_prereleases: false, lock_sound: 'a', lock_sound_volume: 2,
           alarms: expected,
         },
       },
@@ -2292,7 +2292,7 @@ describe('ConfigView — overlays', () => {
           cover_source_max_mio: 20, cover_max_edge_px: 640, cover_jpeg_quality: 85,
           cover_passthrough_max_ko: 150, cover_max_pixels_mpx: 16, cover_rendition: true,
           update_policy: 'off', update_hour: 3, update_cadence: { kind: 'daily' },
-          update_prereleases: false, lock_sound: 'a',
+          update_prereleases: false, lock_sound: 'a', lock_sound_volume: 2,
         },
       },
     ])
@@ -3321,6 +3321,8 @@ describe('ConfigView — lock sound', () => {
     lock_sound_d: 'Marimba feutré', lock_sound_e: 'Xylophone pentatonique',
     lock_sound_preview: "Jouer sur l'appareil",
     lock_sound_muted_note: 'Muet : rien ne sera entendu.',
+    lock_sound_volume_label: 'Volume du son du verrou',
+    lock_sound_volume_1: 'Doux', lock_sound_volume_2: 'Normal', lock_sound_volume_3: 'Fort', lock_sound_volume_4: 'Très fort',
   }
 
   async function mountLock(sound: string) {
@@ -3346,13 +3348,28 @@ describe('ConfigView — lock sound', () => {
     expect((puts[0]!.body as { lock_sound: string }).lock_sound).toBe('e')
   })
 
+  it('lock_sound_volume_select_shows_the_level_saves_it_and_previews_it', async () => {
+    const { w, puts, posts } = await mountLock('c')
+    expect(w.get('[data-lock-sound-volume-select]').text()).toContain('2 · Normal')
+    const volume = w.findAllComponents(Select).find((s) => s.find('[data-lock-sound-volume-select]').exists())!
+    await volume.vm.$emit('update:modelValue', '4')
+    await flushPromises()
+    await w.find('[data-player-change]').trigger('click')
+    await flushPromises()
+    expect((puts[0]!.body as { lock_sound_volume: number }).lock_sound_volume).toBe(4)
+    await w.find('[data-lock-sound-preview]').trigger('click')
+    await flushPromises()
+    expect(posts.at(-1)!.body).toEqual({ sound: 'c', volume: 4 })
+  })
+
   it('preview_posts_the_value_on_screen', async () => {
     const { w, posts } = await mountLock('c')
     await lockSelect(w).vm.$emit('update:modelValue', 'b')
     await flushPromises()
     await w.get('[data-lock-sound-preview]').trigger('click')
     await flushPromises()
-    expect(posts).toEqual([{ url: '/api/lock-sound/preview', body: { sound: 'b' } }])
+    // The level on screen goes with the sound (the reference, 2, here).
+    expect(posts).toEqual([{ url: '/api/lock-sound/preview', body: { sound: 'b', volume: 2 } }])
   })
 
   it('preview_429_is_a_quiet_no_op_but_another_refusal_still_toasts', async () => {

@@ -117,6 +117,7 @@ const settings = ref<SettingsPayload>({
   update_prereleases: false,
   sleep_timer_mode: 'fade',
   lock_sound: 'a',
+  lock_sound_volume: 2,
   alarms: [],
 })
 onMounted(async () => {

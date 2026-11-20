@@ -83,7 +83,7 @@
 //! an IPC timeout mpv may well have loaded the chime anyway.
 
 use super::*;
-use crate::lock_sound::{LockSound, Motif};
+use crate::lock_sound::{LockSound, LockVolume, Motif};
 use crate::player::ChimeRoute;
 
 /// How long the mixed chain is kept after the chime's end before the plain
@@ -108,7 +108,7 @@ pub(super) struct PausedChime {
 
 impl<P: Player> Core<P> {
     /// Plays `motif` of `sound` by the route mpv offers now (see the module).
-    pub(super) async fn play_lock_sound(&mut self, sound: LockSound, motif: Motif) {
+    pub(super) async fn play_lock_sound(&mut self, sound: LockSound, motif: Motif, volume: LockVolume) {
         if sound == LockSound::None {
             return;
         }
@@ -135,7 +135,7 @@ impl<P: Player> Core<P> {
                     return;
                 }
             }
-            self.sound_while_paused(plain, sound, motif, sample_rate, channels, resume_at).await;
+            self.sound_while_paused(plain, sound, motif, volume, sample_rate, channels, resume_at).await;
             return;
         }
         let route = match self.player.chime_route(crate::lock_sound::duration(sound, motif)).await {
@@ -148,12 +148,12 @@ impl<P: Player> Core<P> {
         match route {
             ChimeRoute::Idle => {
                 let Some(uri) = crate::lock_sound::idle_uri(self.player.chime_dir(), sound, motif) else { return };
-                if let Err(e) = self.player.play_aside(&uri).await {
+                if let Err(e) = self.player.play_aside(&uri, crate::lock_sound::idle_af(volume).as_deref()).await {
                     tracing::warn!("lock sound while idle: {e}");
                 }
             }
             ChimeRoute::Live { sample_rate, channels } => {
-                let Some(filter) = crate::lock_sound::mix_filter(self.player.chime_dir(), sound, motif, sample_rate, channels) else { return };
+                let Some(filter) = crate::lock_sound::mix_filter(self.player.chime_dir(), sound, motif, sample_rate, channels, volume) else { return };
                 match self.write_held_chain(Some(&filter)).await {
                     Ok(chain) => {
                         let until = Instant::now() + crate::lock_sound::duration(sound, motif) + REMOVAL_MARGIN;
@@ -175,7 +175,7 @@ impl<P: Player> Core<P> {
                         }
                     },
                 };
-                self.sound_while_paused(plain, sound, motif, sample_rate, channels, resume_at).await;
+                self.sound_while_paused(plain, sound, motif, volume, sample_rate, channels, resume_at).await;
             }
             ChimeRoute::Silent => tracing::debug!("lock sound: nothing audible to carry it, not played"),
         }
@@ -186,16 +186,18 @@ impl<P: Player> Core<P> {
     /// a paused chime already sounding, whose end is pushed back. Whatever
     /// mpv answered, the record makes sure the chime is ended; on an error
     /// it is ended at once.
+    #[allow(clippy::too_many_arguments)] // the chime's inputs, as `play_lock_sound` names them
     async fn sound_while_paused(
         &mut self,
         plain: String,
         sound: LockSound,
         motif: Motif,
+        volume: LockVolume,
         sample_rate: u32,
         channels: u32,
         resume_at: Option<f64>,
     ) {
-        let Some(filter) = crate::lock_sound::mix_filter_over_silence(self.player.chime_dir(), sound, motif, sample_rate, channels) else {
+        let Some(filter) = crate::lock_sound::mix_filter_over_silence(self.player.chime_dir(), sound, motif, sample_rate, channels, volume) else {
             return;
         };
         let chain = super::equalizer::with_extra(&plain, Some(&filter));
@@ -258,8 +260,8 @@ impl<P: Player> Core<P> {
 
     /// The config page lets the owner hear `sound` — whatever the setting
     /// holds — by the same route as a lock change.
-    pub async fn preview_lock_sound(&mut self, sound: LockSound) {
-        self.play_lock_sound(sound, Motif::Preview).await;
+    pub async fn preview_lock_sound(&mut self, sound: LockSound, volume: LockVolume) {
+        self.play_lock_sound(sound, Motif::Preview, volume).await;
     }
 
     /// When the chain mixed with a chime must lose it, or a paused chime
@@ -301,7 +303,7 @@ mod tests {
     use super::*;
     use crate::core::test_support::*;
     use crate::equalizer::{af_chain, EqualizerSettings};
-    use crate::lock_sound::{duration, idle_uri, mix_filter, mix_filter_over_silence};
+    use crate::lock_sound::{duration, idle_uri, mix_filter, mix_filter_over_silence, LockVolume};
     use std::path::Path;
 
     /// The directory of the chime files, as `FakePlayer` names it.
@@ -407,7 +409,7 @@ mod tests {
             pc.lock().unwrap().clear();
             core.handle_command(Command::SetInputLock(true)).await.unwrap();
             core.handle_command(Command::SetInputLock(false)).await.unwrap();
-            core.preview_lock_sound(LockSound::E).await;
+            core.preview_lock_sound(LockSound::E, LockVolume::Two).await;
             assert_eq!(chime_calls(&pc), Vec::<String>::new(), "{route:?}");
             assert!(core.lock_sound_deadline().is_none(), "{route:?}");
         }
@@ -418,7 +420,7 @@ mod tests {
         let (mut core, pc, _sc, _rx, _d) = setup();
         set_route(&core, ChimeRoute::Silent);
         core.handle_command(Command::SetInputLock(true)).await.unwrap();
-        core.preview_lock_sound(LockSound::B).await;
+        core.preview_lock_sound(LockSound::B, LockVolume::Two).await;
         assert_eq!(chime_calls(&pc), Vec::<String>::new());
         assert!(core.lock_sound_deadline().is_none());
     }
@@ -440,7 +442,7 @@ mod tests {
         let before = Instant::now();
         core.handle_command(Command::SetInputLock(true)).await.unwrap();
         let after = Instant::now();
-        let filter = mix_filter(files(), LockSound::A, Motif::Lock, 48000, 2).unwrap();
+        let filter = mix_filter(files(), LockSound::A, Motif::Lock, 48000, 2, LockVolume::Two).unwrap();
         assert_eq!(chime_calls(&pc), vec![format!("af {},{filter}", af_chain(&eq))]);
 
         let length = duration(LockSound::A, Motif::Lock);
@@ -482,7 +484,7 @@ mod tests {
         pc.lock().unwrap().clear();
 
         core.handle_command(Command::SetInputLock(true)).await.unwrap();
-        let filter = mix_filter(files(), LockSound::A, Motif::Lock, 48000, 2).unwrap();
+        let filter = mix_filter(files(), LockSound::A, Motif::Lock, 48000, 2, LockVolume::Two).unwrap();
         assert_eq!(chime_calls(&pc), vec![format!("af {},{filter}", af_chain(&eq))], "mixed into the chain mpv holds");
 
         pc.lock().unwrap().clear();
@@ -503,7 +505,7 @@ mod tests {
     async fn with_the_equalizer_off_the_chime_is_the_whole_chain() {
         let (mut core, pc, _sc, _rx, _d) = playing_with(EqualizerSettings::default());
         core.handle_command(Command::SetInputLock(true)).await.unwrap();
-        let filter = mix_filter(files(), LockSound::A, Motif::Lock, 48000, 2).unwrap();
+        let filter = mix_filter(files(), LockSound::A, Motif::Lock, 48000, 2, LockVolume::Two).unwrap();
         assert_eq!(chime_calls(&pc), vec![format!("af {filter}")]);
         pc.lock().unwrap().clear();
         core.expire_lock_sound().await;
@@ -519,8 +521,8 @@ mod tests {
         core.handle_command(Command::SetInputLock(false)).await.unwrap();
         let second = core.lock_sound_deadline().unwrap();
         assert!(second >= first, "the deadline is the second chime's");
-        let lock = mix_filter(files(), LockSound::A, Motif::Lock, 48000, 2).unwrap();
-        let unlock = mix_filter(files(), LockSound::A, Motif::Unlock, 48000, 2).unwrap();
+        let lock = mix_filter(files(), LockSound::A, Motif::Lock, 48000, 2, LockVolume::Two).unwrap();
+        let unlock = mix_filter(files(), LockSound::A, Motif::Unlock, 48000, 2, LockVolume::Two).unwrap();
         assert_eq!(
             chime_calls(&pc),
             vec![format!("af {},{lock}", af_chain(&eq)), format!("af {},{unlock}", af_chain(&eq))],
@@ -587,7 +589,7 @@ mod tests {
     async fn preview_plays_the_requested_sound_not_the_setting() {
         let (mut core, pc, _sc, _rx, _d) = setup();
         assert_eq!(core.settings.lock_sound, LockSound::A);
-        core.preview_lock_sound(LockSound::E).await;
+        core.preview_lock_sound(LockSound::E, LockVolume::Two).await;
         assert_eq!(chime_calls(&pc), vec![aside(LockSound::E, Motif::Preview)]);
     }
 
@@ -598,7 +600,7 @@ mod tests {
     const PAUSED: ChimeRoute = ChimeRoute::Paused { sample_rate: 48000, channels: 2, resume_at: Some(AT) };
 
     fn paused_chime(plain: &str, motif: Motif, resume_at: Option<f64>) -> String {
-        let mix = mix_filter_over_silence(files(), LockSound::A, motif, 48000, 2).unwrap();
+        let mix = mix_filter_over_silence(files(), LockSound::A, motif, 48000, 2, LockVolume::Two).unwrap();
         let chain = if plain.is_empty() { mix } else { format!("{plain},{mix}") };
         format!("paused-chime {chain} {resume_at:?}")
     }
@@ -721,7 +723,7 @@ mod tests {
     async fn a_preview_while_paused_takes_the_same_path_and_publishes_nothing() {
         let (mut core, pc, _sc, mut rx, _d) = paused_with(EqualizerSettings::default()).await;
         rx.borrow_and_update();
-        core.preview_lock_sound(LockSound::A).await;
+        core.preview_lock_sound(LockSound::A, LockVolume::Two).await;
         core.expire_lock_sound().await;
         assert_eq!(chime_calls(&pc), vec![paused_chime("", Motif::Preview, Some(AT)), paused_chime_end("", Some(AT))]);
         assert!(!rx.has_changed().unwrap(), "nothing published by the chime");
@@ -963,20 +965,20 @@ mod tests {
         let (mut core, pc, _sc, _rx, _d) = chiming_while_paused(EqualizerSettings::default()).await;
         core.set_progress(Some(AT), Some(AT + lock + 1.1));
         let first = core.lock_sound_deadline().unwrap();
-        core.preview_lock_sound(LockSound::A).await;
+        core.preview_lock_sound(LockSound::A, LockVolume::Two).await;
         assert_eq!(chime_calls(&pc), Vec::<String>::new(), "the first chime goes on alone");
         assert_eq!(core.lock_sound_deadline(), Some(first), "its end unchanged");
 
         // Just enough room: played.
         let (mut core, pc, _sc, _rx, _d) = chiming_while_paused(EqualizerSettings::default()).await;
         core.set_progress(Some(AT), Some(AT + preview + 1.01));
-        core.preview_lock_sound(LockSound::A).await;
+        core.preview_lock_sound(LockSound::A, LockVolume::Two).await;
         assert_eq!(chime_calls(&pc), vec![paused_chime("", Motif::Preview, Some(AT))]);
 
         // No duration known (a file mpv gives none of): no guard, as for the route.
         let (mut core, pc, _sc, _rx, _d) = chiming_while_paused(EqualizerSettings::default()).await;
         core.set_progress(Some(AT), None);
-        core.preview_lock_sound(LockSound::A).await;
+        core.preview_lock_sound(LockSound::A, LockVolume::Two).await;
         assert_eq!(chime_calls(&pc), vec![paused_chime("", Motif::Preview, Some(AT))]);
 
         // A stream (`resume_at` None): its duration is its cache end, no guard.
@@ -984,7 +986,7 @@ mod tests {
         set_route(&core, ChimeRoute::Paused { sample_rate: 48000, channels: 2, resume_at: None });
         core.set_progress(Some(1.2), Some(1.386667));
         core.handle_command(Command::SetInputLock(true)).await.unwrap();
-        core.preview_lock_sound(LockSound::A).await;
+        core.preview_lock_sound(LockSound::A, LockVolume::Two).await;
         assert_eq!(
             chime_calls(&pc),
             vec![paused_chime("", Motif::Lock, None), paused_chime("", Motif::Preview, None)]

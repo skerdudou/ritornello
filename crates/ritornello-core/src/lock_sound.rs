@@ -43,6 +43,66 @@ pub enum LockSound {
     E,
 }
 
+/// The loudness of the chime (`Settings::lock_sound_volume`): one of four
+/// steps, persisted as its number, 1 to 4. Level 2 is the reference: the
+/// files as rendered, peak 0.35, with no gain step at all.
+///
+/// The gains are applied by mpv's `volume` filter on the chime branch, not by
+/// re-encoding the files. Headroom: the chime is summed with the music by
+/// `amix normalize=0`, so the sum clips where the music's level plus the
+/// chime's peak at that instant exceeds 1.0. Peaks on the file: level 1 is
+/// 0.175 (-6 dB), level 3 0.4375 (+1.9 dB), level 4 0.525 (+3.5 dB). Level 4
+/// leaves music below about -6.5 dBFS unclipped at the chime's attack; the
+/// chime then decays within a fraction of a second. Going past 1.5 would
+/// clip music that is already near full scale on every lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(try_from = "u8", into = "u8")]
+pub enum LockVolume {
+    One,
+    #[default]
+    Two,
+    Three,
+    Four,
+}
+
+impl LockVolume {
+    /// The gain of the step against the reference, as the `volume` filter
+    /// takes it. `None` at level 2: no step, the graph is the reference's.
+    fn gain(self) -> Option<&'static str> {
+        match self {
+            LockVolume::One => Some("0.5"),
+            LockVolume::Two => None,
+            LockVolume::Three => Some("1.25"),
+            LockVolume::Four => Some("1.5"),
+        }
+    }
+}
+
+impl TryFrom<u8> for LockVolume {
+    type Error = String;
+
+    fn try_from(level: u8) -> Result<Self, String> {
+        match level {
+            1 => Ok(LockVolume::One),
+            2 => Ok(LockVolume::Two),
+            3 => Ok(LockVolume::Three),
+            4 => Ok(LockVolume::Four),
+            other => Err(format!("no lock sound level {other}")),
+        }
+    }
+}
+
+impl From<LockVolume> for u8 {
+    fn from(level: LockVolume) -> u8 {
+        match level {
+            LockVolume::One => 1,
+            LockVolume::Two => 2,
+            LockVolume::Three => 3,
+            LockVolume::Four => 4,
+        }
+    }
+}
+
 /// Which motif of a sound to play.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Motif {
@@ -343,11 +403,26 @@ pub fn idle_uri(dir: &Path, sound: LockSound, motif: Motif) -> Option<String> {
     Some(dir.join(file_name(sound, motif)).to_string_lossy().into_owned())
 }
 
+/// The file-local `af` of an idle load at `volume`: `volume=G`, or `None` at
+/// the reference level (the load is then exactly the one measured). It
+/// replaces the chain for that one file only, so the equalizer does not
+/// shape the chime while it is loaded alone.
+pub fn idle_af(volume: LockVolume) -> Option<String> {
+    volume.gain().map(|gain| format!("volume={gain}"))
+}
+
 /// The filter that mixes the chime into the running audio chain (appended
 /// after the equalizer with a comma, alone when the equalizer is off). The
 /// file is read at the stream's `sample_rate` and `channels`.
-pub fn mix_filter(dir: &Path, sound: LockSound, motif: Motif, sample_rate: u32, channels: u32) -> Option<String> {
-    chime_graph("anull", dir, sound, motif, sample_rate, channels)
+pub fn mix_filter(
+    dir: &Path,
+    sound: LockSound,
+    motif: Motif,
+    sample_rate: u32,
+    channels: u32,
+    volume: LockVolume,
+) -> Option<String> {
+    chime_graph("anull", dir, sound, motif, sample_rate, channels, volume)
 }
 
 /// [`mix_filter`] with the music silenced (`volume=0`): the filter of a
@@ -361,15 +436,19 @@ pub fn mix_filter_over_silence(
     motif: Motif,
     sample_rate: u32,
     channels: u32,
+    volume: LockVolume,
 ) -> Option<String> {
-    chime_graph("volume=volume=0", dir, sound, motif, sample_rate, channels)
+    chime_graph("volume=volume=0", dir, sound, motif, sample_rate, channels, volume)
 }
 
 /// The `@chime` entry: the file read by `amovie` (looped once, so it plays
 /// once), brought to the stream's rate and, for any channel count but two,
 /// to that many channels (`pan`, every channel the left one: the file is the
 /// same on both). `music` is the filter the playing stream goes through
-/// before it is mixed with the chime.
+/// before it is mixed with the chime. The `volume` step comes after the
+/// channel shaping, on the chime only; at level 2 there is none, so that
+/// graph is byte for byte the reference's.
+#[allow(clippy::too_many_arguments)] // the chain's inputs, as the callers name them
 fn chime_graph(
     music: &str,
     dir: &Path,
@@ -377,6 +456,7 @@ fn chime_graph(
     motif: Motif,
     sample_rate: u32,
     channels: u32,
+    volume: LockVolume,
 ) -> Option<String> {
     if sound == LockSound::None {
         return None;
@@ -389,8 +469,9 @@ fn chime_graph(
         let outs: Vec<String> = (0..channels).map(|i| format!("c{i}=c0")).collect();
         format!("aresample={sample_rate},pan={channels}c|{}", outs.join("|"))
     };
+    let step = volume.gain().map(|gain| format!(",volume={gain}")).unwrap_or_default();
     Some(format!(
-        "@chime:lavfi=[{music}[m];amovie=filename='{}':loop=1,{shape}[c];[m][c]amix=inputs=2:duration=first:dropout_transition=0:normalize=0]",
+        "@chime:lavfi=[{music}[m];amovie=filename='{}':loop=1,{shape}{step}[c];[m][c]amix=inputs=2:duration=first:dropout_transition=0:normalize=0]",
         path.display()
     ))
 }
@@ -401,6 +482,57 @@ mod tests {
     use std::process::Command;
 
     const ALL: [LockSound; 5] = [LockSound::A, LockSound::B, LockSound::C, LockSound::D, LockSound::E];
+
+    /// Level 2 is the reference: its graph is the one the device was always
+    /// given (no `volume` step), and the other levels differ from it by one
+    /// step on the chime's branch alone, never on the music's `[m]`.
+    #[test]
+    fn the_reference_level_is_the_graph_it_always_was_and_the_others_step_the_chime() {
+        let at = |v| mix_filter(files(), LockSound::A, Motif::Lock, 48000, 2, v).unwrap();
+        let reference = at(LockVolume::Two);
+        assert_eq!(
+            reference,
+            "@chime:lavfi=[anull[m];amovie=filename='/run/ritornello/lock-sounds/a-lock.wav':loop=1,aresample=48000[c];[m][c]amix=inputs=2:duration=first:dropout_transition=0:normalize=0]"
+        );
+        for (level, gain) in [(LockVolume::One, "0.5"), (LockVolume::Three, "1.25"), (LockVolume::Four, "1.5")] {
+            let stepped = at(level);
+            assert_eq!(
+                stepped,
+                reference.replace("aresample=48000[c]", &format!("aresample=48000,volume={gain}[c]")),
+                "{level:?}"
+            );
+            assert!(stepped.starts_with("@chime:lavfi=[anull[m];"), "the music is untouched: {stepped}");
+        }
+    }
+
+    /// Over silence the step rides on the chime too, the music still silenced.
+    #[test]
+    fn the_step_is_on_the_chime_over_silence_as_well() {
+        let s = mix_filter_over_silence(files(), LockSound::B, Motif::Preview, 44100, 1, LockVolume::Four).unwrap();
+        assert!(s.starts_with("@chime:lavfi=[volume=volume=0[m];"), "{s}");
+        assert!(s.contains("aresample=44100,pan=1c|c0=c0,volume=1.5[c]"), "{s}");
+    }
+
+    /// The idle load carries the same gain as a file-local `af`, and nothing
+    /// at the reference level (the measured load, unchanged).
+    #[test]
+    fn the_idle_load_carries_the_step_only_off_the_reference() {
+        assert_eq!(idle_af(LockVolume::Two), None);
+        assert_eq!(idle_af(LockVolume::One).as_deref(), Some("volume=0.5"));
+        assert_eq!(idle_af(LockVolume::Three).as_deref(), Some("volume=1.25"));
+        assert_eq!(idle_af(LockVolume::Four).as_deref(), Some("volume=1.5"));
+    }
+
+    /// The persisted number is 1 to 4, and nothing else is a level.
+    #[test]
+    fn a_level_is_one_to_four_and_nothing_else() {
+        for n in 1u8..=4 {
+            assert_eq!(u8::from(LockVolume::try_from(n).unwrap()), n);
+        }
+        assert!(LockVolume::try_from(0).is_err());
+        assert!(LockVolume::try_from(5).is_err());
+        assert_eq!(LockVolume::default(), LockVolume::Two);
+    }
 
     /// The directory the strings name, in the tests that only compare them.
     fn files() -> &'static Path {
@@ -576,8 +708,8 @@ mod tests {
     fn none_produces_nothing() {
         for motif in [Motif::Lock, Motif::Unlock, Motif::Preview] {
             assert_eq!(idle_uri(files(), LockSound::None, motif), None);
-            assert_eq!(mix_filter(files(), LockSound::None, motif, 48000, 2), None);
-            assert_eq!(mix_filter_over_silence(files(), LockSound::None, motif, 48000, 2), None);
+            assert_eq!(mix_filter(files(), LockSound::None, motif, 48000, 2, LockVolume::Two), None);
+            assert_eq!(mix_filter_over_silence(files(), LockSound::None, motif, 48000, 2, LockVolume::Two), None);
             assert_eq!(wav(LockSound::None, motif), None);
             assert_eq!(samples(LockSound::None, motif), Vec::<f64>::new());
         }
@@ -596,12 +728,12 @@ mod tests {
     #[test]
     fn the_mix_filter_reads_the_file_at_the_stream_rate_and_channels() {
         assert_eq!(
-            mix_filter(files(), LockSound::A, Motif::Lock, 48000, 2).unwrap(),
+            mix_filter(files(), LockSound::A, Motif::Lock, 48000, 2, LockVolume::Two).unwrap(),
             "@chime:lavfi=[anull[m];amovie=filename='/run/ritornello/lock-sounds/a-lock.wav':loop=1,aresample=48000[c];[m][c]amix=inputs=2:duration=first:dropout_transition=0:normalize=0]"
         );
-        let mono = mix_filter(files(), LockSound::A, Motif::Lock, 44100, 1).unwrap();
+        let mono = mix_filter(files(), LockSound::A, Motif::Lock, 44100, 1, LockVolume::Two).unwrap();
         assert!(mono.contains("aresample=44100,pan=1c|c0=c0[c]"), "{mono}");
-        let six = mix_filter(files(), LockSound::C, Motif::Unlock, 48000, 6).unwrap();
+        let six = mix_filter(files(), LockSound::C, Motif::Unlock, 48000, 6, LockVolume::Two).unwrap();
         assert!(six.contains("amovie=filename='/run/ritornello/lock-sounds/c-unlock.wav'"), "{six}");
         assert!(six.contains("pan=6c|c0=c0|c1=c0|c2=c0|c3=c0|c4=c0|c5=c0[c]"), "{six}");
     }
@@ -612,10 +744,10 @@ mod tests {
     #[test]
     fn the_paused_graph_is_the_measured_one() {
         assert_eq!(
-            mix_filter_over_silence(files(), LockSound::A, Motif::Lock, 48000, 2).unwrap(),
+            mix_filter_over_silence(files(), LockSound::A, Motif::Lock, 48000, 2, LockVolume::Two).unwrap(),
             "@chime:lavfi=[volume=volume=0[m];amovie=filename='/run/ritornello/lock-sounds/a-lock.wav':loop=1,aresample=48000[c];[m][c]amix=inputs=2:duration=first:dropout_transition=0:normalize=0]"
         );
-        let mono = mix_filter_over_silence(files(), LockSound::C, Motif::Unlock, 44100, 1).unwrap();
+        let mono = mix_filter_over_silence(files(), LockSound::C, Motif::Unlock, 44100, 1, LockVolume::Two).unwrap();
         assert!(mono.contains("c-unlock.wav':loop=1,aresample=44100,pan=1c|c0=c0[c]"), "{mono}");
         assert!(mono.starts_with("@chime:lavfi=[volume=volume=0[m];"), "{mono}");
     }
@@ -632,7 +764,7 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         write_files(dir.path()).unwrap();
-        let paused = mix_filter_over_silence(dir.path(), LockSound::A, Motif::Lock, 48000, 1).unwrap();
+        let paused = mix_filter_over_silence(dir.path(), LockSound::A, Motif::Lock, 48000, 1, LockVolume::Two).unwrap();
         let x = first_channel(&run_graph(&paused, 48000, 1, 2.0), 1);
         assert!(x.len() >= 95_000, "the output follows the music's length: {}", x.len());
         let leak = goertzel(&x, 48000.0, 0.0, 1.9, 1000.0);
@@ -656,7 +788,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_files(dir.path()).unwrap();
         for (rate, channels) in [(48000, 2), (44100, 2), (44100, 1), (48000, 6)] {
-            let graph = mix_filter(dir.path(), LockSound::A, Motif::Lock, rate, channels).unwrap();
+            let graph = mix_filter(dir.path(), LockSound::A, Motif::Lock, rate, channels, LockVolume::Two).unwrap();
             let out = run_graph(&graph, rate, channels, 1.0);
             let frames = out.len() / channels as usize;
             assert_eq!(frames, rate as usize, "{rate} Hz, {channels} channels: {frames} frames");
