@@ -17,6 +17,7 @@ the core to 0.2.0 forgets the alarms: note them first.
 - **Lock chime volume** — four levels on the Configuration page, next to the chime choice. Level 2 is the loudness of beta.4 and the default; level 1 is quieter, levels 3 and 4 louder.
 - **Enlarged cover** — the margin around the picture is back at every zoom, and a pan stops short of the screen's edge.
 - **Web streaming download page** — the format and cover choices stack on a phone, so their labels no longer wrap over each other.
+- **Generic-input on a phone** — the key-code column keeps its width beside the action name.
 
 Not yet verified on a real device: the chime volume with the music, the
 margin while panning, and the download page on a phone.
