@@ -43,6 +43,17 @@ export function classifySwipe(dx: number, dy: number): 'next' | 'previous' | nul
   return dx < 0 ? 'next' : 'previous'
 }
 
+// A page that follows the finger commits on release only past this fraction of
+// the card's width; a shorter drag springs back. Width 0 (not laid out) leaves
+// the swipe rule alone.
+export const SNAP_FRACTION = 0.25
+
+export function settleDirection(dx: number, dy: number, width: number): 'next' | 'previous' | null {
+  const direction = classifySwipe(dx, dy)
+  if (direction === null || Math.abs(dx) < SNAP_FRACTION * width) return null
+  return direction
+}
+
 // Where to scroll a list frame so that a row is visible. A row already fully
 // inside the frame leaves the scroll untouched (no jump while the user reads);
 // otherwise the row is centred, clamped to the scrollable range.

@@ -497,12 +497,15 @@ function export_() {
       </Button>
     </div>
 
+    <!-- Below `md` the two icon columns shrink to their buttons (`max-md:w-px`):
+         at a fixed width each icon floated in a wide empty cell, and the code
+         field lost the room. -->
     <table class="w-full text-sm">
       <thead class="text-muted-foreground">
         <tr>
           <th class="text-left font-normal">{{ t('col_action') }}</th>
           <th class="text-left font-normal">{{ t('col_code') }}</th>
-          <th class="w-24" /><th class="w-24" />
+          <th class="w-24 max-md:w-px" /><th class="w-24 max-md:w-px" />
         </tr>
       </thead>
       <tbody>

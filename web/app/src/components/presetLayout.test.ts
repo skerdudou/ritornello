@@ -1,5 +1,22 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { classifySwipe, LAYOUT_KEY, loadPresetLayout, revealScrollTop, savePresetLayout } from './presetLayout'
+import { classifySwipe, LAYOUT_KEY, loadPresetLayout, revealScrollTop, savePresetLayout, settleDirection } from './presetLayout'
+
+describe('settleDirection', () => {
+  // A card 400 px wide commits past 100 px (a quarter of its width).
+  it.each([
+    [-99, 0, 400, null],
+    [-100, 0, 400, 'next'],
+    [120, 4, 400, 'previous'],
+    [-120, 80, 400, null],
+  ])('(%d, %d) on a %d px card is %j', (dx, dy, width, expected) => {
+    expect(settleDirection(dx, dy, width)).toBe(expected)
+  })
+
+  it('falls back to the swipe rule when the card has no width yet', () => {
+    expect(settleDirection(-60, 0, 0)).toBe('next')
+    expect(settleDirection(-40, 0, 0)).toBe(null)
+  })
+})
 
 describe('classifySwipe', () => {
   it.each([

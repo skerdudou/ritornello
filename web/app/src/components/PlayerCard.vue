@@ -54,12 +54,19 @@ const imageBroken = ref(false)
  * owner reports covers that do not load, some of which end up arriving "much
  * later": publishing the URL and the actual availability of the bytes are not
  * the same instant, and the first `error` of the `<img>` doomed the square
- * until the next track. Two spaced-out retries catch a transient dip without
+ * until the next track. Spaced-out retries catch a transient dip without
  * hammering the device.
+ *
+ * **Four, over about twenty seconds, not two over five.** A declared file on
+ * a network share can go silent for several seconds at a time (the core's
+ * read gives up after 3 s, and answers 404 "illisible"). On the Pi's log of
+ * 2026-11-19 the share went quiet three times within a single track, and two
+ * quick retries ran out before the last outage ended: the square stayed ♫
+ * until the next track. Each retry is a fresh read on the core's side (a
+ * failure is never remembered there), so a later one can succeed.
  */
-const IMAGE_RETRIES = 2
-/** Delay before each retry, in milliseconds: short, then less short. */
-const RETRY_DELAYS_MS = [800, 3000]
+const RETRY_DELAYS_MS = [1000, 3000, 6000, 10000]
+const IMAGE_RETRIES = RETRY_DELAYS_MS.length
 /** How many retries have already been consumed for the current URL. */
 const retriesDone = ref(0)
 /**
@@ -503,7 +510,7 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
       <div
         v-if="enlarged"
         ref="overlayEl"
-        class="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-black/80 p-4"
+        class="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-black/80"
         :class="zoom.view.value.scale > 1 ? 'cursor-grab' : 'cursor-zoom-out'"
         :style="{ touchAction: 'none' }"
         role="dialog"
@@ -519,8 +526,11 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
         @wheel="zoom.onWheel"
       >
         <!-- `object-contain` and not `object-cover`: enlarging is precisely
-             for seeing the whole cover, a crop would betray it. No transition
-             while fingers are down: the image must follow them, not lag. -->
+             for seeing the whole cover, a crop would betray it. The overlay has
+             no padding: at ×1 the picture is fitted to the whole screen, so
+             the only blank left is the letterbox of its own proportions, and
+             zooming in spends none of a margin. No transition while fingers
+             are down: the image must follow them, not lag. -->
         <img
           ref="enlargedImg"
           :src="state?.cover_href ?? ''"

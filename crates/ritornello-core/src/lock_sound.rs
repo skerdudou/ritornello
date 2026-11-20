@@ -6,8 +6,8 @@
 //! expression, so no audio file ships with the core. The sounds are the ones
 //! of the web reference (A4 = 440 Hz, a sum of decaying partials per note), and
 //! the envelope is the reference's Web Audio one: a 15 ms exponential attack
-//! from 0.0001 to 0.22, then an exponential decay to 0.0001 over the timbre's
-//! decay time.
+//! from 0.0001 to [`PEAK`], then an exponential decay to 0.0001 over the
+//! timbre's decay time.
 //!
 //! Two ways to play one, both measured on mpv 0.37 / FFmpeg 6.1 (the spike of
 //! the plan): while something plays, [`mix_filter`] mixes the chime into the
@@ -71,6 +71,14 @@ impl Timbre {
         }
     }
 }
+
+/// The envelope's peak. The web reference uses 0.22, which the owner found
+/// too quiet next to the music (`mix_filter` adds the chime to the stream
+/// without attenuating it). 0.35 is about +4 dB. Headroom: the mix is float
+/// until mpv's output conversion, so the sum only clips where a loud master
+/// peaks at the same instant as the chime's attack, and the chime decays
+/// from there; the tests keep the peak within 0.18..=0.5.
+const PEAK: f64 = 0.35;
 
 const C4: f64 = 261.63;
 const G4: f64 = 392.0;
@@ -150,15 +158,16 @@ fn num(v: f64) -> String {
 fn voice(freq: f64, onset: f64, timbre: Timbre) -> String {
     let decay = timbre.decay();
     let (a, b, c) = (onset, onset + 0.015, onset + 0.015 + decay);
-    let k1 = 2200f64.ln() / 0.015;
-    let k2 = (0.0001f64 / 0.22).ln() / decay;
+    let k1 = (PEAK / 0.0001f64).ln() / 0.015;
+    let k2 = (0.0001f64 / PEAK).ln() / decay;
     let env = format!(
-        "if(between(t,{a},{b}),0.0001*exp({k1}*(t-{a})),if(between(t,{b},{c}),0.22*exp({k2}*(t-{b})),0))",
+        "if(between(t,{a},{b}),0.0001*exp({k1}*(t-{a})),if(between(t,{b},{c}),{peak}*exp({k2}*(t-{b})),0))",
         a = num(a),
         b = num(b),
         c = num(c),
         k1 = num(k1),
         k2 = num(k2),
+        peak = num(PEAK),
     );
     let terms: Vec<String> = timbre
         .partials()
@@ -303,8 +312,10 @@ mod tests {
 
     #[test]
     fn the_strings_are_the_measured_ones() {
-        // Verbatim from the spike (Task 1): A lock, then the head of C unlock.
-        let a_lock = "if(between(t,0,0.015),0.0001*exp(513.080843*(t-0)),if(between(t,0.015,0.565),0.22*exp(-13.993114*(t-0.015)),0))*(1*sin(2*PI*659.25*(t-0))+0.05*sin(2*PI*1318.5*(t-0)))+if(between(t,0.16,0.175),0.0001*exp(513.080843*(t-0.16)),if(between(t,0.175,0.725),0.22*exp(-13.993114*(t-0.175)),0))*(1*sin(2*PI*523.25*(t-0.16))+0.05*sin(2*PI*1046.5*(t-0.16)))";
+        // A lock, with the peak PEAK = 0.35: the attack rate is ln(0.35/0.0001)/0.015
+        // and the decay ln(0.0001/0.35)/0.55 (the spike measured 0.22 and
+        // 2200 / -13.993114 at the same timbre).
+        let a_lock = "if(between(t,0,0.015),0.0001*exp(544.03455*(t-0)),if(between(t,0.015,0.565),0.35*exp(-14.837306*(t-0.015)),0))*(1*sin(2*PI*659.25*(t-0))+0.05*sin(2*PI*1318.5*(t-0)))+if(between(t,0.16,0.175),0.0001*exp(544.03455*(t-0.16)),if(between(t,0.175,0.725),0.35*exp(-14.837306*(t-0.175)),0))*(1*sin(2*PI*523.25*(t-0.16))+0.05*sin(2*PI*1046.5*(t-0.16)))";
         assert_eq!(expression(LockSound::A, Motif::Lock).unwrap(), a_lock);
         assert_eq!(
             idle_uri(LockSound::A, Motif::Lock).unwrap(),
@@ -317,7 +328,7 @@ mod tests {
             )
         );
         let c_unlock = expression(LockSound::C, Motif::Unlock).unwrap();
-        assert!(c_unlock.starts_with("if(between(t,0,0.015),0.0001*exp(513.080843*(t-0)),if(between(t,0.015,1.415),0.22*exp(-5.497295*(t-0.015)),0))*(1*sin(2*PI*440*(t-0))+0.18*sin(2*PI*880*(t-0))+0.08*sin(2*PI*1324.4*(t-0)))+"));
+        assert!(c_unlock.starts_with("if(between(t,0,0.015),0.0001*exp(544.03455*(t-0)),if(between(t,0.015,1.415),0.35*exp(-5.828942*(t-0.015)),0))*(1*sin(2*PI*440*(t-0))+0.18*sin(2*PI*880*(t-0))+0.08*sin(2*PI*1324.4*(t-0)))+"));
         assert!(c_unlock.ends_with("0.08*sin(2*PI*1984.3425*(t-0.2)))"));
         assert!(idle_uri(LockSound::C, Motif::Unlock).unwrap().ends_with(":s=48000:d=1.63"));
         // The wood fundamental is the exact triangle.
