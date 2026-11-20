@@ -6,15 +6,25 @@
      or when the bootstrap PROTOCOL_VERSION or a contract major moved (wire
      break: install the core and every plugin together). -->
 
-**Ritornello 0.3.0-beta.3 — equalizer, remote lock, phone-friendly page.**
-
-**One click for a switched-off plugin.** A plugin already switched off when
-this release lands reads `? → 0.3.0-beta.3` and is not updated at night: one
-click on **Install** fixes it for good.
+**Ritornello 0.3.0-beta.4 — quieter stutter on the lock chime, covers that come back, tags on web downloads, phone fixes.**
 
 **Before rolling back generic-input to 0.2.0**, remove the lock key's binding:
 the old binary would otherwise ignore every key of the remote. A rollback of
 the core to 0.2.0 forgets the alarms: note them first.
+
+## What's new since 0.3.0-beta.3
+
+- **Lock chime** — the chime is now pre-rendered and built into the core, instead of being synthesised by ffmpeg while the music plays, which was the main suspect for the stutter. It is also louder (about +4 dB).
+- **Covers that come back** — a cover read from a slow network share is retried four times over about twenty seconds, instead of twice over five.
+- **Enlarged cover** — fills the screen, without the 16 px margin around it.
+- **Track list** — the pages follow your finger while you swipe, and the scrollbar no longer sits against the right edge.
+- **Web streaming downloads** — each track is tagged with its title, its author (the channel, or the artist when the site gives one), the video's description and its YouTube address. Album and track number are written only when the site gives them. Other sites are not covered yet.
+- **Phone** — the web-streaming download dialog, the files browse tab (buttons with icons) and the generic-input buttons no longer overflow or take the whole width.
+
+Not yet verified on the Pi: whether the stutter is gone (it was measured
+as slower than real time before this change, not after), how the chime
+sounds at its new level, the tags on a real download, and the swipe and
+phone layouts on a real phone.
 
 ## What's new since 0.2.0
 
