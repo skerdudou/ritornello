@@ -320,7 +320,10 @@ function formatLabel(f: Format): string {
 
         <section class="min-w-0 space-y-2">
           <h3 class="text-sm font-medium">{{ t('format_label') }}</h3>
-          <div class="grid grid-cols-3 gap-2">
+          <!-- One column on a phone: three side by side leave each label about
+               a hundred pixels, and "Tel que le site le donne" wrapped over
+               the next line. Side by side again from `md`. -->
+          <div class="grid grid-cols-1 gap-2 md:grid-cols-3">
             <Button
               v-for="f in FORMATS"
               :key="f"
@@ -344,7 +347,7 @@ function formatLabel(f: Format): string {
         <section class="min-w-0 space-y-2" data-cover-choice>
           <h3 class="text-sm font-medium">{{ t('cover_label') }}</h3>
           <!-- Three choices are stacked: side by side their labels would not fit. -->
-          <div class="grid gap-2" :class="covers.length > 2 ? 'grid-cols-1' : 'grid-cols-2'" data-cover-choices>
+          <div class="grid grid-cols-1 gap-2" :class="covers.length > 2 ? '' : 'md:grid-cols-2'" data-cover-choices>
             <Button
               v-for="c in covers"
               :key="c"

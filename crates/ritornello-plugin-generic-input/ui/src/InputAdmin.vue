@@ -504,14 +504,14 @@ function export_() {
       <thead class="text-muted-foreground">
         <tr>
           <th class="text-left font-normal">{{ t('col_action') }}</th>
-          <th class="text-left font-normal">{{ t('col_code') }}</th>
+          <th class="min-w-32 text-left font-normal">{{ t('col_code') }}</th>
           <th class="w-24 max-md:w-px" /><th class="w-24 max-md:w-px" />
         </tr>
       </thead>
       <tbody>
         <tr v-for="(a, i) in rows" :key="a.key ?? a.label" data-action-row class="border-t border-border">
           <td class="py-1">{{ rowLabel(a, t) }}</td>
-          <td class="py-1 pr-2">
+          <td class="min-w-32 py-1 pr-2">
             <!-- No red class to add: the kit's `Input` already carries
                  `aria-invalid:border-destructive` and the red ring. Setting
                  the attribute is the whole signal. -->

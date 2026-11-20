@@ -78,7 +78,7 @@ pub struct AppState {
     /// Lock sounds the config page asked to hear, queued for the core loop
     /// (`Core::preview_lock_sound`). Capacity 1, filled with `try_send`: the
     /// route never waits.
-    pub lock_sound_preview_tx: mpsc::Sender<crate::lock_sound::LockSound>,
+    pub lock_sound_preview_tx: mpsc::Sender<(crate::lock_sound::LockSound, crate::lock_sound::LockVolume)>,
     /// The core's own resolved catalog for the current locale, built by
     /// `crate::i18n::core_catalog` — itself a `Registry`-stacked `Chain`
     /// (task 4) wrapped back into `Chain` for compatibility with every
@@ -584,6 +584,12 @@ async fn settings_put(State(state): State<AppState>, Json(body): Json<serde_json
         && serde_json::from_value::<crate::lock_sound::LockSound>(sound.clone()).is_err()
     {
         return lock_sound::refuse(&state).await;
+    }
+    // The same for the chime's level (1 to 4).
+    if let Some(level) = body.get("lock_sound_volume")
+        && serde_json::from_value::<crate::lock_sound::LockVolume>(level.clone()).is_err()
+    {
+        return lock_sound::refuse_volume(&state).await;
     }
     let mut req: crate::state::Settings = match serde_json::from_value(body) {
         Ok(s) => s,

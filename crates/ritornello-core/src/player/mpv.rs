@@ -1486,9 +1486,15 @@ impl super::Player for MpvPlayer {
     /// reverts both once the chime ends (measured). The gate is armed
     /// **before** the command is written, since the chime's `start-file` can
     /// arrive before its response, and disarmed if the command fails.
-    async fn play_aside(&self, uri: &str) -> Result<()> {
+    async fn play_aside(&self, uri: &str, af: Option<&str>) -> Result<()> {
         self.gate().arm();
-        let load = json!({"name": "loadfile", "url": uri, "flags": "replace", "options": "loop-file=no,pause=no"});
+        // A non-reference lock sound level adds its own `af` for this one
+        // file (`lock_sound::idle_af`); mpv restores the chain at its end.
+        let options = match af {
+            Some(af) => format!("loop-file=no,pause=no,af={af}"),
+            None => "loop-file=no,pause=no".to_string(),
+        };
+        let load = json!({"name": "loadfile", "url": uri, "flags": "replace", "options": options});
         if let Err(e) = self.ipc.command_named(load).await {
             self.gate().disarm();
             return Err(e);
@@ -2478,14 +2484,14 @@ pub(crate) mod tests {
         .expect("no playback-restart within 10 s");
         tokio::spawn(async move { while rx.recv().await.is_some() {} });
 
-        let mix = crate::lock_sound::mix_filter(player.chime_dir(), LockSound::A, Motif::Lock, 48000, 1).unwrap();
+        let mix = crate::lock_sound::mix_filter(player.chime_dir(), LockSound::A, Motif::Lock, 48000, 1, crate::lock_sound::LockVolume::Two).unwrap();
         player.set_audio_filters(&mix).await.expect("mpv accepts the mix of the chime file");
         let af = player.ipc.command(&[json!("get_property"), json!("af")]).await.unwrap();
         assert_eq!(af.as_array().map(Vec::len), Some(1), "{af}");
         player.set_audio_filters("").await.unwrap();
 
         let uri = crate::lock_sound::idle_uri(player.chime_dir(), LockSound::A, Motif::Lock).unwrap();
-        player.play_aside(&uri).await.expect("mpv loads the chime file");
+        player.play_aside(&uri, None).await.expect("mpv loads the chime file");
     }
 
     /// mpv answers `null` on `time-pos` when nothing is loaded, and an
@@ -3725,7 +3731,7 @@ pub(crate) mod tests {
             seen
         });
         let uri = "av://lavfi:aevalsrc=exprs='sin(2*PI*440*t)':s=48000:d=0.5";
-        player.play_aside(uri).await.unwrap();
+        player.play_aside(uri, None).await.unwrap();
         drop(player);
         let seen = server.await.unwrap();
         assert_eq!(seen.len(), 1, "{seen:?}");
@@ -3751,7 +3757,7 @@ pub(crate) mod tests {
             let resp = json!({"request_id": req["request_id"], "error": "error running command"});
             w.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
         };
-        let (res, ()) = tokio::join!(player.play_aside("av://lavfi:anullsrc"), answer);
+        let (res, ()) = tokio::join!(player.play_aside("av://lavfi:anullsrc", None), answer);
         assert!(res.is_err());
         w.write_all(b"{\"event\":\"start-file\",\"playlist_entry_id\":1}\n").await.unwrap();
         let ev = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await;
@@ -3835,7 +3841,7 @@ pub(crate) mod tests {
         player.ipc.command(&[json!("set_property"), json!("pause"), json!(true)]).await.unwrap();
 
         let uri = crate::lock_sound::idle_uri(player.chime_dir(), crate::lock_sound::LockSound::A, crate::lock_sound::Motif::Lock).unwrap();
-        player.play_aside(&uri).await.unwrap();
+        player.play_aside(&uri, None).await.unwrap();
         // 0.74 s of s16 mono at 48 kHz, and mpv back to idle.
         let expected_bytes = 2 * 35_520;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -3893,7 +3899,7 @@ pub(crate) mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
         let uri = crate::lock_sound::idle_uri(player.chime_dir(), crate::lock_sound::LockSound::A, crate::lock_sound::Motif::Lock).unwrap();
-        player.play_aside(&uri).await.unwrap();
+        player.play_aside(&uri, None).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         let idle = player.ipc.command(&[json!("get_property"), json!("idle-active")]).await.unwrap();
         assert_eq!(idle, json!(false), "the chime is still sounding, or the test proves nothing");
@@ -3952,7 +3958,7 @@ pub(crate) mod tests {
     /// later seek of the user's reaches the core again.
     #[tokio::test]
     async fn a_paused_chime_on_a_real_mpv_reaches_no_one() {
-        use crate::lock_sound::{mix_filter_over_silence, LockSound, Motif};
+        use crate::lock_sound::{mix_filter_over_silence, LockSound, LockVolume, Motif};
         use crate::player::{ChimeRoute, Player};
         if mpv_missing() || std::process::Command::new("ffmpeg").arg("-version").output().is_err() {
             eprintln!("mpv or ffmpeg missing: skipping test");
@@ -4001,7 +4007,7 @@ pub(crate) mod tests {
         assert_eq!(at_pause.position_s, Some(t));
         assert!((0.5..3.0).contains(&t), "{t}");
 
-        let chain = mix_filter_over_silence(player.chime_dir(), LockSound::A, Motif::Lock, 48000, 2).unwrap();
+        let chain = mix_filter_over_silence(player.chime_dir(), LockSound::A, Motif::Lock, 48000, 2, LockVolume::Two).unwrap();
         player.sound_while_paused(&chain, Some(t)).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(600)).await;
         let real = number_or_none(player.ipc.command(&[json!("get_property"), json!("time-pos")]).await).unwrap();

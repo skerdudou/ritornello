@@ -185,10 +185,16 @@ function openEnlarged() {
 const overlayEl = ref<HTMLElement | null>(null)
 const enlargedImg = ref<HTMLImageElement | null>(null)
 /**
+ * The margin the overlay keeps around the picture (its `p-4`, 16 px). Read
+ * as the viewport's inset: `clientWidth` includes the padding, and the pan
+ * limit must stop the picture at the inner edge, not at the screen's.
+ */
+const ZOOM_MARGIN_PX = 16
+/**
  * The sizes the zoom arithmetic needs, read at the moment of each gesture.
  * The image's box is its laid-out size at ×1 (`offsetWidth` ignores the CSS
- * transform), the viewport the overlay's inner area. Zero when absent, which
- * the arithmetic treats as "nothing to pan".
+ * transform), the viewport the overlay's inner area, padding excluded. Zero
+ * when absent, which the arithmetic treats as "nothing to pan".
  */
 function measure(): ZoomMeasure {
   const img = enlargedImg.value
@@ -196,7 +202,10 @@ function measure(): ZoomMeasure {
   const rect = el?.getBoundingClientRect()
   return {
     box: { width: img?.offsetWidth ?? 0, height: img?.offsetHeight ?? 0 },
-    viewport: { width: el?.clientWidth ?? 0, height: el?.clientHeight ?? 0 },
+    viewport: {
+      width: Math.max(0, (el?.clientWidth ?? 0) - 2 * ZOOM_MARGIN_PX),
+      height: Math.max(0, (el?.clientHeight ?? 0) - 2 * ZOOM_MARGIN_PX),
+    },
     center: rect ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } : { x: 0, y: 0 },
   }
 }
@@ -510,7 +519,7 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
       <div
         v-if="enlarged"
         ref="overlayEl"
-        class="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-black/80"
+        class="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-black/80 p-4"
         :class="zoom.view.value.scale > 1 ? 'cursor-grab' : 'cursor-zoom-out'"
         :style="{ touchAction: 'none' }"
         role="dialog"
@@ -526,11 +535,11 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
         @wheel="zoom.onWheel"
       >
         <!-- `object-contain` and not `object-cover`: enlarging is precisely
-             for seeing the whole cover, a crop would betray it. The overlay has
-             no padding: at ×1 the picture is fitted to the whole screen, so
-             the only blank left is the letterbox of its own proportions, and
-             zooming in spends none of a margin. No transition while fingers
-             are down: the image must follow them, not lag. -->
+             for seeing the whole cover, a crop would betray it. The overlay
+             keeps its `p-4` margin at every scale: `measure` reads the viewport
+             inside it, so a panned picture stops at that margin and never
+             sticks to the screen's edge. No transition while fingers are down:
+             the image must follow them, not lag. -->
         <img
           ref="enlargedImg"
           :src="state?.cover_href ?? ''"

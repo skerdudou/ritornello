@@ -84,7 +84,7 @@ impl<P: Player> Core<P> {
         let text = self.catalog.read().await.get(key).to_string();
         self.show_message(text);
         let motif = if locked { crate::lock_sound::Motif::Lock } else { crate::lock_sound::Motif::Unlock };
-        self.play_lock_sound(self.settings.lock_sound, motif).await;
+        self.play_lock_sound(self.settings.lock_sound, motif, self.settings.lock_sound_volume).await;
     }
 
     /// A key refused by a locked remote: the LOCKED message again, so the key
