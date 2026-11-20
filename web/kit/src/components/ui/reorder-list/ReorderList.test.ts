@@ -82,6 +82,30 @@ describe('ReorderList', () => {
     expect(vi.mocked(useDraggable).mock.calls[0]).toHaveLength(2)
   })
 
+  it('a finger must hold the handle still for 0.4 s before a drag starts; a mouse needs no hold', () => {
+    // Without the hold, a thumb that lands on the handle to scroll the page
+    // moved a row instead (the handle refuses to scroll: `touch-none`).
+    mountList()
+    expect(opts).toMatchObject({ delay: 400, delayOnTouchOnly: true, touchStartThreshold: 5 })
+  })
+
+  it('says a row is grabbed: a short vibration where the device has one, and a highlight', () => {
+    const vibrate = vi.fn()
+    Object.defineProperty(navigator, 'vibrate', { value: vibrate, configurable: true })
+    try {
+      const w = mountList()
+      opts.onChoose({ item: li(w, 'a') })
+      expect(vibrate).toHaveBeenCalledTimes(1)
+      expect(vibrate.mock.calls[0]![0]).toBeGreaterThan(0)
+      expect((w.element as HTMLElement).className).toContain('[&_.reorder-chosen]:bg-accent')
+    } finally {
+      delete (navigator as any).vibrate
+    }
+    // No vibration API (desktop browsers, iOS Safari): grabbing still works.
+    const w = mountList()
+    expect(() => opts.onChoose({ item: li(w, 'b') })).not.toThrow()
+  })
+
   it('follows disabled', async () => {
     const w = mountList({ disabled: true })
     expect(opts.disabled).toBe(true)
