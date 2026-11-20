@@ -147,13 +147,13 @@ impl<P: Player> Core<P> {
         };
         match route {
             ChimeRoute::Idle => {
-                let Some(uri) = crate::lock_sound::idle_uri(sound, motif) else { return };
+                let Some(uri) = crate::lock_sound::idle_uri(self.player.chime_dir(), sound, motif) else { return };
                 if let Err(e) = self.player.play_aside(&uri).await {
                     tracing::warn!("lock sound while idle: {e}");
                 }
             }
             ChimeRoute::Live { sample_rate, channels } => {
-                let Some(filter) = crate::lock_sound::mix_filter(sound, motif, sample_rate, channels) else { return };
+                let Some(filter) = crate::lock_sound::mix_filter(self.player.chime_dir(), sound, motif, sample_rate, channels) else { return };
                 match self.write_held_chain(Some(&filter)).await {
                     Ok(chain) => {
                         let until = Instant::now() + crate::lock_sound::duration(sound, motif) + REMOVAL_MARGIN;
@@ -195,7 +195,7 @@ impl<P: Player> Core<P> {
         channels: u32,
         resume_at: Option<f64>,
     ) {
-        let Some(filter) = crate::lock_sound::mix_filter_over_silence(sound, motif, sample_rate, channels) else {
+        let Some(filter) = crate::lock_sound::mix_filter_over_silence(self.player.chime_dir(), sound, motif, sample_rate, channels) else {
             return;
         };
         let chain = super::equalizer::with_extra(&plain, Some(&filter));
@@ -302,6 +302,12 @@ mod tests {
     use crate::core::test_support::*;
     use crate::equalizer::{af_chain, EqualizerSettings};
     use crate::lock_sound::{duration, idle_uri, mix_filter, mix_filter_over_silence};
+    use std::path::Path;
+
+    /// The directory of the chime files, as `FakePlayer` names it.
+    fn files() -> &'static Path {
+        Path::new(CHIME_DIR)
+    }
     use ritornello_proto::Playback;
     use std::sync::atomic::Ordering;
     use std::sync::Mutex;
@@ -311,7 +317,7 @@ mod tests {
     }
 
     fn aside(sound: LockSound, motif: Motif) -> String {
-        format!("aside {}", idle_uri(sound, motif).unwrap())
+        format!("aside {}", idle_uri(files(), sound, motif).unwrap())
     }
 
     fn chime_calls(calls: &Mutex<Vec<String>>) -> Vec<String> {
@@ -434,7 +440,7 @@ mod tests {
         let before = Instant::now();
         core.handle_command(Command::SetInputLock(true)).await.unwrap();
         let after = Instant::now();
-        let filter = mix_filter(LockSound::A, Motif::Lock, 48000, 2).unwrap();
+        let filter = mix_filter(files(), LockSound::A, Motif::Lock, 48000, 2).unwrap();
         assert_eq!(chime_calls(&pc), vec![format!("af {},{filter}", af_chain(&eq))]);
 
         let length = duration(LockSound::A, Motif::Lock);
@@ -476,7 +482,7 @@ mod tests {
         pc.lock().unwrap().clear();
 
         core.handle_command(Command::SetInputLock(true)).await.unwrap();
-        let filter = mix_filter(LockSound::A, Motif::Lock, 48000, 2).unwrap();
+        let filter = mix_filter(files(), LockSound::A, Motif::Lock, 48000, 2).unwrap();
         assert_eq!(chime_calls(&pc), vec![format!("af {},{filter}", af_chain(&eq))], "mixed into the chain mpv holds");
 
         pc.lock().unwrap().clear();
@@ -497,7 +503,7 @@ mod tests {
     async fn with_the_equalizer_off_the_chime_is_the_whole_chain() {
         let (mut core, pc, _sc, _rx, _d) = playing_with(EqualizerSettings::default());
         core.handle_command(Command::SetInputLock(true)).await.unwrap();
-        let filter = mix_filter(LockSound::A, Motif::Lock, 48000, 2).unwrap();
+        let filter = mix_filter(files(), LockSound::A, Motif::Lock, 48000, 2).unwrap();
         assert_eq!(chime_calls(&pc), vec![format!("af {filter}")]);
         pc.lock().unwrap().clear();
         core.expire_lock_sound().await;
@@ -513,8 +519,8 @@ mod tests {
         core.handle_command(Command::SetInputLock(false)).await.unwrap();
         let second = core.lock_sound_deadline().unwrap();
         assert!(second >= first, "the deadline is the second chime's");
-        let lock = mix_filter(LockSound::A, Motif::Lock, 48000, 2).unwrap();
-        let unlock = mix_filter(LockSound::A, Motif::Unlock, 48000, 2).unwrap();
+        let lock = mix_filter(files(), LockSound::A, Motif::Lock, 48000, 2).unwrap();
+        let unlock = mix_filter(files(), LockSound::A, Motif::Unlock, 48000, 2).unwrap();
         assert_eq!(
             chime_calls(&pc),
             vec![format!("af {},{lock}", af_chain(&eq)), format!("af {},{unlock}", af_chain(&eq))],
@@ -592,7 +598,7 @@ mod tests {
     const PAUSED: ChimeRoute = ChimeRoute::Paused { sample_rate: 48000, channels: 2, resume_at: Some(AT) };
 
     fn paused_chime(plain: &str, motif: Motif, resume_at: Option<f64>) -> String {
-        let mix = mix_filter_over_silence(LockSound::A, motif, 48000, 2).unwrap();
+        let mix = mix_filter_over_silence(files(), LockSound::A, motif, 48000, 2).unwrap();
         let chain = if plain.is_empty() { mix } else { format!("{plain},{mix}") };
         format!("paused-chime {chain} {resume_at:?}")
     }

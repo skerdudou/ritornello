@@ -3513,6 +3513,9 @@ mod toggle_tests {
 
     #[async_trait::async_trait]
     impl crate::player::Player for MutePlayer {
+        fn chime_dir(&self) -> &std::path::Path {
+            std::path::Path::new("/nonexistent/lock-sounds")
+        }
         async fn play(&self, _uri: &str) -> Result<()> {
             Ok(())
         }
