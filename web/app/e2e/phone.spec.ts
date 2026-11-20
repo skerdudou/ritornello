@@ -386,6 +386,37 @@ const onHandle = (page: Page, p: { x: number; y: number }, selector: string) =>
     [p.x, p.y, selector] as const,
   )
 
+/** Longer than the 0.4 s a finger must hold a reorder handle before it grabs. */
+const GRAB_MS = 500
+
+test('on a phone: a quick swipe that starts on a handle moves no row', async ({ page, request }) => {
+  // The owner's complaint: a thumb that landed on the ⠿ column to scroll the
+  // page dragged a row along. Without the long press, a swipe across the next
+  // row from the handle must leave the order alone.
+  const order = pluginOrder(request)
+  await page.goto('/config')
+  const before = await order()
+  const at = before.indexOf('radio')
+  const next = before[at + 1]
+  expect(at).toBeGreaterThanOrEqual(0)
+  expect(next).toBeDefined()
+  const handle = pluginRow(page, 'radio').locator('[data-plugin-drag-handle]')
+  await expect(handle).toBeVisible()
+  await settledHeight(page)
+  await placeRow(page, 'radio', page.viewportSize()!.height / 2 - 60)
+
+  try {
+    const from = centre((await handle.boundingBox())!)
+    expect(await onHandle(page, from, '[data-plugin-drag-handle]')).toBe(true)
+    const target = (await pluginRow(page, next!).boundingBox())!
+    await touchDrag(page, from, { x: from.x, y: target.y + target.height * 0.75 })
+    await page.waitForTimeout(500) // a move, had one started, would be on its way
+    expect(await order()).toEqual(before)
+  } finally {
+    await restoreOrder(request, before, page)
+  }
+})
+
 test('on a phone: a plugin is reordered by its handle with a finger', async ({ page, request }) => {
   const order = pluginOrder(request)
   await page.goto('/config')
@@ -404,7 +435,7 @@ test('on a phone: a plugin is reordered by its handle with a finger', async ({ p
     const from = centre((await handle.boundingBox())!)
     expect(await onHandle(page, from, '[data-plugin-drag-handle]')).toBe(true)
     const target = (await pluginRow(page, next!).boundingBox())!
-    await touchDrag(page, from, { x: from.x, y: target.y + target.height * 0.75 })
+    await touchDrag(page, from, { x: from.x, y: target.y + target.height * 0.75 }, { pressMs: GRAB_MS })
     await expect.poll(order).not.toEqual(before)
     const afterMove = await order()
     expect(afterMove.indexOf('radio')).toBe(at + 1)
@@ -417,7 +448,7 @@ test('on a phone: a plugin is reordered by its handle with a finger', async ({ p
     const back = centre((await handle.boundingBox())!)
     expect(await onHandle(page, back, '[data-plugin-drag-handle]')).toBe(true)
     const above = (await pluginRow(page, next!).boundingBox())!
-    await touchDrag(page, back, { x: back.x, y: above.y + above.height * 0.25 })
+    await touchDrag(page, back, { x: back.x, y: above.y + above.height * 0.25 }, { pressMs: GRAB_MS })
     await expect.poll(order).toEqual(before)
   } finally {
     await restoreOrder(request, before, page)
@@ -447,7 +478,7 @@ test('on a phone: a swipe on a row scrolls; the handle does not', async ({ page,
     expect(await order()).toEqual(before)
 
     // The same finger on the handle, 40 px down and still inside its own
-    // row: a drag that goes nowhere, and the page stays where it is. Downward
+    // row, without the long press: no grab, and the page stays where it is. Downward
     // would scroll the page up, so there must be room above for that to show.
     await page.waitForTimeout(300) // the swipe's momentum, if any, ends
     const handle = centre((await row.locator('[data-plugin-drag-handle]').boundingBox())!)
@@ -496,7 +527,7 @@ test('on a phone: holding a dragged row near the edge scrolls the page', async (
     // Sortable's default 30 px — so this fails if that tuning is lost.
     const to = { x: from.x, y: down ? viewport.height - 90 : 90 }
     const start = await scrollY(page)
-    await touchDrag(page, from, to, { holdMs: 600 })
+    await touchDrag(page, from, to, { holdMs: 600, pressMs: GRAB_MS })
     const moved = (await scrollY(page)) - start
     // The drop reorders too (the row went past others). No wait here for
     // its answer: an unlocked handle may only mean the lock has not rendered
