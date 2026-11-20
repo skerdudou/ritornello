@@ -2,7 +2,7 @@
 //!
 //! **One video at a time**, so that one failure never stops a playlist. The
 //! command is `<bin> -f <selector> --no-playlist --downloader native
-//! --hls-prefer-native --ffmpeg-location /dev/null/ffmpeg --newline
+//! --hls-prefer-native --ffmpeg-location /dev/null/ffmpeg --write-info-json --newline
 //! --progress-template ... -o <template> -- <address>`: `bin` is the wrapper
 //! that already carries the configuration flags. The address is the video's
 //! [`Video::play_url`]: YouTube's rebuilt `watch` URL, another site's address
@@ -440,6 +440,9 @@ pub fn download_args(dir: &Path, stem: &str, url: &str, format: Format) -> Vec<S
         "--hls-prefer-native",
         "--ffmpeg-location",
         NO_FFMPEG,
+        // The site's own description of the video, written beside the file
+        // (`<stem>.info.json`): read for the tags, then removed. Local only.
+        "--write-info-json",
         "--newline",
         "--progress-template",
         "download:%(progress._percent_str)s %(info.id)s",
@@ -450,6 +453,83 @@ pub fn download_args(dir: &Path, stem: &str, url: &str, format: Format) -> Vec<S
     ]
     .map(str::to_string)
     .to_vec()
+}
+
+// ---- the tags --------------------------------------------------------------
+
+/// The tags of a downloaded track, taken from what the site said of it (the
+/// `info.json` yt-dlp wrote beside the file). A field the site does not give
+/// stays empty: nothing is invented, and an album or a track number is only
+/// written when the site has one (the auto-generated music channels do, the
+/// children's videos do not).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Tags {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub track: Option<u32>,
+    pub description: Option<String>,
+    /// The video's own address, as the site gives it (`webpage_url`).
+    pub url: Option<String>,
+}
+
+/// The tags an `info.json` describes. The artist is the site's `artist` or
+/// `creator` when it has one, else the uploader's name (the channel), which is
+/// what the operator sees as the author of a children's video.
+pub fn tags_from_info(info: &serde_json::Value) -> Tags {
+    let text = |key: &str| {
+        info.get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    Tags {
+        title: text("title"),
+        artist: text("artist").or_else(|| text("creator")).or_else(|| text("uploader")).or_else(|| text("channel")),
+        album: text("album"),
+        track: info.get("track_number").and_then(serde_json::Value::as_u64).and_then(|n| u32::try_from(n).ok()),
+        description: text("description"),
+        url: text("webpage_url"),
+    }
+}
+
+/// Writes `tags` into the audio file at `path`, in place. Only what is set is
+/// written; a container the tags cannot go into is refused before anything is
+/// read, as for [`embed_cover`].
+pub fn write_tags(path: &Path, tags: &Tags) -> Result<(), String> {
+    use lofty::config::WriteOptions;
+    use lofty::file::{AudioFile, FileType, TaggedFileExt};
+    use lofty::tag::{ItemKey, Tag};
+    let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    if !EMBEDDABLE.contains(&ext.as_str()) {
+        return Err(format!("no tags are written into a .{ext} file"));
+    }
+    let mut file = lofty::read_from_path(path).map_err(|e| e.to_string())?;
+    if !matches!(file.file_type(), FileType::Mp4 | FileType::Mpeg | FileType::Opus | FileType::Vorbis) {
+        return Err(format!("{:?} takes no tags here", file.file_type()));
+    }
+    let tag_type = file.primary_tag_type();
+    if file.tag(tag_type).is_none() {
+        file.insert_tag(Tag::new(tag_type));
+    }
+    let tag = file.tag_mut(tag_type).ok_or("the tag could not be made")?;
+    let mut put = |key: ItemKey, value: &Option<String>| {
+        if let Some(v) = value {
+            tag.insert_text(key, v.clone());
+        }
+    };
+    put(ItemKey::TrackTitle, &tags.title);
+    put(ItemKey::TrackArtist, &tags.artist);
+    put(ItemKey::AlbumTitle, &tags.album);
+    put(ItemKey::Description, &tags.description);
+    // `PodcastUrl` is the MP4 `purl` atom, the one yt-dlp itself writes for a
+    // video's address; other containers may not have a slot for it.
+    put(ItemKey::PodcastUrl, &tags.url);
+    if let Some(n) = tags.track {
+        tag.insert_text(ItemKey::TrackNumber, n.to_string());
+    }
+    file.save_to_path(path, WriteOptions::default()).map_err(|e| e.to_string())
 }
 
 // ---- the plan --------------------------------------------------------------
@@ -1087,10 +1167,44 @@ async fn finish_video(
             }
         }
     }
+    tag_track(ctx, dir, stem, &ext).await;
     for n in place_track_cover(ctx, dir, stem, &ext, choices.cover, cover).await {
         sink(Event::Noted(i, n));
     }
     Ok(())
+}
+
+/// Writes the tags of a finished track from the `info.json` yt-dlp left beside
+/// it, then removes that file: the json is the plugin's, the track is the
+/// operator's. Nothing is written when the site gave nothing, and a failure is
+/// logged: the track is kept as it is.
+async fn tag_track(ctx: &Ctx, dir: &Path, stem: &str, ext: &str) {
+    let info_path = dir.join(format!("{stem}.info.json"));
+    let read = blocking(ctx.limits.fs, move || {
+        let bytes = std::fs::read(&info_path);
+        let _ = std::fs::remove_file(&info_path);
+        bytes
+    })
+    .await;
+    let bytes = match read {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::debug!("no info.json for {stem}: {e:?}");
+            return;
+        }
+    };
+    let Ok(info) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        tracing::warn!("info.json of {stem} is not JSON: no tags written");
+        return;
+    };
+    let tags = tags_from_info(&info);
+    if tags == Tags::default() {
+        return;
+    }
+    let track = dir.join(format!("{stem}.{ext}"));
+    if let Err(e) = blocking(ctx.limits.embed, move || write_tags(&track, &tags).map_err(std::io::Error::other)).await {
+        tracing::warn!("tags not written into {stem}.{ext}: {e:?}");
+    }
 }
 
 /// Downloads one preset (one video, or every available one of a playlist).

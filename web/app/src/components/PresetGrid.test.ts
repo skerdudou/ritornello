@@ -421,3 +421,100 @@ describe('swipe', () => {
     expect(w.get('[data-preset-grid]').attributes('style') ?? '').not.toContain('touch-action')
   })
 })
+
+describe('drag', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    localStorage.clear()
+  })
+
+  const touch = (type: string, x: number, y: number) =>
+    new PointerEvent(type, { bubbles: true, isPrimary: true, pointerId: 1, pointerType: 'touch', clientX: x, clientY: y })
+  // The settle lasts SETTLE_MS (200): run the timers past it, then render.
+  async function settle() {
+    vi.advanceTimersByTime(250)
+    await nextTick()
+  }
+
+  it('a horizontal move shows the current page beside its neighbours', async () => {
+    const w = mounted({ preset_count: 23 })
+    const grid = w.get('[data-preset-grid]').element
+    expect(w.findAll('[data-preset-panel]')).toHaveLength(1)
+    grid.dispatchEvent(touch('pointerdown', 200, 100))
+    grid.dispatchEvent(touch('pointermove', 150, 102))
+    await nextTick()
+    // Three panels: a previous page (empty on the first), this one, the next.
+    expect(w.findAll('[data-preset-panel]')).toHaveLength(3)
+    expect(w.get('[data-preset-track]').attributes('style')).toContain('width: 300%')
+    expect(w.findAll('[data-preset-button]')).toHaveLength(20)
+  })
+
+  it('a move under the swipe ratio does not start a drag', async () => {
+    const w = mounted({ preset_count: 23 })
+    const grid = w.get('[data-preset-grid]').element
+    grid.dispatchEvent(touch('pointerdown', 200, 100))
+    grid.dispatchEvent(touch('pointermove', 185, 140))
+    await nextTick()
+    expect(w.findAll('[data-preset-panel]')).toHaveLength(1)
+  })
+
+  it('a release past the commit distance turns the page once the settle is done', async () => {
+    vi.useFakeTimers()
+    const w = mounted({ preset_count: 23 })
+    const grid = w.get('[data-preset-grid]').element
+    grid.dispatchEvent(touch('pointerdown', 200, 100))
+    grid.dispatchEvent(touch('pointermove', 140, 101))
+    grid.dispatchEvent(touch('pointerup', 140, 101))
+    await nextTick()
+    // Still on page 1 while the track settles onto the next one.
+    expect(w.get('[data-preset-window]').text()).toBe('1–10 of 23')
+    expect(w.get('[data-preset-track]').attributes('style')).toContain('width: 300%')
+    await settle()
+    expect(w.get('[data-preset-window]').text()).toBe('11–20 of 23')
+    expect(w.findAll('[data-preset-panel]')).toHaveLength(1)
+  })
+
+  it('a release short of the commit distance springs back to the same page', async () => {
+    vi.useFakeTimers()
+    // A card 400 px wide commits past 100 px: a 60 px swipe is not enough.
+    const proto = Element.prototype
+    const original = Object.getOwnPropertyDescriptor(proto, 'clientWidth')
+    Object.defineProperty(proto, 'clientWidth', { configurable: true, get: () => 400 })
+    try {
+      const w = mounted({ preset_count: 23 })
+      const grid = w.get('[data-preset-grid]').element
+      grid.dispatchEvent(touch('pointerdown', 200, 100))
+      grid.dispatchEvent(touch('pointermove', 140, 101))
+      grid.dispatchEvent(touch('pointerup', 140, 101))
+      await settle()
+      expect(w.get('[data-preset-window]').text()).toBe('1–10 of 23')
+      expect(w.findAll('[data-preset-panel]')).toHaveLength(1)
+    } finally {
+      if (original) Object.defineProperty(proto, 'clientWidth', original)
+      else delete (proto as unknown as Record<string, unknown>).clientWidth
+    }
+  })
+
+  it('a drag towards a page that does not exist stays on the page', async () => {
+    vi.useFakeTimers()
+    const w = mounted({ preset_count: 23 })
+    const grid = w.get('[data-preset-grid]').element
+    grid.dispatchEvent(touch('pointerdown', 100, 100))
+    grid.dispatchEvent(touch('pointermove', 200, 100))
+    grid.dispatchEvent(touch('pointerup', 200, 100))
+    await settle()
+    expect(w.get('[data-preset-window]').text()).toBe('1–10 of 23')
+  })
+
+  it('a cancelled drag springs back and turns nothing', async () => {
+    vi.useFakeTimers()
+    const w = mounted({ preset_count: 23 })
+    const grid = w.get('[data-preset-grid]').element
+    grid.dispatchEvent(touch('pointerdown', 200, 100))
+    grid.dispatchEvent(touch('pointermove', 100, 100))
+    grid.dispatchEvent(touch('pointercancel', 100, 100))
+    await settle()
+    expect(w.get('[data-preset-window]').text()).toBe('1–10 of 23')
+    expect(w.findAll('[data-preset-panel]')).toHaveLength(1)
+  })
+})

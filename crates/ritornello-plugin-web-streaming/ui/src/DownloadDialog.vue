@@ -232,7 +232,7 @@ function formatLabel(f: Format): string {
       <!-- Step 1: where. The share, then one framed browser — the path on
            top, the folders, and the new folder at its foot — so that what
            is being browsed reads as one block, apart from everything else. -->
-      <div v-if="step === 'where'" class="max-h-[65vh] space-y-4 overflow-y-auto" data-step-where>
+      <div v-if="step === 'where'" class="min-w-0 max-h-[65vh] space-y-4 overflow-y-auto" data-step-where>
         <section class="space-y-2">
           <h3 class="text-sm font-medium">{{ t('share_label') }}</h3>
           <div class="flex flex-wrap gap-2">
@@ -309,7 +309,7 @@ function formatLabel(f: Format): string {
       <!-- Step 2: how. The destination stays in sight, one click from being
            changed; each choice has its label above its buttons, which share
            the width equally instead of wrapping one by one. -->
-      <div v-else class="max-h-[65vh] space-y-4 overflow-y-auto" data-step-options>
+      <div v-else class="min-w-0 max-h-[65vh] space-y-4 overflow-y-auto" data-step-options>
         <div class="flex items-center gap-2 rounded-md border bg-muted/50 px-3 py-2 text-sm">
           <span class="text-muted-foreground">{{ t('destination_label') }}</span>
           <span class="min-w-0 flex-1 truncate font-medium" data-destination :title="targetText(current)">
@@ -318,7 +318,7 @@ function formatLabel(f: Format): string {
           <Button variant="ghost" size="sm" data-change-target @click="step = 'where'">{{ t('btn_change') }}</Button>
         </div>
 
-        <section class="space-y-2">
+        <section class="min-w-0 space-y-2">
           <h3 class="text-sm font-medium">{{ t('format_label') }}</h3>
           <div class="grid grid-cols-3 gap-2">
             <Button
@@ -341,7 +341,7 @@ function formatLabel(f: Format): string {
           </p>
         </section>
 
-        <section class="space-y-2" data-cover-choice>
+        <section class="min-w-0 space-y-2" data-cover-choice>
           <h3 class="text-sm font-medium">{{ t('cover_label') }}</h3>
           <!-- Three choices are stacked: side by side their labels would not fit. -->
           <div class="grid gap-2" :class="covers.length > 2 ? 'grid-cols-1' : 'grid-cols-2'" data-cover-choices>
@@ -366,7 +366,7 @@ function formatLabel(f: Format): string {
           </p>
         </section>
 
-        <section v-if="items.length" class="space-y-2">
+        <section v-if="items.length" class="min-w-0 space-y-2">
           <h3 class="text-sm font-medium">{{ t('names_label') }}</h3>
           <div v-for="i in items" :key="i.preset" class="space-y-1 text-sm">
             <label class="block space-y-1">
@@ -379,7 +379,7 @@ function formatLabel(f: Format): string {
               />
             </label>
             <!-- A single video only: a playlist is never cut. -->
-            <div v-if="i.kind === 'video' && cuts[String(i.preset)]" class="flex flex-wrap items-center gap-2" :data-trim="i.preset">
+            <div v-if="i.kind === 'video' && cuts[String(i.preset)]" class="flex min-w-0 flex-wrap items-center gap-2" :data-trim="i.preset">
               <span class="shrink-0 text-muted-foreground">{{ t('trim_from') }}</span>
               <Input
                 v-model="cuts[String(i.preset)]!.start"
@@ -417,7 +417,7 @@ function formatLabel(f: Format): string {
         </section>
       </div>
 
-      <div class="flex justify-end gap-2">
+      <div class="flex min-w-0 flex-wrap justify-end gap-2">
         <template v-if="step === 'where'">
           <Button variant="ghost" data-cancel @click="emit('update:open', false)">{{ t('btn_cancel') }}</Button>
           <Button data-next :disabled="!root" @click="step = 'options'">{{ t('btn_next') }}</Button>
