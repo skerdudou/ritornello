@@ -1,0 +1,90 @@
+name: Installer (macOS, manual)
+
+# The two macOS archives of the workstation installer, built by hand.
+#
+# macOS runners are too often unavailable to gate a merge, so the CI no longer
+# builds them (see the note in `ci.yml`). This workflow runs only when someone
+# starts it, on the ref it is given. It builds both archives exactly as the CI
+# packages the others, keeps them as artifacts, and, when a release tag is
+# given, attaches them to that release (replacing any older copy of the same
+# name). Nothing else reads these archives.
+#
+# Naming and packaging are the CI's: `ritornello-install-<target>.tar.gz`,
+# with no version in the name, so the README's links keep working.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Release tag to attach the archives to (for example installer or installer-v0.5.1). Empty: artifacts only.
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            test: true
+          # Built on the Apple Silicon runner for the Intel Macs; its tests are
+          # not run, the leg above passes the same suite from the same sources.
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            test: false
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo clippy -p ritornello-install --target ${{ matrix.target }} --all-targets -- -D warnings
+      - if: matrix.test
+        run: cargo test -p ritornello-install --target ${{ matrix.target }}
+      - run: cargo build --release -p ritornello-install --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          name="ritornello-install-$TARGET"
+          mkdir out
+          cd "target/$TARGET/release"
+          tar czf "../../../out/$name.tar.gz" ritornello-install
+          ls -l ../../../out
+      - uses: actions/upload-artifact@v7
+        with:
+          name: installer-${{ matrix.target }}
+          if-no-files-found: error
+          path: out
+
+  attach:
+    name: Attach to the release
+    if: inputs.release != ''
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.release }}
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: installer-*
+          path: dist
+          merge-multiple: true
+      - name: Upload the archives
+        run: |
+          ls -l dist
+          gh release upload "$TAG" dist/*.tar.gz --clobber
