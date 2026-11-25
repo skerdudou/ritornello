@@ -1,5 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { nextTick } from 'vue'
+import { nextTick, reactive } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { resetCatalog, useCatalog } from '../composables/useCatalog'
 import type { ComponentOffer, Fit, SettingsPayload, UpdatePayload } from '../types'
@@ -152,8 +152,12 @@ function settings(over: Partial<SettingsPayload> = {}): SettingsPayload {
   }
 }
 
+// `settings` is reactive because the page's is: the card writes into it in
+// place (the update hour's v-model). @vue/test-utils 2.6 stopped making a
+// plain object prop deeply reactive, so a plain one here left the typed hour
+// unrendered ("follows the hour being typed" failed on the bump).
 function mountCard(update: UpdatePayload, over: Partial<SettingsPayload> = {}) {
-  return mount(UpdateCard, { props: { update, settings: settings(over) } })
+  return mount(UpdateCard, { props: { update, settings: reactive(settings(over)) } })
 }
 
 describe('UpdateCard', () => {
