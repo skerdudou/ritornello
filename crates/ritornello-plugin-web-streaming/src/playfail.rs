@@ -43,6 +43,16 @@ impl PlaybackFailure {
         serde_json::from_str(&text).ok()
     }
 
+    /// Forgets the last failure, at the operator's request from the page:
+    /// the file goes, and the next failed run writes a new one. Already
+    /// gone is not an error.
+    pub fn clear(data_dir: &Path) -> std::io::Result<()> {
+        match std::fs::remove_file(data_dir.join(FILE)) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        }
+    }
+
     /// The catalogue key saying this failure, one per code; a code this
     /// version does not know (a wrapper written by a newer plugin) reads as
     /// yt-dlp's own failure.
@@ -92,5 +102,16 @@ mod tests {
         assert_eq!((f.time, f.host.as_str(), f.detail.as_str()), (1730000000.5, "www.youtube.com", "ERROR: gone"));
         std::fs::write(dir.path().join(FILE), "nope").unwrap();
         assert_eq!(PlaybackFailure::load(dir.path()), None);
+    }
+
+    #[test]
+    fn clearing_forgets_the_record_and_twice_is_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(FILE), r#"{"time": 1.0, "code": "no_formats"}"#).unwrap();
+        assert!(PlaybackFailure::load(dir.path()).is_some());
+        PlaybackFailure::clear(dir.path()).unwrap();
+        assert_eq!(PlaybackFailure::load(dir.path()), None);
+        assert!(!dir.path().join(FILE).exists());
+        PlaybackFailure::clear(dir.path()).unwrap();
     }
 }
