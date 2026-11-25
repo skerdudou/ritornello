@@ -1243,10 +1243,16 @@ serde = \"1\" # path=x
         );
         // The macOS legs run on few events, but always on an installer tag:
         // skipped there, they would skip `publish-installer` with them, and
-        // the release would silently not happen.
+        // the release would silently not happen. The tag rule lives in the
+        // gate's script, whose self-test proves it ("installer tag"); this
+        // pins that the macOS job obeys that gate and the gate runs it.
         assert!(
-            code(ci_job("installer-macos")).contains("startsWith(github.ref, 'refs/tags/installer-v')"),
-            "the macOS legs do not run on an installer tag"
+            code(ci_job("installer-macos")).contains("if: ${{ needs.installer-macos-gate.outputs.run == 'true' }}"),
+            "the macOS legs do not follow their gate"
+        );
+        assert!(
+            code(ci_job("installer-macos-gate")).contains("bash ./scripts/installer-macos-needed.sh >> \"$GITHUB_OUTPUT\""),
+            "the macOS gate does not run the script whose self-test proves it"
         );
         assert!(
             job.contains("release-tags.sh check-installer-tag"),

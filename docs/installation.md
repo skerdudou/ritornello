@@ -1968,8 +1968,10 @@ proven on hardware. In particular:
 - it has never been launched from Windows or macOS, only from a Linux
   workstation (WSL). Since the `installer` job of `ci.yml`, it is
   **compiled and unit-tested** on Windows on every change, and on Apple
-  Silicon macOS only on stable and installer tags, so a macOS breakage can
-  stay unseen until the next stable release (the Intel macOS build is
+  Silicon macOS only when the installer's own crate changes or is tagged,
+  so a macOS breakage coming from a dependency can stay unseen until then,
+  and may first appear on the day an installer is to be published (the
+  Intel macOS build is
   compiled only; the tests that
   replay the device script for real run on Linux alone, since that script
   needs the GNU tools of the device, not the workstation's), but never run
