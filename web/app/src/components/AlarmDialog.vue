@@ -51,6 +51,7 @@ const hour = ref(0)
 const minute = ref<string | number>(0)
 const days = ref<Weekday[]>([])
 const target = ref(RESUME)
+const VOLUME_STEP = 5
 const volume = ref(0)
 const sleepOn = ref(false)
 const sleepMinutes = ref<string | number>(DEFAULT_SLEEP_AFTER_MIN)
@@ -62,7 +63,9 @@ function load() {
   minute.value = a.minute
   days.value = [...a.days]
   target.value = a.target.kind === 'source' ? SOURCE_PREFIX + a.target.name : RESUME
-  volume.value = a.volume
+  // The alarm volume moves by 5 %, as the player's slider does; a volume
+  // saved before that (37) is shown on the nearest step and saved there.
+  volume.value = Math.min(100, Math.round(a.volume / VOLUME_STEP) * VOLUME_STEP)
   sleepOn.value = a.sleep_after !== undefined
   sleepMinutes.value = a.sleep_after?.minutes ?? DEFAULT_SLEEP_AFTER_MIN
   sleepMode.value = a.sleep_after?.mode ?? 'fade'
@@ -210,7 +213,7 @@ function save() {
           <Slider
             data-alarm-volume
             :model-value="[volume]"
-            :min="0" :max="100" :step="1"
+            :min="0" :max="100" :step="VOLUME_STEP"
             :aria-label="t('volume')"
             @update:model-value="(v?: number[]) => { if (v && v[0] !== undefined) volume = v[0] }"
           />

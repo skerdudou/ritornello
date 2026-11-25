@@ -55,8 +55,16 @@ pub(super) struct FakePlayer {
     pub(super) paused_chime_end_fails: Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// The directory `FakePlayer` names for the chime files: the tests compare
+/// the strings the core builds from it, the files are never read.
+pub(super) const CHIME_DIR: &str = "/run/ritornello/lock-sounds";
+
 #[async_trait::async_trait]
 impl crate::player::Player for FakePlayer {
+    fn chime_dir(&self) -> &std::path::Path {
+        std::path::Path::new(CHIME_DIR)
+    }
+
     async fn play(&self, uri: &str) -> anyhow::Result<()> {
         self.calls.lock().unwrap().push(format!("play {uri}"));
         Ok(())
@@ -164,8 +172,11 @@ impl crate::player::Player for FakePlayer {
         }
         Ok(*self.route.lock().unwrap())
     }
-    async fn play_aside(&self, uri: &str) -> anyhow::Result<()> {
-        self.calls.lock().unwrap().push(format!("aside {uri}"));
+    async fn play_aside(&self, uri: &str, af: Option<&str>) -> anyhow::Result<()> {
+        // The file-local `af` is recorded only when there is one: the level-2
+        // load is the one the core tests always compared.
+        let af = af.map(|af| format!(" af={af}")).unwrap_or_default();
+        self.calls.lock().unwrap().push(format!("aside {uri}{af}"));
         Ok(())
     }
     async fn sound_while_paused(&self, chain: &str, resume_at: Option<f64>) -> anyhow::Result<()> {

@@ -130,10 +130,13 @@ pub trait Player: Send + Sync + 'static {
     /// parameters yet (loading), or when a paused seekable file ends sooner
     /// than `chime` + 1 s from where it stands.
     async fn chime_route(&self, chime: std::time::Duration) -> Result<ChimeRoute>;
+    /// The directory the lock chime files sit in (`lock_sound::write_files`),
+    /// which a chime's load or filter names.
+    fn chime_dir(&self) -> &std::path::Path;
     /// Loads a generated sound while mpv is idle; none of that load's events
     /// reach the core (mpv's `AsideGate`), so the core keeps believing
     /// nothing plays — which is the truth it acts on.
-    async fn play_aside(&self, uri: &str) -> Result<()>;
+    async fn play_aside(&self, uri: &str, af: Option<&str>) -> Result<()>;
     /// Starts a chime on a paused file (`ChimeRoute::Paused`): writes
     /// `chain` (the chain mpv holds with `lock_sound::mix_filter_over_silence`
     /// after it), puts the file back at `resume_at` when `Some` (a seek that

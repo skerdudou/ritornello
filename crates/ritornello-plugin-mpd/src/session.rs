@@ -14,13 +14,13 @@
 //! stays pure, and is tested without a socket.
 
 use crate::commands::{
-    cover_announced_but_missing, handle, Binary, Outcome, MAX_CHUNK,
+    cover_may_still_arrive, handle, Binary, Outcome, MAX_CHUNK,
     MAX_CHUNK_CAP,
 };
 use crate::state::{SharedState, Snapshot, Subsystem};
 use crate::protocol::{ack, split, line, Ack};
 use anyhow::Result;
-use ritornello_proto::InputMessage;
+use ritornello_proto::{Command, InputMessage};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -345,6 +345,10 @@ struct Connection {
     /// `commands::binarylimit`). `MAX_CHUNK` as long as it has asked for
     /// nothing — the protocol default.
     binary_limit: usize,
+    /// The raw value of this client's last `setvol`, `None` until it sends
+    /// one: what tells a slider being dragged from a button being pressed
+    /// (see `commands::snap_setvol`).
+    last_setvol: Option<u8>,
 }
 
 /// What the session must do after a batch of commands.
@@ -508,7 +512,7 @@ pub async fn serve(stream: TcpStream, state: Arc<SharedState>, cmd_tx: mpsc::Sen
     // read through a `status` is the acceptable direction of error: a
     // spurious wakeup costs it a redundant query, a missed wakeup costs it
     // the correctness of its screen.
-    let mut connection = Connection { seen: state.versions().await, binary_limit: MAX_CHUNK };
+    let mut connection = Connection { seen: state.versions().await, binary_limit: MAX_CHUNK, last_setvol: None };
 
     // The accumulated commands of an in-progress list, `None` outside a list.
     // An `Option<Vec<_>>` rather than a `Vec` plus a boolean: "not in a list"
@@ -674,7 +678,7 @@ async fn execute(
     with_ok: bool,
     connection: &mut Connection,
 ) -> Result<Next> {
-    let Connection { seen, binary_limit } = connection;
+    let Connection { seen, binary_limit, last_setvol } = connection;
     let mut output = Response::default();
     for (index, args) in batch.iter().enumerate() {
         // **A single snapshot, read before `handle`.** One lock acquisition
@@ -692,33 +696,15 @@ async fn execute(
         let mut snapshot = state.read().await;
         // **The only wait this module allows itself before handling**, and it
         // fixes the cover that vanished on every track change: see
-        // `cover_announced_but_missing` and `wait_cover`.
-        if cover_announced_but_missing(&snapshot, args) {
+        // `cover_may_still_arrive` and `wait_cover`.
+        if cover_may_still_arrive(&snapshot, args) {
             snapshot = wait_cover(state, snapshot).await;
         }
-        match handle(&snapshot, index, args, *binary_limit) {
+        match handle(&snapshot, index, args, *binary_limit, *last_setvol) {
             Outcome::Reply { lines: reply_lines, cmds } => {
-                for cmd in &cmds {
-                    // **Push first, acknowledge second.** The channel can
-                    // refuse (full, or dead `input` half) and acknowledging a
-                    // switch we did not emit would be worse than not
-                    // acknowledging it: `status` would lie until the next
-                    // frame, and a woken `idle` would announce a change that
-                    // did not happen.
-                    //
-                    // `held` false, never anything else: `held` means "key
-                    // held down", a keyboard notion the network does not
-                    // have.
-                    let message = InputMessage { cmd: cmd.clone(), held: false };
-                    if cmd_tx.send(message).await.is_err() {
-                        // The `input` half is dead: nothing this client says
-                        // can succeed any more, so letting it talk would be
-                        // lying to it.
-                        tracing::warn!("mpd input channel closed; closing session");
-                        return Ok(Next::Close);
-                    }
+                if !emit(state, cmd_tx, &cmds).await {
+                    return Ok(Next::Close);
                 }
-                state.acknowledge_optimistic(&cmds).await;
                 output.extend(reply_lines);
                 if with_ok {
                     output.push("list_OK".to_string());
@@ -774,6 +760,18 @@ async fn execute(
             // grouped together usable.
             Outcome::BinaryLimit(n) => {
                 *binary_limit = n;
+                if with_ok {
+                    output.push("list_OK".to_string());
+                }
+            }
+            // `setvol`: a bare reply whose raw value this connection keeps
+            // for its next `setvol` (see `commands::snap_setvol`). No line,
+            // so no response cap to check.
+            Outcome::Volume { cmds, requested } => {
+                *last_setvol = Some(requested);
+                if !emit(state, cmd_tx, &cmds).await {
+                    return Ok(Next::Close);
+                }
                 if with_ok {
                     output.push("list_OK".to_string());
                 }
@@ -850,27 +848,52 @@ async fn execute(
     Ok(Next::Continue)
 }
 
-/// How long a cover request waits for an image the device has already
-/// announced.
+/// Pushes a response's commands toward the core, then acknowledges them
+/// optimistically. `false` when the `input` half is dead: nothing this client
+/// says can succeed any more, so the session closes rather than lie to it.
+///
+/// **Push first, acknowledge second.** The channel can refuse (full, or dead
+/// `input` half) and acknowledging a switch we did not emit would be worse
+/// than not acknowledging it: `status` would lie until the next frame, and a
+/// woken `idle` would announce a change that did not happen.
+///
+/// `held` false, never anything else: `held` means "key held down", a
+/// keyboard notion the network does not have.
+async fn emit(state: &SharedState, cmd_tx: &mpsc::Sender<InputMessage>, cmds: &[Command]) -> bool {
+    for cmd in cmds {
+        let message = InputMessage { cmd: cmd.clone(), held: false };
+        if cmd_tx.send(message).await.is_err() {
+            tracing::warn!("mpd input channel closed; closing session");
+            return false;
+        }
+    }
+    state.acknowledge_optimistic(cmds).await;
+    true
+}
+
+/// How long a cover request waits for an image that may still arrive (see
+/// `commands::cover_may_still_arrive`).
 ///
 /// Three seconds, and the number comes from the two deadlines it must cover:
 /// the core bounds to `health::TIMEOUT` the playback of a cover file on a
 /// share, and a network download is of the same order. Beyond that, the
 /// image will probably not arrive for this track, and the rejection is the
-/// right response.
+/// right response. It must also stay under the client's own patience:
+/// M.A.L.P. gives up on a response after five seconds (`RESPONSE_TIMEOUT` in
+/// its `MPDConnection`), and a give-up is worse than a refusal.
 ///
 /// What this wait does **not** put at risk: a session is a task on its own,
 /// so waiting here holds nobody else back (see the module header). M.A.L.P.,
 /// for that matter, opens a separate connection for images.
 const COVER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// Waits, at most `COVER_TIMEOUT`, for the announced cover to arrive, and
+/// Waits, at most `COVER_TIMEOUT`, for the current track's cover to arrive, and
 /// returns the snapshot that will decide.
 ///
 /// Returns control **as soon as** the wait no longer has an object: either
 /// the image is there, or the state has changed enough that the request can
 /// no longer be satisfied (next track, stop). It is
-/// `cover_announced_but_missing` that decides — the same function that
+/// `cover_may_still_arrive` that decides — the same function that
 /// decided to wait — a single statement of the condition, never two to keep
 /// in sync.
 ///
@@ -892,7 +915,7 @@ async fn wait_cover(state: &SharedState, snapshot: Snapshot) -> Snapshot {
             return current;
         }
         current = state.read().await;
-        if !cover_announced_but_missing(&current, &args) {
+        if !cover_may_still_arrive(&current, &args) {
             return current;
         }
     }
@@ -1728,6 +1751,58 @@ mod tests {
         assert!(rx.try_recv().is_err(), "a single command for a single next");
     }
 
+    /// The volume `status` publishes right now, read on the wire.
+    async fn published_volume(c: &mut Client) -> String {
+        c.send_frame("status").await;
+        let status = c.response().await;
+        status.into_iter().find(|l| l.starts_with("volume: ")).expect("status carries a volume")
+    }
+
+    #[tokio::test]
+    async fn malp_speaker_icon_mutes_then_restores_the_volume() {
+        // The owner's sequence, as M.A.L.P. sends it: its speaker icon sends
+        // `setvol 0` on every tap, and it has no other way to unmute. The
+        // first tap used to erase the 65, the second to do nothing at all.
+        let (s, mut rx) = server().await;
+        s.state.apply_state(mixer_frame(65)).await;
+        let mut c = s.client_ready().await;
+
+        c.send_frame("setvol 0").await;
+        assert_eq!(c.response().await, vec!["OK".to_string()]);
+        assert_eq!(rx.recv().await.unwrap().cmd, Command::Mute);
+        assert_eq!(published_volume(&mut c).await, "volume: 0", "a muted device reads 0");
+
+        c.send_frame("setvol 0").await;
+        assert_eq!(c.response().await, vec!["OK".to_string()]);
+        assert_eq!(rx.recv().await.unwrap().cmd, Command::Mute);
+        assert_eq!(published_volume(&mut c).await, "volume: 65", "the second tap brings the volume back");
+        assert!(rx.try_recv().is_err(), "nothing but the two toggles");
+    }
+
+    #[tokio::test]
+    async fn a_drag_is_remembered_per_connection() {
+        // The session keeps each client's last `setvol` (see
+        // `commands::snap_setvol`). From 40, a drag sends 41 (→ 45) then 42:
+        // read against the previous 41 it keeps going up, read against the
+        // published 45 alone it would be a "−" press back to 40.
+        let (s, mut rx) = server().await;
+        s.state.apply_state(mixer_frame(40)).await;
+        let mut c = s.client_ready().await;
+        for value in ["41", "42"] {
+            c.send_frame(&format!("setvol {value}")).await;
+            assert_eq!(c.response().await, vec!["OK".to_string()]);
+        }
+        assert_eq!(rx.recv().await.unwrap().cmd, Command::SetVolume(45));
+        assert_eq!(rx.recv().await.unwrap().cmd, Command::SetVolume(45), "the drag kept going up");
+
+        // **Per connection**: another client sending 42 has dragged nothing,
+        // so it is a press, one step down from the 45 it reads.
+        let mut other = s.client_ready().await;
+        other.send_frame("setvol 42").await;
+        assert_eq!(other.response().await, vec!["OK".to_string()]);
+        assert_eq!(rx.recv().await.unwrap().cmd, Command::SetVolume(40));
+    }
+
     #[tokio::test]
     async fn a_read_only_command_emits_nothing_on_the_channel() {
         let (s, mut rx) = server().await;
@@ -2173,7 +2248,7 @@ mod tests {
         {
             let args = vec!["idle".to_string(), subsystem_name(subsystem).to_string()];
             assert_eq!(
-                handle(&Snapshot::default(), 0, &args, MAX_CHUNK),
+                handle(&Snapshot::default(), 0, &args, MAX_CHUNK, None),
                 Outcome::Wait(vec![subsystem]),
                 "subsystem_name({subsystem:?}) is not a name idle accepts"
             );
@@ -2337,20 +2412,18 @@ mod tests {
         assert_eq!(c.response().await, vec!["OK".to_string()]);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn without_a_cover_both_commands_reject_and_the_connection_survives() {
         // The ordinary case: a stream with no image. The client must receive
         // a readable rejection and be able to keep talking — this is the
         // rejection that makes it switch to the other name, then give up
         // cleanly.
         //
-        // **`cover_href: None`, and that detail is the whole test.** The
-        // device announces no image, so the rejection is final and must
-        // fall **right away**: `wait_cover`'s new wait only covers the
-        // window where an image *has been announced* and has not yet
-        // arrived. A frame carrying `cover_href` here — what this test used
-        // to do — described, on the contrary, exactly that window, and the
-        // immediate rejection it locked in was precisely the defect to fix.
+        // **`cover_href: None`** no longer means "no image": the core
+        // announces one only once it is cached, so a track that just started
+        // has none yet either (see `commands::cover_may_still_arrive`). The
+        // rejection therefore falls after the bounded wait — simulated
+        // clock, so this test does not cost the real seconds.
         let (s, _rx) = server().await;
         let mut frame = frame_with_cover();
         frame.track.cover_href = None;
@@ -2421,6 +2494,33 @@ mod tests {
 
         let r = c.fetch("albumart", CURRENT_URI).await;
         assert_eq!(r.image, expected, "the awaited image must eventually be served");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cover_not_yet_announced_is_awaited_then_served() {
+        // **Why M.A.L.P. "barely ever" showed a cover.** The core publishes
+        // `cover_href` only once the image is in its cache, so the frame
+        // that announces a new track — the one that wakes the client — has
+        // none, and the client's `albumart` arrived in that window. It got
+        // "No file exists", and M.A.L.P. asks for a cover only when the
+        // album changes: the whole album stayed blank.
+        //
+        // The image is announced, then sent, one (simulated) second after
+        // the request: a plugin that does not wait has refused long before.
+        let (s, _rx) = server().await;
+        let mut frame = frame_with_cover();
+        frame.track.cover_href = None;
+        s.state.apply_state(frame).await;
+        let mut c = s.client_ready().await;
+
+        let state = s.state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            with_cover(&state, SIZE).await;
+        });
+
+        let r = c.fetch("albumart", CURRENT_URI).await;
+        assert_eq!(r.image, crate::state::test_cover(HREF, SIZE).bytes);
     }
 
     #[tokio::test(start_paused = true)]

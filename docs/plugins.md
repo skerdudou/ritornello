@@ -530,11 +530,14 @@ corrected release.
 ### The manifest block in your binary
 
 A switched-off plugin is never run, so it cannot announce itself. To know its
-version and origin without executing it, the core reads a small block of data
-embedded in its binary, as bytes.
+version, origin and kinds without executing it, the core reads a small block of
+data embedded in its binary, as bytes.
 
 **Built with the SDK, there is nothing to do:** `declare_runtime!()` embeds the
-block from your crate's `version` and `repository`.
+block from your crate's `version` and `repository`, and from the `kinds = [...]`
+line of its `[package.metadata.ritornello]` table when it has one, written on a
+single line (`kinds = ["source"]`). Without that line, the switched-off row
+shows its kind as unknown; nothing else changes.
 
 **Not built with the SDK**, embed the block yourself. At any offset in the
 file:
@@ -550,8 +553,10 @@ The payload must be valid UTF-8 and every non-empty line must contain `=`. The
 key `version` is required, exactly once, non-empty, at most 64 bytes, with
 characters in `[0-9A-Za-z.+-]`. The key `repository` is optional, at most once,
 non-empty, at most 400 bytes, with no byte below `0x20` nor `0x7f`; give a full
-URL. Any other key is ignored. Anything else makes the block unreadable. Bytes
-after the payload are ignored.
+URL. The key `kinds` is optional, at most once, at most 64 bytes:
+comma-separated non-empty items in `[a-z_]` (`source`, or `display,input`); a
+kind the core does not know is not shown. Any other key is ignored. Anything
+else makes the block unreadable. Bytes after the payload are ignored.
 
 - **Embed it exactly once.** Two blocks in one binary are read as unknown,
   never "the first one wins". The magic counts wherever it appears: if your
@@ -776,8 +781,9 @@ is the highest number in use, not a count of how many exist (see
 [interface.md](interface.md) for the general rule). It is what lets the web
 grid show only the numbers that exist and reach past ten through its own
 `<`/`>` page arrows — the remote's bare digits alone only reach 1-10. The
-order is changed **by dragging a row by its ⠿ handle, with a finger or a
-mouse** (or with the ▲▼ arrows, which remain the keyboard path): moving a
+order is changed **by dragging a row by its ⠿ handle, with a finger (held
+still on the handle for 0.4 s first) or a mouse** (or with the ▲▼ arrows,
+which remain the keyboard path): moving a
 station therefore changes its remote digit.
 
 Saving a new station list from the admin page announces the fresh
@@ -1191,8 +1197,8 @@ Its page, `http://<host>:8080/plugins/files/`, is where roots are
 declared (host, share, subfolder, user, password, domain, whether writing
 is allowed), where a folder is browsed and added recursively to the
 current playlist, and where a playlist is saved and loaded again. The
-playlist is reordered by dragging a row's ⠿ handle, with a finger or a mouse
-(or with the ▲▼ arrows, which remain the keyboard path); only the visible
+playlist is reordered by dragging a row's ⠿ handle, with a finger (after a
+0.4 s press) or a mouse (or with the ▲▼ arrows, which remain the keyboard path); only the visible
 page of the playlist can be dragged, the ranks it sends are absolute, and
 the handles are locked while the playlist is frozen.
 Declaring a share writes two things: the root into the plugin's own
@@ -2608,8 +2614,8 @@ device. It needs **`python3`** on the device (see
 ### Presets
 
 Presets work like the radio's: numbered **by position** (1 to 99),
-reordered by dragging a row by its ⠿ handle, with a finger or a mouse (or with
-the ▲▼ arrows, the keyboard path), announced to the core as
+reordered by dragging a row by its ⠿ handle, with a finger (after a 0.4 s
+press) or a mouse (or with the ▲▼ arrows, the keyboard path), announced to the core as
 `preset_count`, listed by name for `list_presets`. They are kept in
 `entries.toml`. A change that moves or renames the preset
 that plays (or is armed) corrects its number and name on the card and in
@@ -4234,7 +4240,12 @@ alike. `ReorderList` owns the `v-for`: it takes `items`, an `item-key`
 function and the container `tag` (`tbody` for a table), and its default slot
 receives `item`, `index` and `itemAttrs`, which the slot must spread on the
 row's root element. The page puts a `ReorderHandle` in each row: **the handle
-is the only grab**, so a finger anywhere else still scrolls the page. The list
+is the only grab**, so a finger anywhere else still scrolls the page. A finger
+must also **hold the handle still for 0.4 s** before the row is grabbed (moving
+more than 5 px meanwhile cancels it; a mouse grabs at once): the handle refuses
+to scroll, so without the hold a thumb landing on it to scroll the page moved a
+row. The grabbed row is highlighted, with a short vibration where the device
+has one. The list
 reports a drop through an `onMove(from, to, item)` prop that returns a
 promise: `from` and `to` are positions among the reorderable items of the list
 as it was when the drag began, and `item` is the row the finger held, taken

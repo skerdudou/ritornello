@@ -17,8 +17,10 @@ export interface Point {
  * journeys using it: a handle that lets the page steal the gesture, or a row
  * that does not, only shows up here.
  *
- * `touchStart` at `from`, `steps` interpolated `touchMove`s 16 ms apart (one
- * per frame, so a drag library sees a continuous gesture), then, while
+ * `touchStart` at `from`; while `pressMs` lasts the finger rests there,
+ * reporting `from` every 50 ms (the long press a reorder handle asks for
+ * before it grabs a row); then `steps` interpolated `touchMove`s 16 ms apart
+ * (one per frame, so a drag library sees a continuous gesture), then, while
  * `holdMs` lasts, the finger stays at `to` and keeps reporting it every 50 ms
  * — as a real finger resting on glass does — and finally `touchEnd`.
  * Coordinates are CSS pixels in the viewport, as `boundingBox()` gives them.
@@ -27,13 +29,18 @@ export async function touchDrag(
   page: Page,
   from: Point,
   to: Point,
-  opts: { steps?: number; holdMs?: number } = {},
+  opts: { steps?: number; holdMs?: number; pressMs?: number } = {},
 ): Promise<void> {
   const steps = opts.steps ?? 12
   const holdMs = opts.holdMs ?? 0
+  const pressMs = opts.pressMs ?? 0
   const cdp = await page.context().newCDPSession(page)
   try {
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [from] })
+    for (let pressed = 0; pressed < pressMs; pressed += 50) {
+      await page.waitForTimeout(50)
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [from] })
+    }
     for (let i = 1; i <= steps; i++) {
       const point = {
         x: from.x + ((to.x - from.x) * i) / steps,

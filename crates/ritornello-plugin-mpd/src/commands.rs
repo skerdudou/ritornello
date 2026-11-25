@@ -56,6 +56,15 @@ pub enum Outcome {
     /// wait live in `session.rs`. The carried value is already clamped (see
     /// `binarylimit`), the session has nothing to re-check.
     BinaryLimit(usize),
+    /// `setvol <N>`: these commands to emit, then `OK` — exactly like a
+    /// `Reply` without lines — **and** `requested`, the raw `N`, for the
+    /// session to remember until this connection's next `setvol`.
+    ///
+    /// A separate variant for the same reason as `BinaryLimit`: what a
+    /// client sent last is a fact about the **connection**, and it is what
+    /// tells a slider being dragged from a button being pressed (see
+    /// `snap_setvol`).
+    Volume { cmds: Vec<Command>, requested: u8 },
 }
 
 /// A fully decided binary response: the textual header, the image, and the
@@ -236,11 +245,15 @@ const UNKNOWN_DATE: &str = "1970-01-01T00:00:00Z";
 /// `binary_limit` is the chunk size **this connection** accepts (see
 /// `binarylimit`): a fact about the connection, known only to the session,
 /// and entering nowhere but the two cover commands.
+/// `last_setvol` is the raw value of this connection's previous `setvol`
+/// (see `Outcome::Volume`): another fact about the connection, entering
+/// nowhere but `setvol`.
 pub fn handle(
     inst: &Snapshot,
     index: usize,
     args: &[String],
     binary_limit: usize,
+    last_setvol: Option<u8>,
 ) -> Outcome {
     // Empty line: the session should not submit one, but this function is
     // total by construction rather than by convention — an `args[0]` on an
@@ -324,7 +337,7 @@ pub fn handle(
         // interprets it (see the doc of `Command::Next`).
         "next" => Outcome::acting(Command::Next),
         "previous" => Outcome::acting(Command::Prev),
-        "setvol" => setvol(inst, index, remainder),
+        "setvol" => setvol(inst, index, remainder, last_setvol),
         // Deprecated by MPD but still emitted by old clients: relative to
         // the current volume, and clamped here (see `volume`) rather than
         // letting `Command::SetVolume`, which is absolute, overflow.
@@ -564,6 +577,68 @@ pub fn uri(source: &str, index: u8) -> String {
 /// written down**, which is what was missing.
 pub const MAX_CHUNK: usize = 8 * 1024;
 
+/// Is this command asking for the cover of what is playing **before the
+/// plugin holds it** — an image that may still arrive?
+///
+/// **The window it names is the one that made covers disappear**, and it has
+/// two halves, both opened by every track change:
+///
+/// 1. **Nothing announced yet.** The core publishes a `cover_href` only once
+///    the image is in its cache (`cover_arrived`, after the fetch — the time
+///    to read a `folder.jpg` on a share, to extract an embedded picture, or
+///    to download one), so the frame that announces a new track carries
+///    **no** `cover_href`, even when the image is already cached: the cache
+///    lookup itself is a round trip. That frame is what wakes the client,
+///    which asks for the image at once.
+/// 2. **Announced, not yet held.** The core sends the state first, the bytes
+///    next (see `display_relay`): for an instant the frame announces the new
+///    `cover_href` while the plugin still holds the previous image.
+///
+/// The `albumart` arm answered "No file exists" in both, and M.A.L.P. does
+/// not ask twice: it fetches a cover only when the `Album` of the current
+/// song changes, and keeps the result per album (`ArtworkManager`,
+/// `NowPlayingView.updateMPDCurrentTrack`). A refusal in that window left a
+/// whole album without its image — the second half was fixed first, and the
+/// first one kept covers "barely ever" showing.
+///
+/// The answer is to wait, briefly, rather than refuse: the session takes
+/// care of it (see `wait_cover`). This function only **says whether there is
+/// reason to wait**, and thus stays pure like the rest of the module.
+///
+/// **What the first half costs**: a track that has no image at all is
+/// indistinguishable from one whose image is on its way — the display
+/// protocol does not say "none is coming". Its refusal therefore arrives
+/// after the wait (`COVER_TIMEOUT`) instead of at once. Accepted: it happens
+/// once per album for M.A.L.P., on its separate artwork connection, while a
+/// refused image that was coming is lost for the whole album.
+///
+/// False as soon as the refusal is final — stopped, nothing numbered
+/// playing, another track's URI, malformed arguments: waiting would change
+/// nothing for any of them.
+pub fn cover_may_still_arrive(inst: &Snapshot, args: &[String]) -> bool {
+    let Some(name) = args.first() else { return false };
+    if name != "albumart" && name != "readpicture" {
+        return false;
+    }
+    // Same shape as `cover` requires: two arguments, a numeric offset. A
+    // malformed command will be refused, there is nothing to wait for.
+    let [_, requested, offset] = args else { return false };
+    if offset.parse::<usize>().is_err() {
+        return false;
+    }
+    let Some(preset) = inst.state.preset else { return false };
+    if *requested != uri(&inst.state.source, preset) {
+        return false;
+    }
+    match inst.state.track.cover_href.as_deref() {
+        // Second half: the announced image is not (yet) the one we hold.
+        Some(announced) => inst.cover.as_ref().map(|p| p.href.as_str()) != Some(announced),
+        // First half: nothing announced yet. Stopped, nothing is being
+        // fetched for it any more.
+        None => inst.state.playback != Playback::Stopped,
+    }
+}
+
 /// `albumart <uri> <offset>` and `readpicture <uri> <offset>`: one chunk of
 /// the cover of what is playing.
 ///
@@ -576,15 +651,16 @@ pub const MAX_CHUNK: usize = 8 * 1024;
 ///
 /// * **Serve anyway** (ignore the URI). The client always gets an image, but
 ///   **the wrong one** as soon as its request is one track late, and the
-///   damage is lasting: clients cache the cover **under the requested URI**
-///   (M.A.L.P. does), so answering station 17's image to a request for
-///   station 3 poisons that cache — station 3 will show a wrong image until
-///   the client is restarted, and nothing will ever invalidate it.
-/// * **Refuse** (chosen). The refusal is transient and repairs itself: the
-///   client asks again at the next `player` wakeup, which a cover change
-///   precisely triggers (see `apply_cover`). And the strictness costs
-///   nothing legitimate — a client asks for the image of what it just read
-///   in `currentsong`, that is, the current URI.
+///   damage is lasting: clients cache the cover — M.A.L.P. under the
+///   song's `Album` (and album artist, or artist), in a database it never
+///   invalidates on its own — so answering the previous track's image
+///   poisons that cache for the whole album.
+/// * **Refuse** (chosen). The strictness costs nothing legitimate — a client
+///   asks for the image of what it just read in `currentsong`, that is, the
+///   current URI. What a refusal costs is real, though: M.A.L.P. does not
+///   ask twice for the same album. That is why an image that may still
+///   arrive is awaited before anything is refused (see
+///   `cover_may_still_arrive`).
 ///
 /// The same requirement applies to the `href`: the held cover must be the
 /// one the current state frame announces. Without this second check, the
@@ -592,52 +668,6 @@ pub const MAX_CHUNK: usize = 8 * 1024;
 /// serve the previous track's image **under the new track's URI** — the
 /// poisoning case described above, reached without any client doing anything
 /// wrong.
-/// Is this command asking for an image the device **has announced** but the
-/// plugin does not hold yet?
-///
-/// **The window it names is the one that made covers disappear.** The core
-/// sends the state first, the bytes next (see `display_relay`): at every
-/// track change there is therefore an instant — the time to read a
-/// `folder.jpg` on a share, or to download it — where the frame already
-/// announces the next `cover_href` while the held cover is still the
-/// previous one. And that is exactly the instant the client wakes up and
-/// asks for the image, since that very frame is what woke it.
-///
-/// The `albumart` arm then answered "No file exists". The original
-/// reasoning — the client will ask again at the next wakeup — holds for an
-/// ideal client; M.A.L.P., though, **memorizes the absence** per track so as
-/// not to hammer the server, and thus never asked again. The cover stayed
-/// blank until the next track, where the same defect started over.
-///
-/// The answer is to wait, briefly, rather than refuse: the session takes
-/// care of it (see `wait_cover`). This function only **says whether there is
-/// reason to wait**, and thus stays pure like the rest of the module.
-///
-/// False as soon as the refusal is final — nothing playing, no image
-/// announced, another track's URI, malformed arguments: waiting would change
-/// nothing for any of them, and making a client wait three seconds for a
-/// certain refusal would be worse than the refusal.
-pub fn cover_announced_but_missing(inst: &Snapshot, args: &[String]) -> bool {
-    let Some(name) = args.first() else { return false };
-    if name != "albumart" && name != "readpicture" {
-        return false;
-    }
-    // Same shape as `cover` requires: two arguments, a numeric offset. A
-    // malformed command will be refused, there is nothing to wait for.
-    let [_, requested, offset] = args else { return false };
-    if offset.parse::<usize>().is_err() {
-        return false;
-    }
-    let Some(announced) = inst.state.track.cover_href.as_deref() else { return false };
-    let Some(preset) = inst.state.preset else { return false };
-    if *requested != uri(&inst.state.source, preset) {
-        return false;
-    }
-    // The only situation that repairs itself: the announced image is not
-    // (yet) the one we hold.
-    inst.cover.as_ref().map(|p| p.href.as_str()) != Some(announced)
-}
-
 fn cover(
     inst: &Snapshot,
     index: usize,
@@ -1388,65 +1418,116 @@ fn pause(inst: &Snapshot, index: usize, args: &[String]) -> Outcome {
     }
 }
 
-/// `setvol <0-100>`: sets the volume, and **lifts the mute if it is above
-/// zero**.
+/// The volume step of every other control of this device: the remote's
+/// keys and the web page's buttons all move by `Core::step_volume`'s 5 %.
+/// An MPD client moving by 1 % would leave the device on values nothing
+/// else ever produces, and a "+" key that seems to do nothing.
+const VOLUME_STEP: u8 = 5;
+
+/// `setvol <0-100>`: sets the volume **on the 5 % grid**, treats `setvol 0`
+/// as the mute **toggle**, and lifts the mute when it asks for sound.
 ///
-/// The first point is the protocol; the second is the only way a client
-/// MPD has to turn this device's sound back on.
+/// **The grid** (see `snap_setvol`): M.A.L.P. has no relative command. Its
+/// "+"/"−" buttons and the phone's volume keys send `setvol` of the volume
+/// it last read **± 1** (its default step), and its slider sends every value
+/// the finger crosses. Taken verbatim, a "+" press moved the device by 1 %.
 ///
-/// **Why it had to be done.** MPD has no mute, so `status` publishes
-/// `volume: 0` as soon as the device is muted (see `status`) — fair enough,
-/// clients cut the sound by setting `setvol 0` and expect to read back 0.
-/// But *no* MPD command could lift that mute: a client would raise its
-/// slider, `SetVolume(40)` would go out, the volume would really change,
-/// and the sound stayed cut. The user had no way to get sound from their
-/// phone anymore — only the room's remote could fix it. A user raising a
-/// slider unambiguously asks to hear something; that is the playback we
-/// grant.
+/// **`setvol 0` is the mute, and it toggles** — the one MPD gesture that
+/// means "mute", read from M.A.L.P.'s own code: tapping its speaker icon
+/// sends `setvol 0`, **every time**, and it has no unmute of any kind. Taken
+/// verbatim, the tap erased the volume (the device went to 0 and forgot 65),
+/// and the second tap sent `setvol 0` again: nothing could bring 65 back.
+/// Now the first tap emits `Mute` (the core keeps the volume, `status`
+/// publishes 0, see `published_volume`) and the second, arriving on a muted
+/// device, emits `Mute` again — which restores the volume the device kept.
 ///
-/// **Emitted conditionally, because `Command::Mute` is a toggle** and not a
-/// set: emitting it while nothing is cut would *cut* the sound. The guard
-/// on `state.muted` is therefore the same conditional shape `pause 0`/`pause
-/// 1` uses against `playback`, and for the same reason.
+/// What that costs, and it is accepted: a client that reads 0 on a muted
+/// device and sends `setvol 0` *meaning* "stay at zero" unmutes it. M.A.L.P.
+/// does that with its "−" key while muted (0 − 1, clamped to 0). The
+/// alternative left the mute irreversible from the phone, which is what the
+/// owner reported. A device already at 0 without being muted has nothing to
+/// keep: `setvol 0` there stays a plain `SetVolume(0)`, so holding "−" at the
+/// bottom does not start toggling.
 ///
-/// **The order of the two commands does not change the result**, and this
-/// has to be written down because this paragraph first claimed the
-/// opposite: it asserted that the core, while lifting the mute, would reset
-/// the memorized volume, hence that the volume had to be set afterward.
-/// That is false, and a false reason is worse than no reason — it makes a
-/// restoration mechanism seem to exist, from which a player would deduce
-/// things. The core's `Command::Mute` arm does `muted = !muted` then
-/// `set_mute(muted)`, and nothing else: the level and the mute are two
-/// independent properties, two separate calls to mpv. `SetVolume(40)` then
-/// `Mute`, or `Mute` then `SetVolume(40)`, both leave a device unmuted at
-/// 40.
+/// **Above zero, the mute is lifted** (see `unmute`): `status` publishes
+/// `volume: 0` while muted, so a client raising its slider asks to hear
+/// something — without this no MPD command could ever bring the sound back.
+fn setvol(inst: &Snapshot, index: usize, args: &[String], last_setvol: Option<u8>) -> Outcome {
+    let requested = match args.first().and_then(|a| a.parse::<u8>().ok()) {
+        Some(v) if v <= 100 => v,
+        _ => return Outcome::Reject(ack(Ack::Arg, index, "setvol", "invalid volume")),
+    };
+    let cmds = if requested == 0 {
+        // `Mute` is a toggle: on a muted device it unmutes, at the volume
+        // the core kept. Not muted but already silent: nothing to keep, and
+        // toggling would cut a sound the client cannot see.
+        if inst.state.muted || inst.state.volume > 0 {
+            vec![Command::Mute]
+        } else {
+            vec![Command::SetVolume(0)]
+        }
+    } else {
+        // The reference is the volume the client **read** — 0 while muted —
+        // since that is what its "±1" was computed from.
+        unmute(inst, snap_setvol(requested, published_volume(inst), last_setvol))
+    };
+    Outcome::Volume { cmds, requested }
+}
+
+/// Puts a `setvol` on the 5 % grid. `seen` is the volume `status` publishes,
+/// `previous` the raw value of this connection's previous `setvol`.
 ///
-/// The order chosen — `SetVolume` first — only plays out on the
-/// **interval** between the two, which does genuinely exist: they cross the
-/// input channel one after the other, and each waits on mpv.
+/// **A value already on the grid is taken as is**: a client that sends 40
+/// asked for 40, whatever it read.
 ///
-/// * **What is heard, and it is the reason that weighs.** Setting the level
-///   while the output is still muted is inaudible, so the sound already
-///   comes back *at* 40. The reverse order would bring it back to the
-///   memorized level — up to 100 — for one round trip before dropping. On a
-///   device whose memorized volume can be well above what the client asks
-///   for, this is the only one of the two differences that is noticeable.
-/// * **What is seen.** Both commands call `show_overlay`, which reads the
-///   instant's `muted` and `volume`. The *final* overlay says "40%" in
-///   either order; only the intermediate one differs, and the order chosen
-///   here shows "muted" — a word still true at that instant — instead of
-///   the old level, a number that no longer is.
+/// Otherwise, three readings, and the first two exist because an MPD client
+/// does not say whether it is pressing a button or dragging a slider:
 ///
-/// **`setvol 0` does not cut the sound for all that**, and that is the
-/// unchanged reverse rule: see the spec, § "Mute, a case not to miss".
-/// `SetVolume(0)` sets zero, `Mute` toggles; confusing them would make a
-/// client raising the volume after a `setvol 0` find the sound still cut —
-/// exactly the defect fixed here, reintroduced from the other end.
-fn setvol(inst: &Snapshot, index: usize, args: &[String]) -> Outcome {
-    match args.first().and_then(|a| a.parse::<u8>().ok()) {
-        Some(v) if v <= 100 => Outcome::Reply { lines: Vec::new(), cmds: unmute(inst, v) },
-        _ => Outcome::Reject(ack(Ack::Arg, index, "setvol", "invalid volume")),
+/// 1. **A slider being dragged**: the value is nearer the previous request
+///    than the published volume. It rounds *in the direction of the drag*
+///    (up when the finger goes up). Without this case a slow drag from 40
+///    oscillated: 41 became 45, then 42 — now 3 below the published 45 —
+///    read as a "−" press, went back to 40, then 43 to 45 again…
+/// 2. **A button press**: within one step of the published volume. It moves
+///    **one step** in that direction, from wherever the volume is: 46 read
+///    against 45 gives 50, 44 gives 40 — never a press that does nothing,
+///    which plain rounding would make of every "+1" (46 rounds to 45).
+/// 3. **A jump** (a tap far along the slider): the nearest step.
+fn snap_setvol(requested: u8, seen: u8, previous: Option<u8>) -> u8 {
+    if requested.is_multiple_of(VOLUME_STEP) {
+        return requested;
     }
+    let floor = requested / VOLUME_STEP * VOLUME_STEP;
+    let ceil = floor + VOLUME_STEP;
+    if let Some(previous) = previous
+        && previous != requested
+        && requested.abs_diff(previous) <= requested.abs_diff(seen)
+    {
+        return if requested > previous { ceil } else { floor };
+    }
+    if requested != seen && requested.abs_diff(seen) < VOLUME_STEP {
+        return step_from(seen, requested > seen);
+    }
+    nearest_step(requested)
+}
+
+/// One step up or down **from `volume`**, landing on the grid even when
+/// `volume` was not on it (a value an older plugin, or another client, left
+/// behind): 43 goes up to 45 and down to 40.
+fn step_from(volume: u8, up: bool) -> u8 {
+    let floor = volume / VOLUME_STEP * VOLUME_STEP;
+    if up {
+        (floor + VOLUME_STEP).min(100)
+    } else if floor == volume {
+        volume.saturating_sub(VOLUME_STEP)
+    } else {
+        floor
+    }
+}
+
+/// The nearest multiple of the step; halfway cannot happen with an odd step.
+fn nearest_step(volume: u8) -> u8 {
+    ((volume + VOLUME_STEP / 2) / VOLUME_STEP * VOLUME_STEP).min(100)
 }
 
 /// The commands for setting the volume: `SetVolume`, plus `Mute` if the
@@ -1457,6 +1538,17 @@ fn setvol(inst: &Snapshot, index: usize, args: &[String]) -> Outcome {
 /// make the sound's return depend on the client's age — `volume` is
 /// deprecated by MPD, so it is the old half of the fleet that would stay
 /// stuck.
+///
+/// **Emitted conditionally, because `Command::Mute` is a toggle**: emitting
+/// it while nothing is cut would *cut* the sound — the same conditional
+/// shape `pause 0`/`pause 1` uses against `playback`.
+///
+/// **`SetVolume` first, and the order only plays on the interval** between
+/// the two commands: the core's `Mute` arm only flips `muted`, the level and
+/// the mute are two independent properties, so both orders end unmuted at
+/// the requested level. Setting the level while still muted is inaudible,
+/// so the sound comes back *at* that level; the reverse order would let the
+/// memorized level — up to 100 — be heard for one round trip.
 fn unmute(inst: &Snapshot, level: u8) -> Vec<Command> {
     let mut cmds = vec![Command::SetVolume(level)];
     if level > 0 && inst.state.muted {
@@ -1469,17 +1561,25 @@ fn unmute(inst: &Snapshot, level: u8) -> Vec<Command> {
 /// Relative to the current volume and **clamped here** — `Command::SetVolume`
 /// is absolute, so this module is the one that must compute and clamp it,
 /// not the core.
+///
+/// **On the same 5 % grid as `setvol`**: a change smaller than a step
+/// (`+1`, `-2`) moves one step in its direction, a larger one lands on the
+/// nearest step.
 fn volume(inst: &Snapshot, index: usize, args: &[String]) -> Outcome {
     match args.first().and_then(|a| a.parse::<i16>().ok()) {
         Some(delta) => {
-            // Widened to `i32` before the addition: `delta` covers the
-            // whole of `i16` (±32767), and even a low current volume (1)
-            // added to `i16::MAX` overflows `i16` before `.clamp` can act —
-            // a panic in debug/test (overflow checks are on by default), a
-            // wrong value in release. `i32` holds both operands (volume ≤
-            // 100, delta ≤ 32767) with no risk of overflow, so the clamp
-            // stays the only place that bounds anything.
-            let new_volume = (i32::from(inst.state.volume) + i32::from(delta)).clamp(0, 100) as u8;
+            let current = inst.state.volume;
+            let new_volume = if delta != 0 && delta.unsigned_abs() < u16::from(VOLUME_STEP) {
+                step_from(current, delta > 0)
+            } else {
+                // Widened to `i32` before the addition: `delta` covers the
+                // whole of `i16` (±32767), and even a low current volume (1)
+                // added to `i16::MAX` overflows `i16` before `.clamp` can act
+                // — a panic in debug/test, a wrong value in release. `i32`
+                // holds both operands with no risk of overflow, so the clamp
+                // stays the only place that bounds anything.
+                nearest_step((i32::from(current) + i32::from(delta)).clamp(0, 100) as u8)
+            };
             // The same mute-lifting as `setvol`, and through the same path:
             // see `unmute`. The computation starts from the **memorized**
             // volume and not from the zero `status` publishes when it is
@@ -1749,7 +1849,7 @@ mod tests {
 
     fn handle_words(inst: &Snapshot, index: usize, words: &[&str]) -> Outcome {
         let args: Vec<String> = words.iter().map(|m| (*m).to_string()).collect();
-        handle(inst, index, &args, MAX_CHUNK)
+        handle(inst, index, &args, MAX_CHUNK, None)
     }
 
     /// The lines of a response, or a panic naming what was received
@@ -1766,8 +1866,21 @@ mod tests {
     /// received instead — `handle_ok`'s counterpart for Task 7's tests.
     fn cmds(inst: &Snapshot, words: &[&str]) -> Vec<Command> {
         match handle_words(inst, 0, words) {
-            Outcome::Reply { cmds, .. } => cmds,
+            Outcome::Reply { cmds, .. } | Outcome::Volume { cmds, .. } => cmds,
             other => panic!("expected Reply for {words:?}, got {other:?}"),
+        }
+    }
+
+    /// The commands a `setvol` emits on a connection whose previous `setvol`
+    /// was `previous`: the drag/press distinction lives there.
+    fn setvol_after(inst: &Snapshot, previous: Option<u8>, value: u8) -> Vec<Command> {
+        let args = vec!["setvol".to_string(), value.to_string()];
+        match handle(inst, 0, &args, MAX_CHUNK, previous) {
+            Outcome::Volume { cmds, requested } => {
+                assert_eq!(requested, value, "the raw value is what the session must remember");
+                cmds
+            }
+            other => panic!("expected Volume for setvol {value}, got {other:?}"),
         }
     }
 
@@ -2656,13 +2769,13 @@ mod tests {
     #[test]
     fn play_out_of_bounds_is_refused_and_emits_nothing() {
         let inst = snapshot_with_presets("radio", &[(1, "FIP")]);
-        assert!(matches!(handle(&inst, 0, &["play".into(), "7".into()], MAX_CHUNK), Outcome::Reject(_)));
+        assert!(matches!(handle(&inst, 0, &["play".into(), "7".into()], MAX_CHUNK, None), Outcome::Reject(_)));
     }
 
     #[test]
     fn playid_of_a_missing_index_is_refused() {
         let inst = snapshot_with_presets("radio", &[(1, "FIP")]);
-        assert!(matches!(handle(&inst, 0, &["playid".into(), "9".into()], MAX_CHUNK), Outcome::Reject(_)));
+        assert!(matches!(handle(&inst, 0, &["playid".into(), "9".into()], MAX_CHUNK, None), Outcome::Reject(_)));
     }
 
     #[test]
@@ -2733,17 +2846,9 @@ mod tests {
     fn setvol_is_clamped_and_refuses_out_of_interval() {
         let inst = snapshot_stopped();
         assert_eq!(cmds(&inst, &["setvol", "40"]), vec![Command::SetVolume(40)]);
-        assert!(matches!(handle(&inst, 0, &["setvol".into(), "101".into()], MAX_CHUNK), Outcome::Reject(_)));
-        assert!(matches!(handle(&inst, 0, &["setvol".into(), "abc".into()], MAX_CHUNK), Outcome::Reject(_)));
-        assert!(matches!(handle(&inst, 0, &["setvol".into()], MAX_CHUNK), Outcome::Reject(_)));
-    }
-
-    #[test]
-    fn setvol_zero_is_not_translated_into_a_mute() {
-        // That would be guessing: `Mute` toggles, `SetVolume(0)` sets.
-        // Translating it would make a client raising the volume land on a
-        // sound still cut.
-        assert_eq!(cmds(&snapshot_at_volume(65), &["setvol", "0"]), vec![Command::SetVolume(0)]);
+        assert!(matches!(handle(&inst, 0, &["setvol".into(), "101".into()], MAX_CHUNK, None), Outcome::Reject(_)));
+        assert!(matches!(handle(&inst, 0, &["setvol".into(), "abc".into()], MAX_CHUNK, None), Outcome::Reject(_)));
+        assert!(matches!(handle(&inst, 0, &["setvol".into()], MAX_CHUNK, None), Outcome::Reject(_)));
     }
 
     #[test]
@@ -2774,11 +2879,116 @@ mod tests {
     }
 
     #[test]
-    fn setvol_zero_on_a_muted_device_lifts_nothing() {
-        // The edge case where both rules meet: setting zero is not "asking
-        // to hear something", so nothing to lift — and lifting here would
-        // turn the sound back on for a client asking for silence.
-        assert_eq!(cmds(&snapshot_muted(65), &["setvol", "0"]), vec![Command::SetVolume(0)]);
+    fn malp_speaker_icon_mutes_without_forgetting_the_volume() {
+        // M.A.L.P.'s speaker icon sends `setvol 0` (`NowPlayingView`:
+        // `mVolumeIcon.setOnClickListener(view -> setVolume(0))`). Taken as
+        // `SetVolume(0)`, it erased the 65 for good. As `Mute`, the core
+        // keeps it and `status` still publishes 0.
+        assert_eq!(cmds(&snapshot_at_volume(65), &["setvol", "0"]), vec![Command::Mute]);
+    }
+
+    #[test]
+    fn malp_speaker_icon_tapped_again_restores_the_volume() {
+        // **The owner's report**: the second tap "does nothing". It sends
+        // `setvol 0` again — M.A.L.P. has no unmute — so on a muted device
+        // `setvol 0` must toggle the mute back, to the volume the core kept.
+        assert_eq!(cmds(&snapshot_muted(65), &["setvol", "0"]), vec![Command::Mute]);
+    }
+
+    #[test]
+    fn setvol_zero_on_a_silent_device_is_not_a_mute() {
+        // Nothing to keep at 0, and `Mute` toggles: holding "−" at the
+        // bottom (M.A.L.P. clamps 0 − 1 to `setvol 0`) must not start
+        // cutting and restoring the sound in turn.
+        assert_eq!(cmds(&snapshot_at_volume(0), &["setvol", "0"]), vec![Command::SetVolume(0)]);
+    }
+
+    #[test]
+    fn malp_plus_and_minus_move_one_five_percent_step() {
+        // M.A.L.P.'s "+"/"−" (and the phone's volume keys) send the volume
+        // it read in `status`, ± its step — 1 by default
+        // (`pref_volume_steps_default`), as an absolute `setvol`. Plain
+        // rounding would make every press a no-op (46 rounds to 45).
+        let at_45 = snapshot_at_volume(45);
+        assert_eq!(setvol_after(&at_45, None, 46), vec![Command::SetVolume(50)]);
+        assert_eq!(setvol_after(&at_45, None, 44), vec![Command::SetVolume(40)]);
+        // A step of 2 or 3 configured in the client: still one step.
+        assert_eq!(setvol_after(&at_45, None, 47), vec![Command::SetVolume(50)]);
+        assert_eq!(setvol_after(&at_45, None, 42), vec![Command::SetVolume(40)]);
+        // Consecutive presses: the previous request (41, from 40) is
+        // farther than the published volume, so it is still a press.
+        assert_eq!(setvol_after(&at_45, Some(41), 46), vec![Command::SetVolume(50)]);
+        assert_eq!(setvol_after(&at_45, Some(41), 44), vec![Command::SetVolume(40)]);
+        // A volume left off the grid (another client, an older plugin):
+        // the press lands back on it.
+        let at_43 = snapshot_at_volume(43);
+        assert_eq!(setvol_after(&at_43, None, 44), vec![Command::SetVolume(45)]);
+        assert_eq!(setvol_after(&at_43, None, 42), vec![Command::SetVolume(40)]);
+        // The bounds.
+        assert_eq!(setvol_after(&snapshot_at_volume(100), None, 99), vec![Command::SetVolume(95)]);
+        assert_eq!(setvol_after(&snapshot_at_volume(5), None, 4), vec![Command::SetVolume(0)]);
+        assert_eq!(setvol_after(&snapshot_at_volume(0), None, 1), vec![Command::SetVolume(5)]);
+    }
+
+    #[test]
+    fn a_press_on_a_muted_device_starts_from_the_zero_it_read() {
+        // While muted the client reads 0, so its "+" sends `setvol 1`: one
+        // step from what it saw, and the sound comes back there.
+        assert_eq!(
+            setvol_after(&snapshot_muted(65), None, 1),
+            vec![Command::SetVolume(5), Command::Mute]
+        );
+    }
+
+    #[test]
+    fn a_value_on_the_grid_is_taken_as_is_and_a_jump_lands_on_the_nearest_step() {
+        let at_40 = snapshot_at_volume(40);
+        assert_eq!(setvol_after(&at_40, None, 45), vec![Command::SetVolume(45)]);
+        assert_eq!(setvol_after(&at_40, None, 100), vec![Command::SetVolume(100)]);
+        // A tap far along the slider.
+        assert_eq!(setvol_after(&at_40, None, 73), vec![Command::SetVolume(75)]);
+        assert_eq!(setvol_after(&at_40, None, 72), vec![Command::SetVolume(70)]);
+        assert_eq!(setvol_after(&at_40, None, 99), vec![Command::SetVolume(100)]);
+        assert_eq!(setvol_after(&at_40, Some(41), 2), vec![Command::SetVolume(0)]);
+    }
+
+    /// Plays a slider drag the way M.A.L.P. sends it — one `setvol` per value
+    /// the finger crosses (`onProgressChanged`) — against a device whose
+    /// published volume follows each command, as the optimistic
+    /// acknowledgement makes it do. Returns the volume after each value.
+    fn drag(start: u8, values: impl Iterator<Item = u8>) -> Vec<u8> {
+        let mut volume = start;
+        let mut previous = None;
+        let mut seen = Vec::new();
+        for value in values {
+            match setvol_after(&snapshot_at_volume(volume), previous, value).as_slice() {
+                [Command::SetVolume(v)] => volume = *v,
+                other => panic!("setvol {value} at {volume}: {other:?}"),
+            }
+            previous = Some(value);
+            seen.push(volume);
+        }
+        seen
+    }
+
+    #[test]
+    fn a_slow_drag_follows_the_finger_without_oscillating() {
+        // Without the drag reading, 41 became 45, then 42 — 3 below the
+        // published 45 — read as a "−" press and went back to 40, then 43 to
+        // 45 again: the sound pumped by 5 % under a finger moving one way.
+        assert_eq!(drag(40, 41..=50), vec![45, 45, 45, 45, 45, 50, 50, 50, 50, 50]);
+        assert_eq!(drag(50, (40..=49).rev()), vec![45, 45, 45, 45, 45, 40, 40, 40, 40, 40]);
+    }
+
+    #[test]
+    fn relative_volume_moves_on_the_same_grid() {
+        // `volume +1`, `-2`: one step in that direction, from the memorized
+        // volume; a larger change lands on the nearest step.
+        assert_eq!(cmds(&snapshot_at_volume(40), &["volume", "+1"]), vec![Command::SetVolume(45)]);
+        assert_eq!(cmds(&snapshot_at_volume(40), &["volume", "-2"]), vec![Command::SetVolume(35)]);
+        assert_eq!(cmds(&snapshot_at_volume(43), &["volume", "+1"]), vec![Command::SetVolume(45)]);
+        assert_eq!(cmds(&snapshot_at_volume(40), &["volume", "+12"]), vec![Command::SetVolume(50)]);
+        assert_eq!(cmds(&snapshot_at_volume(40), &["volume", "+13"]), vec![Command::SetVolume(55)]);
     }
 
     #[test]
@@ -3209,7 +3419,7 @@ mod tests {
     fn an_unknown_command_is_refused_with_its_list_index() {
         let inst = snapshot_stopped();
         assert_eq!(
-            handle(&inst, 3, &["nonsense".to_string()], MAX_CHUNK),
+            handle(&inst, 3, &["nonsense".to_string()], MAX_CHUNK, None),
             Outcome::Reject("ACK [5@3] {nonsense} unsupported".to_string())
         );
     }
@@ -3465,7 +3675,7 @@ mod tests {
         // The session should never submit one, but a panic here would
         // drop a client's connection over a blank line.
         assert_eq!(
-            handle(&snapshot_stopped(), 0, &[], MAX_CHUNK),
+            handle(&snapshot_stopped(), 0, &[], MAX_CHUNK, None),
             Outcome::Reject("ACK [5@0] {} unsupported".to_string())
         );
     }
@@ -3510,6 +3720,42 @@ mod tests {
             Outcome::Bytes(b) => b,
             other => panic!("expected Bytes for {words:?}, got {other:?}"),
         }
+    }
+
+    fn may_still_arrive(inst: &Snapshot, words: &[&str]) -> bool {
+        let args: Vec<String> = words.iter().map(|w| (*w).to_string()).collect();
+        cover_may_still_arrive(inst, &args)
+    }
+
+    #[test]
+    fn a_track_with_nothing_announced_yet_is_worth_waiting_for() {
+        // The frame announcing a new track carries no `cover_href`: the
+        // core publishes one only once the image is cached. Refusing there
+        // was refusing every cover M.A.L.P. asked for on a track change.
+        let mut inst = snapshot_playing();
+        inst.state.track.cover_href = None;
+        assert!(may_still_arrive(&inst, &["albumart", CURRENT_URI, "0"]));
+        assert!(may_still_arrive(&inst, &["readpicture", CURRENT_URI, "0"]));
+        // Even holding the previous track's image: still not this one's.
+        inst.cover = Some(crate::state::test_cover("/api/cover/previous", 10).into());
+        assert!(may_still_arrive(&inst, &["albumart", CURRENT_URI, "0"]));
+    }
+
+    #[test]
+    fn a_certain_refusal_is_not_worth_waiting_for() {
+        let mut nothing_yet = snapshot_playing();
+        nothing_yet.state.track.cover_href = None;
+        // Another track's URI: it will not become the current one.
+        assert!(!may_still_arrive(&nothing_yet, &["albumart", "ritornello://radio/3", "0"]));
+        // Malformed.
+        assert!(!may_still_arrive(&nothing_yet, &["albumart", CURRENT_URI, "x"]));
+        assert!(!may_still_arrive(&nothing_yet, &["status"]));
+        // Stopped: nothing is being fetched for it.
+        let mut stopped = nothing_yet.clone();
+        stopped.state.playback = Playback::Stopped;
+        assert!(!may_still_arrive(&stopped, &["albumart", CURRENT_URI, "0"]));
+        // The image is held: serve it now.
+        assert!(!may_still_arrive(&snapshot_with_cover(10), &["albumart", CURRENT_URI, "0"]));
     }
 
     #[test]

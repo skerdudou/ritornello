@@ -1138,8 +1138,8 @@ note, so the page comes back reading "Never checked" until the next check
 unattended device that is the next night; **Check** answers at once at any
 time).
 
-**A switched-off plugin's row shows the version and origin read from its
-binary, without running it.** The core reads a small block of data embedded in
+**A switched-off plugin's row shows the version, origin and kind read from
+its binary, without running it.** The core reads a small block of data embedded in
 the file, as bytes (see [The manifest block in your
 binary](plugins.md#the-manifest-block-in-your-binary)). A binary built before
 that block existed shows `?` until it has been installed once by hand; a third
@@ -1492,7 +1492,7 @@ component installable again.
 
 **The physical remote's source key now cycles through the sources in
 this table's own order, not alphabetically.** Reordering, by dragging a row's
-⠿ handle (finger or mouse) or with the ▲▼ arrows, changes both: which source the key lands on next, and (see
+⠿ handle (a finger holds it 0.4 s first; a mouse at once) or with the ▲▼ arrows, changes both: which source the key lands on next, and (see
 [plugins.md](plugins.md)) metadata priority for the fields more than one
 plugin can supply.
 

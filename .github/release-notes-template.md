@@ -6,15 +6,28 @@
      or when the bootstrap PROTOCOL_VERSION or a contract major moved (wire
      break: install the core and every plugin together). -->
 
-**Ritornello 0.3.0-beta.3 — equalizer, remote lock, phone-friendly page.**
-
-**One click for a switched-off plugin.** A plugin already switched off when
-this release lands reads `? → 0.3.0-beta.3` and is not updated at night: one
-click on **Install** fixes it for good.
+**Ritornello 0.3.0-beta.5 — a volume choice for the lock chime, the cover margin kept when zoomed, a phone-sized download page.**
 
 **Before rolling back generic-input to 0.2.0**, remove the lock key's binding:
 the old binary would otherwise ignore every key of the remote. A rollback of
 the core to 0.2.0 forgets the alarms: note them first.
+
+## What's new since 0.3.0-beta.4
+
+- **Lock chime volume** — four levels on the Configuration page, next to the chime choice. Level 2 is the loudness of beta.4 and the default; level 1 is quieter, levels 3 and 4 louder.
+- **Enlarged cover** — the margin around the picture is back at every zoom, and a pan stops short of the screen's edge.
+- **Web streaming download page** — the format and cover choices stack on a phone, so their labels no longer wrap over each other.
+- **Generic-input on a phone** — the key-code column keeps its width beside the action name.
+
+Not yet verified on a real device: the chime volume with the music, the
+margin while panning, and the download page on a phone.
+
+## What was in beta.4
+
+- **Lock chime** — pre-rendered and built into the core, read by mpv from a file instead of being synthesised by ffmpeg while the music plays.
+- **Covers that come back** — a cover read from a slow network share is retried four times over about twenty seconds.
+- **Track list** — the pages follow your finger while you swipe, and the scrollbar no longer sits against the right edge.
+- **Web streaming downloads** — each track is tagged with its title, its author, the video's description and its YouTube address, when the site gives them.
 
 ## What's new since 0.2.0
 

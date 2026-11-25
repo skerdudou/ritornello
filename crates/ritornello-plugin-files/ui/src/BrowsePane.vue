@@ -2,6 +2,7 @@
 import { Button, Input } from '@ritornello/ui'
 import { computed, ref, watch } from 'vue'
 import { truncateStart, type Data, type Entry, type Send, type T } from './data'
+import IconLabel from './IconLabel.vue'
 
 /**
  * The file browser of a declared source.
@@ -210,7 +211,7 @@ function loadPlaylist(target: string): void {
           :disabled="frozen || !path"
           @click="goUp"
         >
-          ↑ {{ t('btn_up') }}
+          <IconLabel icon="up" :label="t('btn_up')" />
         </Button>
         <span
           class="min-w-0 flex-1 truncate text-muted-foreground"
@@ -230,7 +231,7 @@ function loadPlaylist(target: string): void {
           :disabled="frozen"
           @click="addFolder(path)"
         >
-          {{ t('btn_add_current_folder') }}
+          <IconLabel icon="plus" :label="t('btn_add_current_folder')" />
         </Button>
       </div>
 
@@ -242,11 +243,13 @@ function loadPlaylist(target: string): void {
         <Input
           v-model="query"
           data-search-query
-          class="min-w-48 flex-1"
+          class="min-w-48 max-md:min-w-0 flex-1"
           :placeholder="t('search_placeholder')"
           @keydown.enter="search"
         />
-        <Button data-search :disabled="frozen" @click="search">{{ t('btn_search') }}</Button>
+        <Button data-search :disabled="frozen" @click="search">
+          <IconLabel icon="search" :label="t('btn_search')" />
+        </Button>
       </div>
       <p class="text-xs text-muted-foreground" data-search-scope>
         {{ t('search_scope', { path: displayedPath }) }}
@@ -297,7 +300,7 @@ function loadPlaylist(target: string): void {
             :disabled="frozen"
             @click="addFile(e.path)"
           >
-            {{ t('btn_add_to_playlist') }}
+            <IconLabel icon="plus" :label="t('btn_add_to_playlist')" />
           </Button>
         </div>
       </div>
@@ -332,7 +335,7 @@ function loadPlaylist(target: string): void {
               :disabled="frozen"
               @click="addFolder(e.path)"
             >
-              {{ t('btn_add_to_playlist') }}
+              <IconLabel icon="plus" :label="t('btn_add_to_playlist')" />
             </Button>
           </template>
           <!-- A playlist carries a **different** action: it replaces the
@@ -350,7 +353,7 @@ function loadPlaylist(target: string): void {
               :disabled="frozen"
               @click="loadPlaylist(e.path)"
             >
-              {{ t('btn_load_m3u') }}
+              <IconLabel icon="enter" :label="t('btn_load_m3u')" />
             </Button>
           </template>
           <template v-else>
@@ -362,7 +365,7 @@ function loadPlaylist(target: string): void {
               :disabled="frozen"
               @click="addFile(e.path)"
             >
-              {{ t('btn_add_to_playlist') }}
+              <IconLabel icon="plus" :label="t('btn_add_to_playlist')" />
             </Button>
           </template>
         </li>

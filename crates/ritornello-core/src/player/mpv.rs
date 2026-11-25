@@ -932,6 +932,9 @@ pub fn read_media_file(path: &str) -> Option<MediaFile> {
 
 pub struct MpvPlayer {
     ipc: Arc<MpvIpc>,
+    /// Where the lock chime files were written at start (`lock_sound::DIR_NAME`
+    /// under the runtime directory, beside the socket).
+    chime_dir: std::path::PathBuf,
 }
 
 impl MpvPlayer {
@@ -1203,6 +1206,12 @@ pub async fn start(
         std::fs::create_dir_all(parent)?;
     }
     let _ = std::fs::remove_file(socket);
+    // mpv reads the lock chime from these files, which therefore exist
+    // before it starts. A failure costs the chime, never the start.
+    let chime_dir = socket.parent().unwrap_or_else(|| Path::new(".")).join(crate::lock_sound::DIR_NAME);
+    if let Err(e) = crate::lock_sound::write_files(&chime_dir) {
+        tracing::warn!("lock sound files not written to {}: {e}", chime_dir.display());
+    }
     let child = tokio::process::Command::new(mpv_bin)
         .args(mpv_args(socket, cd_dev, audio_buffer, readahead, af))
         .kill_on_drop(true)
@@ -1222,11 +1231,14 @@ pub async fn start(
     for property in OBSERVED {
         ipc.observe(property).await?;
     }
-    Ok((MpvPlayer { ipc }, child))
+    Ok((MpvPlayer { ipc, chime_dir }, child))
 }
 
 #[async_trait::async_trait]
 impl super::Player for MpvPlayer {
+    fn chime_dir(&self) -> &Path {
+        &self.chime_dir
+    }
     async fn play(&self, uri: &str) -> Result<()> {
         self.real_load(&[json!("loadfile"), json!(uri), json!("replace")]).await?;
         self.ipc.command(&[json!("set_property"), json!("pause"), json!(false)]).await?;
@@ -1474,9 +1486,15 @@ impl super::Player for MpvPlayer {
     /// reverts both once the chime ends (measured). The gate is armed
     /// **before** the command is written, since the chime's `start-file` can
     /// arrive before its response, and disarmed if the command fails.
-    async fn play_aside(&self, uri: &str) -> Result<()> {
+    async fn play_aside(&self, uri: &str, af: Option<&str>) -> Result<()> {
         self.gate().arm();
-        let load = json!({"name": "loadfile", "url": uri, "flags": "replace", "options": "loop-file=no,pause=no"});
+        // A non-reference lock sound level adds its own `af` for this one
+        // file (`lock_sound::idle_af`); mpv restores the chain at its end.
+        let options = match af {
+            Some(af) => format!("loop-file=no,pause=no,af={af}"),
+            None => "loop-file=no,pause=no".to_string(),
+        };
+        let load = json!({"name": "loadfile", "url": uri, "flags": "replace", "options": options});
         if let Err(e) = self.ipc.command_named(load).await {
             self.gate().disarm();
             return Err(e);
@@ -1611,7 +1629,7 @@ pub(crate) mod tests {
         use crate::player::Player;
         let (client, server) = UnixStream::pair().unwrap();
         let (tx, _rx) = mpsc::channel(16);
-        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx), chime_dir: std::path::PathBuf::new() };
 
         // Answers every command until the client goes away; returns them in order.
         let server = tokio::spawn(async move {
@@ -2430,6 +2448,52 @@ pub(crate) mod tests {
         assert_eq!(af.as_array().map(Vec::len), Some(0), "{af}");
     }
 
+    /// The chime files read by a running mpv: the mix of a file's `amovie`
+    /// into a playing mono 48 kHz stream (the channel-mapping branch of
+    /// `lock_sound::mix_filter`), then the idle load of the same file. mpv
+    /// refuses a malformed filter at `set_property af`, so the mix being
+    /// accepted is the check; the load is accepted when mpv opens the file.
+    ///
+    /// Needs `mpv`; without it the test says so on stderr and returns.
+    #[tokio::test]
+    async fn the_chime_files_are_read_by_a_running_mpv() {
+        use crate::lock_sound::{LockSound, Motif};
+        use crate::player::Player;
+        if mpv_missing() {
+            eprintln!("mpv missing: skipping test");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let mpv = d.join("mpv");
+        wrapper(&mpv, "#!/bin/sh\nexec mpv --no-config --ao=null \"$@\"\n");
+        let (tx, mut rx) = mpsc::channel(1024);
+        let (player, _child) = start_test_mpv(&mpv, d, "", tx).await;
+        assert!(player.chime_dir().join("a-lock.wav").exists(), "start writes the chime files");
+
+        player.play("av://lavfi:sine=frequency=440:sample_rate=48000:duration=30").await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while let Some(ev) = rx.recv().await {
+                if ev == Event::PlaybackRestarted {
+                    return;
+                }
+            }
+            panic!("event channel closed before playback-restart");
+        })
+        .await
+        .expect("no playback-restart within 10 s");
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let mix = crate::lock_sound::mix_filter(player.chime_dir(), LockSound::A, Motif::Lock, 48000, 1, crate::lock_sound::LockVolume::Two).unwrap();
+        player.set_audio_filters(&mix).await.expect("mpv accepts the mix of the chime file");
+        let af = player.ipc.command(&[json!("get_property"), json!("af")]).await.unwrap();
+        assert_eq!(af.as_array().map(Vec::len), Some(1), "{af}");
+        player.set_audio_filters("").await.unwrap();
+
+        let uri = crate::lock_sound::idle_uri(player.chime_dir(), LockSound::A, Motif::Lock).unwrap();
+        player.play_aside(&uri, None).await.expect("mpv loads the chime file");
+    }
+
     /// mpv answers `null` on `time-pos` when nothing is loaded, and an
     /// **error** when the property is unavailable. Both say the same
     /// thing — "I don't know" — and neither is a failure to surface: an
@@ -2771,7 +2835,7 @@ pub(crate) mod tests {
         use crate::player::Player;
         let (client, server) = UnixStream::pair().unwrap();
         let (tx, _rx) = mpsc::channel(16);
-        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx), chime_dir: std::path::PathBuf::new() };
         prepare(&mut player.gate());
         let server = answering(server, answers);
         let route = player.chime_route(A_LOCK).await;
@@ -2856,7 +2920,7 @@ pub(crate) mod tests {
             for list in [false, true] {
                 let (client, server) = UnixStream::pair().unwrap();
                 let (tx, _rx) = mpsc::channel(16);
-                let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+                let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx), chime_dir: std::path::PathBuf::new() };
                 inside_an_aside(&mut player.gate());
                 let server = tokio::spawn(async move {
                     let (r, mut w) = server.into_split();
@@ -2895,7 +2959,7 @@ pub(crate) mod tests {
         // The load sent while mpv is being asked: the answer is re-read.
         let (client, server) = UnixStream::pair().unwrap();
         let (tx, _rx) = mpsc::channel(16);
-        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx), chime_dir: std::path::PathBuf::new() };
         let gate = player.ipc.gate.clone();
         let server = tokio::spawn(async move {
             let (r, mut w) = server.into_split();
@@ -2919,7 +2983,7 @@ pub(crate) mod tests {
         use crate::player::{ChimeRoute, Player};
         let (client, server) = UnixStream::pair().unwrap();
         let (tx, _rx) = mpsc::channel(16);
-        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx), chime_dir: std::path::PathBuf::new() };
         player.gate().arm();
         let server = tokio::spawn(async move {
             let (r, mut w) = server.into_split();
@@ -3046,7 +3110,7 @@ pub(crate) mod tests {
             use crate::player::Player;
             let (client, server) = UnixStream::pair().unwrap();
             let (tx, _rx) = mpsc::channel(16);
-            let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+            let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx), chime_dir: std::path::PathBuf::new() };
             let server = answering(server, paused_answers(json!(148.0), json!(149.75), json!(true)));
             let route = player.chime_route(std::time::Duration::from_millis(1630)).await;
             drop(player);
@@ -3256,7 +3320,7 @@ pub(crate) mod tests {
         use crate::player::Player;
         let (client, server) = UnixStream::pair().unwrap();
         let (tx, _rx) = mpsc::channel(16);
-        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx), chime_dir: std::path::PathBuf::new() };
         let _server = scripted(server, vec![("time-pos", json!(4.5)), ("duration", json!(150.0))], &[], None);
         let first = Progress { position_s: Some(4.416), duration_s: Some(150.0) };
         player.gate().begin_paused_chime(first);
@@ -3390,7 +3454,7 @@ pub(crate) mod tests {
     ) -> (MpvPlayer, Arc<std::sync::Mutex<Vec<Value>>>) {
         let (client, server) = UnixStream::pair().unwrap();
         let (tx, _rx) = mpsc::channel(16);
-        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx), chime_dir: std::path::PathBuf::new() };
         let (_task, seen) = stalling(server, answers, answered, late);
         (player, seen)
     }
@@ -3524,7 +3588,7 @@ pub(crate) mod tests {
         use crate::player::Player;
         let (client, server) = UnixStream::pair().unwrap();
         let (tx, _rx) = mpsc::channel(16);
-        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx), chime_dir: std::path::PathBuf::new() };
         let server = scripted(server, vec![("time-pos", json!(4.416)), ("duration", json!(150.0))], &[], None);
         player.sound_while_paused("eqchain,@chime:x", Some(4.416)).await.unwrap();
         let frozen = Progress { position_s: Some(4.416), duration_s: Some(150.0) };
@@ -3549,7 +3613,7 @@ pub(crate) mod tests {
 
         let (client, server) = UnixStream::pair().unwrap();
         let (tx, _rx) = mpsc::channel(16);
-        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx), chime_dir: std::path::PathBuf::new() };
         let server = scripted(server, vec![("time-pos", json!(12.0))], &[], None);
         player.sound_while_paused("@chime:x", None).await.unwrap();
         assert!(player.gate().in_paused_chime());
@@ -3575,7 +3639,7 @@ pub(crate) mod tests {
         use crate::player::Player;
         let (client, server) = UnixStream::pair().unwrap();
         let (tx, _rx) = mpsc::channel(16);
-        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx), chime_dir: std::path::PathBuf::new() };
         player.gate().begin_paused_chime(Progress::default());
         let server = scripted(server, vec![], &[], Some(std::time::Duration::from_millis(300)));
         player.end_sound_while_paused("eqchain", Some(4.416)).await.unwrap();
@@ -3603,7 +3667,7 @@ pub(crate) mod tests {
         use crate::player::Player;
         let (client, server) = UnixStream::pair().unwrap();
         let (tx, _rx) = mpsc::channel(16);
-        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx), chime_dir: std::path::PathBuf::new() };
         player.gate().begin_paused_chime(Progress::default());
         let server = scripted(server, vec![], &[], None);
         let started = std::time::Instant::now();
@@ -3624,7 +3688,7 @@ pub(crate) mod tests {
         use crate::player::Player;
         let (client, server) = UnixStream::pair().unwrap();
         let (tx, _rx) = mpsc::channel(16);
-        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx), chime_dir: std::path::PathBuf::new() };
         player.gate().begin_paused_chime(Progress::default());
         let server = scripted(server, vec![], &["pause"], Some(std::time::Duration::ZERO));
         assert!(player.end_sound_while_paused("eqchain", None).await.is_err());
@@ -3638,7 +3702,7 @@ pub(crate) mod tests {
 
         let (client, server) = UnixStream::pair().unwrap();
         let (tx, _rx) = mpsc::channel(16);
-        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx), chime_dir: std::path::PathBuf::new() };
         player.gate().begin_paused_chime(Progress::default());
         let _server = scripted(server, vec![], &["seek"], Some(std::time::Duration::ZERO));
         assert!(player.end_sound_while_paused("eqchain", Some(4.416)).await.is_err());
@@ -3652,7 +3716,7 @@ pub(crate) mod tests {
         use crate::player::Player;
         let (client, server) = UnixStream::pair().unwrap();
         let (tx, _rx) = mpsc::channel(16);
-        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx), chime_dir: std::path::PathBuf::new() };
         let server = tokio::spawn(async move {
             let (r, mut w) = server.into_split();
             let mut lines = BufReader::new(r).lines();
@@ -3667,7 +3731,7 @@ pub(crate) mod tests {
             seen
         });
         let uri = "av://lavfi:aevalsrc=exprs='sin(2*PI*440*t)':s=48000:d=0.5";
-        player.play_aside(uri).await.unwrap();
+        player.play_aside(uri, None).await.unwrap();
         drop(player);
         let seen = server.await.unwrap();
         assert_eq!(seen.len(), 1, "{seen:?}");
@@ -3685,7 +3749,7 @@ pub(crate) mod tests {
         use crate::player::Player;
         let (client, server) = UnixStream::pair().unwrap();
         let (tx, mut rx) = mpsc::channel(16);
-        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx) };
+        let player = MpvPlayer { ipc: MpvIpc::from_stream(client, tx), chime_dir: std::path::PathBuf::new() };
         let (r, mut w) = server.into_split();
         let mut lines = BufReader::new(r).lines();
         let answer = async {
@@ -3693,7 +3757,7 @@ pub(crate) mod tests {
             let resp = json!({"request_id": req["request_id"], "error": "error running command"});
             w.write_all(format!("{resp}\n").as_bytes()).await.unwrap();
         };
-        let (res, ()) = tokio::join!(player.play_aside("av://lavfi:anullsrc"), answer);
+        let (res, ()) = tokio::join!(player.play_aside("av://lavfi:anullsrc", None), answer);
         assert!(res.is_err());
         w.write_all(b"{\"event\":\"start-file\",\"playlist_entry_id\":1}\n").await.unwrap();
         let ev = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await;
@@ -3776,8 +3840,8 @@ pub(crate) mod tests {
         while rx.try_recv().is_ok() {}
         player.ipc.command(&[json!("set_property"), json!("pause"), json!(true)]).await.unwrap();
 
-        let uri = crate::lock_sound::idle_uri(crate::lock_sound::LockSound::A, crate::lock_sound::Motif::Lock).unwrap();
-        player.play_aside(&uri).await.unwrap();
+        let uri = crate::lock_sound::idle_uri(player.chime_dir(), crate::lock_sound::LockSound::A, crate::lock_sound::Motif::Lock).unwrap();
+        player.play_aside(&uri, None).await.unwrap();
         // 0.74 s of s16 mono at 48 kHz, and mpv back to idle.
         let expected_bytes = 2 * 35_520;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -3834,8 +3898,8 @@ pub(crate) mod tests {
         let (player, _child) = start_test_mpv(&mpv, d, "", tx).await;
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
-        let uri = crate::lock_sound::idle_uri(crate::lock_sound::LockSound::A, crate::lock_sound::Motif::Lock).unwrap();
-        player.play_aside(&uri).await.unwrap();
+        let uri = crate::lock_sound::idle_uri(player.chime_dir(), crate::lock_sound::LockSound::A, crate::lock_sound::Motif::Lock).unwrap();
+        player.play_aside(&uri, None).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         let idle = player.ipc.command(&[json!("get_property"), json!("idle-active")]).await.unwrap();
         assert_eq!(idle, json!(false), "the chime is still sounding, or the test proves nothing");
@@ -3894,7 +3958,7 @@ pub(crate) mod tests {
     /// later seek of the user's reaches the core again.
     #[tokio::test]
     async fn a_paused_chime_on_a_real_mpv_reaches_no_one() {
-        use crate::lock_sound::{mix_filter_over_silence, LockSound, Motif};
+        use crate::lock_sound::{mix_filter_over_silence, LockSound, LockVolume, Motif};
         use crate::player::{ChimeRoute, Player};
         if mpv_missing() || std::process::Command::new("ffmpeg").arg("-version").output().is_err() {
             eprintln!("mpv or ffmpeg missing: skipping test");
@@ -3943,7 +4007,7 @@ pub(crate) mod tests {
         assert_eq!(at_pause.position_s, Some(t));
         assert!((0.5..3.0).contains(&t), "{t}");
 
-        let chain = mix_filter_over_silence(LockSound::A, Motif::Lock, 48000, 2).unwrap();
+        let chain = mix_filter_over_silence(player.chime_dir(), LockSound::A, Motif::Lock, 48000, 2, LockVolume::Two).unwrap();
         player.sound_while_paused(&chain, Some(t)).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(600)).await;
         let real = number_or_none(player.ipc.command(&[json!("get_property"), json!("time-pos")]).await).unwrap();

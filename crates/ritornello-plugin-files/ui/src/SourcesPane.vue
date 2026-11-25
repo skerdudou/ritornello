@@ -84,7 +84,9 @@ function goUp(): void {
       <span class="text-xs text-muted-foreground" data-source-kind>
         {{ r.kind === 'local' ? t('kind_local') : t('kind_smb') }}
       </span>
-      <span class="min-w-48 flex-1 truncate text-sm" data-source-target>{{ rootTarget(r) }}</span>
+      <!-- `min-w-48` is a desktop floor, lifted below `md` so that the path can
+           shrink with the narrow row instead of claiming 192 px of it. -->
+      <span class="min-w-48 max-md:min-w-0 flex-1 truncate text-sm" data-source-target>{{ rootTarget(r) }}</span>
 
       <!-- The mount state is **observed**, never entered: it comes from
            the plugin, which reads /proc/mounts. -->

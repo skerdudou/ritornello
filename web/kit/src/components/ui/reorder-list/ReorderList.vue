@@ -73,6 +73,12 @@ const locked = computed(() => props.disabled || pending.value !== null)
 // goes back to. It may be one of Vue's empty text anchors, which is fine.
 let anchor: Node | null = null
 
+// The row is grabbed (after the hold, for a finger): say so to the hand,
+// where the device can vibrate. The highlight is `reorder-chosen`'s, below.
+function onChoose() {
+  navigator.vibrate?.(15)
+}
+
 function onStart(e: SortableEvent) {
   // A poll that lands mid-drag must not re-render the rows under the finger:
   // Vue would patch a DOM that Sortable has rearranged.
@@ -131,6 +137,13 @@ const draggable = useDraggable<T>(root, {
   // A few pixels before a press becomes a drag, so a tap on the handle stays
   // a tap.
   fallbackTolerance: 3,
+  // A finger must hold the handle still for 0.4 s before the row is grabbed;
+  // moving more than 5 px meanwhile cancels the grab. The handle refuses to
+  // scroll (`touch-none`), so without the hold a thumb landing on it to
+  // scroll the page moved a row instead. A mouse grabs at once.
+  delay: 400,
+  delayOnTouchOnly: true,
+  touchStartThreshold: 5,
   ghostClass: "reorder-ghost",
   chosenClass: "reorder-chosen",
   fallbackClass: "reorder-fallback",
@@ -142,6 +155,7 @@ const draggable = useDraggable<T>(root, {
   scrollSensitivity: 120,
   scrollSpeed: 20,
   disabled: locked.value,
+  onChoose,
   onStart,
   onEnd,
 })
@@ -156,6 +170,8 @@ provide(REORDER_DISABLED, locked)
 // shell's Tailwind pass scans the kit's sources, and leaving `theme.css`
 // alone leaves every plugin's `ui.css` unchanged.
 const ROOT_CLASS = [
+  // The grabbed row, from the end of the hold: the finger may move now.
+  "[&_.reorder-chosen]:bg-accent",
   // The placeholder, where the row will land: the feedback the finger sees.
   "[&_.reorder-ghost]:bg-accent [&_.reorder-ghost]:opacity-60",
   "[&_.reorder-ghost]:outline-2 [&_.reorder-ghost]:outline-dashed [&_.reorder-ghost]:outline-primary",

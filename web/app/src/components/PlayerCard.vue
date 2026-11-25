@@ -54,12 +54,19 @@ const imageBroken = ref(false)
  * owner reports covers that do not load, some of which end up arriving "much
  * later": publishing the URL and the actual availability of the bytes are not
  * the same instant, and the first `error` of the `<img>` doomed the square
- * until the next track. Two spaced-out retries catch a transient dip without
+ * until the next track. Spaced-out retries catch a transient dip without
  * hammering the device.
+ *
+ * **Four, over about twenty seconds, not two over five.** A declared file on
+ * a network share can go silent for several seconds at a time (the core's
+ * read gives up after 3 s, and answers 404 "illisible"). On the Pi's log of
+ * 2026-11-19 the share went quiet three times within a single track, and two
+ * quick retries ran out before the last outage ended: the square stayed ♫
+ * until the next track. Each retry is a fresh read on the core's side (a
+ * failure is never remembered there), so a later one can succeed.
  */
-const IMAGE_RETRIES = 2
-/** Delay before each retry, in milliseconds: short, then less short. */
-const RETRY_DELAYS_MS = [800, 3000]
+const RETRY_DELAYS_MS = [1000, 3000, 6000, 10000]
+const IMAGE_RETRIES = RETRY_DELAYS_MS.length
 /** How many retries have already been consumed for the current URL. */
 const retriesDone = ref(0)
 /**
@@ -178,10 +185,16 @@ function openEnlarged() {
 const overlayEl = ref<HTMLElement | null>(null)
 const enlargedImg = ref<HTMLImageElement | null>(null)
 /**
+ * The margin the overlay keeps around the picture (its `p-4`, 16 px). Read
+ * as the viewport's inset: `clientWidth` includes the padding, and the pan
+ * limit must stop the picture at the inner edge, not at the screen's.
+ */
+const ZOOM_MARGIN_PX = 16
+/**
  * The sizes the zoom arithmetic needs, read at the moment of each gesture.
  * The image's box is its laid-out size at ×1 (`offsetWidth` ignores the CSS
- * transform), the viewport the overlay's inner area. Zero when absent, which
- * the arithmetic treats as "nothing to pan".
+ * transform), the viewport the overlay's inner area, padding excluded. Zero
+ * when absent, which the arithmetic treats as "nothing to pan".
  */
 function measure(): ZoomMeasure {
   const img = enlargedImg.value
@@ -189,7 +202,10 @@ function measure(): ZoomMeasure {
   const rect = el?.getBoundingClientRect()
   return {
     box: { width: img?.offsetWidth ?? 0, height: img?.offsetHeight ?? 0 },
-    viewport: { width: el?.clientWidth ?? 0, height: el?.clientHeight ?? 0 },
+    viewport: {
+      width: Math.max(0, (el?.clientWidth ?? 0) - 2 * ZOOM_MARGIN_PX),
+      height: Math.max(0, (el?.clientHeight ?? 0) - 2 * ZOOM_MARGIN_PX),
+    },
     center: rect ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } : { x: 0, y: 0 },
   }
 }
@@ -519,8 +535,11 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
         @wheel="zoom.onWheel"
       >
         <!-- `object-contain` and not `object-cover`: enlarging is precisely
-             for seeing the whole cover, a crop would betray it. No transition
-             while fingers are down: the image must follow them, not lag. -->
+             for seeing the whole cover, a crop would betray it. The overlay
+             keeps its `p-4` margin at every scale: `measure` reads the viewport
+             inside it, so a panned picture stops at that margin and never
+             sticks to the screen's edge. No transition while fingers are down:
+             the image must follow them, not lag. -->
         <img
           ref="enlargedImg"
           :src="state?.cover_href ?? ''"

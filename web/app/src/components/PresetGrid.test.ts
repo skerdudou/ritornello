@@ -421,3 +421,126 @@ describe('swipe', () => {
     expect(w.get('[data-preset-grid]').attributes('style') ?? '').not.toContain('touch-action')
   })
 })
+
+describe('drag', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    localStorage.clear()
+  })
+
+  const touch = (type: string, x: number, y: number) =>
+    new PointerEvent(type, { bubbles: true, isPrimary: true, pointerId: 1, pointerType: 'touch', clientX: x, clientY: y })
+  // The track's translation, read for its terms rather than its spelling:
+  // jsdom versions reorder and fold the `calc` (`calc(-100% - 0.5rem + -50px)`
+  // comes back as `calc(-100% - 50px - 0.5rem)` on one, `2 * 0.5rem` as
+  // `1rem`). `pages` is the percentage in whole pages, `gap` the rem terms.
+  function shift(style: string | undefined): { pages: number; gap: number } {
+    const calc = /translateX\(calc\((.*)\)\)/.exec(style ?? '')?.[1] ?? ''
+    const terms = calc.replace(/\s*\*\s*/g, '*').replace(/\s+([+-])\s+/g, ' $1').split(' ')
+    let pages = 0
+    let gap = 0
+    for (const term of terms) {
+      const [, sign, factor, value, unit] = /^([+-]?)(?:(\d+(?:\.\d+)?)\*)?(\d+(?:\.\d+)?)(%|rem|px)$/.exec(term) ?? []
+      if (unit === undefined) continue
+      const n = (sign === '-' ? -1 : 1) * Number(factor ?? 1) * Number(value)
+      if (unit === '%') pages += n / 100
+      else if (unit === 'rem') gap += n
+    }
+    return { pages, gap }
+  }
+  // The settle lasts SETTLE_MS (200): run the timers past it, then render.
+  async function settle() {
+    vi.advanceTimersByTime(250)
+    await nextTick()
+  }
+
+  it('a horizontal move shows the current page beside its neighbours', async () => {
+    const w = mounted({ preset_count: 23 })
+    const grid = w.get('[data-preset-grid]').element
+    expect(w.findAll('[data-preset-panel]')).toHaveLength(1)
+    grid.dispatchEvent(touch('pointerdown', 200, 100))
+    grid.dispatchEvent(touch('pointermove', 150, 102))
+    await nextTick()
+    // Three panels: a previous page (empty on the first), this one, the next.
+    expect(w.findAll('[data-preset-panel]')).toHaveLength(3)
+    // The pages are as far apart as the grid's two columns (gap-2 = 0.5rem),
+    // the middle one in view.
+    const track = w.get('[data-preset-track]').attributes('style')
+    expect(track).toContain('gap: 0.5rem')
+    expect(shift(track)).toEqual({ pages: -1, gap: -0.5 })
+    expect(w.findAll('[data-preset-button]')).toHaveLength(20)
+    // Every panel packs its rows at the top: the last page, three tiles here,
+    // must not spread them over the height of the full page beside it.
+    for (const panel of w.findAll('[data-preset-panel]')) expect(panel.classes()).toContain('content-start')
+  })
+
+  it('a move under the swipe ratio does not start a drag', async () => {
+    const w = mounted({ preset_count: 23 })
+    const grid = w.get('[data-preset-grid]').element
+    grid.dispatchEvent(touch('pointerdown', 200, 100))
+    grid.dispatchEvent(touch('pointermove', 185, 140))
+    await nextTick()
+    expect(w.findAll('[data-preset-panel]')).toHaveLength(1)
+  })
+
+  it('a release past the commit distance turns the page once the settle is done', async () => {
+    vi.useFakeTimers()
+    const w = mounted({ preset_count: 23 })
+    const grid = w.get('[data-preset-grid]').element
+    grid.dispatchEvent(touch('pointerdown', 200, 100))
+    grid.dispatchEvent(touch('pointermove', 140, 101))
+    grid.dispatchEvent(touch('pointerup', 140, 101))
+    await nextTick()
+    // Still on page 1 while the track settles onto the next one.
+    expect(w.get('[data-preset-window]').text()).toBe('1–10 of 23')
+    // Two pages and two gaps along.
+    expect(shift(w.get('[data-preset-track]').attributes('style'))).toEqual({ pages: -2, gap: -1 })
+    await settle()
+    expect(w.get('[data-preset-window]').text()).toBe('11–20 of 23')
+    expect(w.findAll('[data-preset-panel]')).toHaveLength(1)
+  })
+
+  it('a release short of the commit distance springs back to the same page', async () => {
+    vi.useFakeTimers()
+    // A card 400 px wide commits past 100 px: a 60 px swipe is not enough.
+    const proto = Element.prototype
+    const original = Object.getOwnPropertyDescriptor(proto, 'clientWidth')
+    Object.defineProperty(proto, 'clientWidth', { configurable: true, get: () => 400 })
+    try {
+      const w = mounted({ preset_count: 23 })
+      const grid = w.get('[data-preset-grid]').element
+      grid.dispatchEvent(touch('pointerdown', 200, 100))
+      grid.dispatchEvent(touch('pointermove', 140, 101))
+      grid.dispatchEvent(touch('pointerup', 140, 101))
+      await settle()
+      expect(w.get('[data-preset-window]').text()).toBe('1–10 of 23')
+      expect(w.findAll('[data-preset-panel]')).toHaveLength(1)
+    } finally {
+      if (original) Object.defineProperty(proto, 'clientWidth', original)
+      else delete (proto as unknown as Record<string, unknown>).clientWidth
+    }
+  })
+
+  it('a drag towards a page that does not exist stays on the page', async () => {
+    vi.useFakeTimers()
+    const w = mounted({ preset_count: 23 })
+    const grid = w.get('[data-preset-grid]').element
+    grid.dispatchEvent(touch('pointerdown', 100, 100))
+    grid.dispatchEvent(touch('pointermove', 200, 100))
+    grid.dispatchEvent(touch('pointerup', 200, 100))
+    await settle()
+    expect(w.get('[data-preset-window]').text()).toBe('1–10 of 23')
+  })
+
+  it('a cancelled drag springs back and turns nothing', async () => {
+    vi.useFakeTimers()
+    const w = mounted({ preset_count: 23 })
+    const grid = w.get('[data-preset-grid]').element
+    grid.dispatchEvent(touch('pointerdown', 200, 100))
+    grid.dispatchEvent(touch('pointermove', 100, 100))
+    grid.dispatchEvent(touch('pointercancel', 100, 100))
+    await settle()
+    expect(w.get('[data-preset-window]').text()).toBe('1–10 of 23')
+    expect(w.findAll('[data-preset-panel]')).toHaveLength(1)
+  })
+})

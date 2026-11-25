@@ -1,9 +1,17 @@
 <script setup lang="ts">
 import { Button, Card, CardAction, CardContent, CardHeader, CardTitle } from '@ritornello/ui'
 import { ChevronLeftIcon, ChevronRightIcon, ListBulletIcon, ViewGridIcon } from '@radix-icons/vue'
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useCatalog } from '../composables/useCatalog'
-import { classifySwipe, loadPresetLayout, revealScrollTop, savePresetLayout, type PresetLayout } from './presetLayout'
+import {
+  classifySwipe,
+  loadPresetLayout,
+  revealScrollTop,
+  savePresetLayout,
+  settleDirection,
+  SWIPE_RATIO,
+  type PresetLayout,
+} from './presetLayout'
 import type { PlayerPayload } from '../types'
 import { unavailable } from '../views/remoteCommands'
 
@@ -30,13 +38,16 @@ const count = computed(() => (props.state?.standby ? props.listedCount : props.s
 //
 // Do not "simplify" into windows of 6 or 12 for layout reasons: the numeric
 // keypad only has ten digits.
-const presets = computed(() => {
+// A page outside the range (before the first, after the last) is empty: during
+// a drag it is the neighbour drawn beside the current one.
+function pageNumbers(k: number): number[] {
   const c = count.value
-  if (c === null) return Array.from({ length: 10 }, (_, i) => i + 1)
-  const start = page.value * 10 + 1
-  const end = Math.min(page.value * 10 + 10, c)
-  return start > end ? [] : Array.from({ length: end - start + 1 }, (_, i) => start + i)
-})
+  if (c === null) return k === 0 ? Array.from({ length: 10 }, (_, i) => i + 1) : []
+  const start = k * 10 + 1
+  const end = Math.min(k * 10 + 10, c)
+  return k < 0 || start > end ? [] : Array.from({ length: end - start + 1 }, (_, i) => start + i)
+}
+const presets = computed(() => pageNumbers(page.value))
 
 const paginationVisible = computed(() => (count.value ?? 0) > 10)
 
@@ -128,27 +139,98 @@ let start: { id: number; x: number; y: number } | null = null
 const SWALLOW_WINDOW_MS = 500
 let swallowUntil = 0
 
+// The page follows the finger. Once a horizontal move passes DRAG_START_PX
+// (with the swipe's own ratio), the track shows the neighbouring pages beside
+// the current one and translates with the finger. On release it settles over
+// SETTLE_MS: onto the neighbour when the drag commits, back to the current page
+// otherwise; the page changes once the settle is done.
+const DRAG_START_PX = 10
+const SETTLE_MS = 200
+type Settle = 'next' | 'previous' | 'back'
+// Pixels the finger has moved, null when no drag is shown.
+const dragOffset = ref<number | null>(null)
+// Set from the release until the settle ends; null while the finger is down.
+const settling = ref<Settle | null>(null)
+let settleTimer: ReturnType<typeof setTimeout> | undefined
+onBeforeUnmount(() => clearTimeout(settleTimer))
+
+// While dragging, the track lays the three pages side by side, the current one
+// in the middle, PAGE_GAP apart — the gap between the grid's two columns, so
+// the seam between two pages reads like the one between two columns. Each
+// panel is as wide as the frame, and so is the track itself: a translateX of
+// -100% is exactly one page, and the gaps are added on top.
+const PAGE_GAP = '0.5rem'
+const trackStyle = computed(() => {
+  if (dragOffset.value === null) return undefined
+  const base = settling.value === 'next' ? `-200% - 2 * ${PAGE_GAP}`
+    : settling.value === 'previous' ? '0%'
+    : `-100% - ${PAGE_GAP}`
+  const px = settling.value === null ? dragOffset.value : 0
+  return { gap: PAGE_GAP, transform: `translateX(calc(${base} + ${px}px))` }
+})
+const panels = computed(() => {
+  if (listMode.value) return [allPresets.value]
+  if (dragOffset.value === null) return [presets.value]
+  return [pageNumbers(page.value - 1), pageNumbers(page.value), pageNumbers(page.value + 1)]
+})
+
 function onPointerDown(e: PointerEvent) {
   // Any new gesture, whatever the pointer, ends the swallow.
   swallowUntil = 0
   if (e.pointerType !== 'touch' && e.pointerType !== 'pen') return
   // A second finger is ignored; a new primary pointer always starts afresh,
   // so a start whose up never reached the card (a pen lifted off it) cannot
-  // go stale.
-  if (listMode.value || !e.isPrimary) return
+  // go stale. Nothing starts while a settle is running.
+  if (listMode.value || !e.isPrimary || settling.value !== null) return
   start = { id: e.pointerId, x: e.clientX, y: e.clientY }
+}
+function onPointerMove(e: PointerEvent) {
+  if (!start || start.id !== e.pointerId) return
+  const dx = e.clientX - start.x
+  const dy = e.clientY - start.y
+  if (dragOffset.value === null && (Math.abs(dx) < DRAG_START_PX || Math.abs(dx) < SWIPE_RATIO * Math.abs(dy))) return
+  // A direction with no page behind it does not move: the page stays put.
+  const blocked = (dx < 0 && page.value >= lastPage.value) || (dx > 0 && page.value <= 0)
+  dragOffset.value = blocked ? 0 : dx
 }
 function onPointerUp(e: PointerEvent) {
   if (!start || start.id !== e.pointerId) return
-  const direction = classifySwipe(e.clientX - start.x, e.clientY - start.y)
+  const dx = e.clientX - start.x
+  const dy = e.clientY - start.y
   start = null
-  if (!direction) return
-  if (direction === 'next') nextPage()
-  else previousPage()
+  if (dragOffset.value === null) {
+    // No move was seen (a flick the browser reported only at its ends): judged
+    // as a plain swipe, and the page turns without a settle.
+    const direction = classifySwipe(dx, dy)
+    if (!direction) return
+    if (direction === 'next') nextPage()
+    else previousPage()
+    swallowUntil = e.timeStamp + SWALLOW_WINDOW_MS
+    return
+  }
+  release(settleDirection(dx, dy, listFrame.value?.clientWidth ?? 0))
   swallowUntil = e.timeStamp + SWALLOW_WINDOW_MS
 }
 function onPointerCancel() {
   start = null
+  // A drag the browser took over (a vertical scroll, a second finger) springs back.
+  if (dragOffset.value !== null && settling.value === null) release(null)
+}
+// `direction` is what the release decided; a commit past the last or first page
+// springs back as well.
+function release(direction: 'next' | 'previous' | null) {
+  const target: Settle =
+    direction === 'next' && page.value < lastPage.value ? 'next'
+    : direction === 'previous' && page.value > 0 ? 'previous'
+    : 'back'
+  settling.value = target
+  clearTimeout(settleTimer)
+  settleTimer = setTimeout(() => {
+    if (target === 'next') nextPage()
+    else if (target === 'previous') previousPage()
+    dragOffset.value = null
+    settling.value = null
+  }, SETTLE_MS)
 }
 // The browser still sends a click when a swipe ends on the element it started
 // on: without this, swiping from a tile would also choose that preset and
@@ -172,6 +254,7 @@ const dimmed = computed(() => unavailable('Select', props.state))
     :data-preset-layout="listMode ? 'list' : 'pages'"
     :style="listMode ? undefined : { touchAction: 'pan-y pinch-zoom' }"
     @pointerdown="onPointerDown"
+    @pointermove="onPointerMove"
     @pointerup="onPointerUp"
     @pointercancel="onPointerCancel"
     @click.capture="onClickCapture"
@@ -210,28 +293,48 @@ const dimmed = computed(() => unavailable('Select', props.state))
       <!-- One tile = number + name. Pages: two columns, enough for a station
            name, and the same grid on the phone and in the half-width of the PC.
            List: one column in a scrolling frame, every preset. -->
+      <!-- The frame is the scroller in list mode, and the window on the pages
+           in pages mode. In the list the frame reaches into the card's right
+           padding (`-mr-4`) and pads its content back (`pr-4`): the tiles keep
+           their width and the scrollbar sits clear of them, in the margin.
+           In pages mode the panels of a drag are packed at the top
+           (`content-start`): a short last page keeps its rows together rather
+           than spreading them over the height of a full neighbour. -->
       <div
         ref="listFrame"
         :data-preset-list="listMode ? '' : undefined"
         :class="listMode
-          ? 'relative grid max-h-[min(60vh,32rem)] grid-cols-1 gap-2 overflow-y-auto p-1'
-          : 'grid grid-cols-2 gap-2'"
+          ? 'relative -mr-4 max-h-[min(60vh,32rem)] overflow-y-auto p-1 pr-4'
+          : 'overflow-hidden'"
       >
-        <Button
-          v-for="n in listMode ? allPresets : presets"
-          :key="n"
-          :data-preset-button="n"
-          :data-preset-active="state?.preset === n ? 'true' : undefined"
-          :aria-current="state?.preset === n ? 'true' : undefined"
-          :variant="state?.preset === n ? 'default' : 'outline'"
-          class="h-14 justify-start gap-3 px-3 md:h-12"
-          :disabled="dimmed"
-          @click="emit('choose', n)"
+        <div
+          data-preset-track
+          :class="[listMode ? '' : 'flex', settling ? 'transition-transform duration-200 ease-out' : '']"
+          :style="listMode ? undefined : trackStyle"
         >
-          <span class="w-6 text-left text-base font-bold" :class="state?.preset === n ? '' : 'text-muted-foreground'">{{ n }}</span>
-          <span v-if="nameOf(n)" class="truncate font-medium" data-preset-name>{{ nameOf(n) }}</span>
-          <span v-if="state?.preset === n" class="ml-auto size-2 shrink-0 rounded-full bg-current" aria-hidden="true" />
-        </Button>
+          <div
+            v-for="(group, i) in panels"
+            :key="i"
+            :data-preset-panel="listMode ? undefined : i"
+            :class="listMode ? 'grid grid-cols-1 gap-2' : 'grid w-full shrink-0 grid-cols-2 content-start gap-2'"
+          >
+            <Button
+              v-for="n in group"
+              :key="n"
+              :data-preset-button="n"
+              :data-preset-active="state?.preset === n ? 'true' : undefined"
+              :aria-current="state?.preset === n ? 'true' : undefined"
+              :variant="state?.preset === n ? 'default' : 'outline'"
+              class="h-14 justify-start gap-3 px-3 md:h-12"
+              :disabled="dimmed"
+              @click="emit('choose', n)"
+            >
+              <span class="w-6 text-left text-base font-bold" :class="state?.preset === n ? '' : 'text-muted-foreground'">{{ n }}</span>
+              <span v-if="nameOf(n)" class="truncate font-medium" data-preset-name>{{ nameOf(n) }}</span>
+              <span v-if="state?.preset === n" class="ml-auto size-2 shrink-0 rounded-full bg-current" aria-hidden="true" />
+            </Button>
+          </div>
+        </div>
       </div>
     </CardContent>
   </Card>

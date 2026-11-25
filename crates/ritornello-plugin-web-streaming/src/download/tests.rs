@@ -89,6 +89,7 @@ fn the_download_command_is_exactly_the_documented_one() {
             "--hls-prefer-native",
             "--ffmpeg-location",
             "/dev/null/ffmpeg",
+            "--write-info-json",
             "--newline",
             "--progress-template",
             "download:%(progress._percent_str)s %(info.id)s",
@@ -432,17 +433,19 @@ fn wrapper(probe_json: &Path, log: &Path, hook: &str) -> String {
     format!(
         r#"case "$1" in -J) cat '{probe}'; exit 0;; esac
 echo "$*" >> '{log}.args'
+allargs="$*"
 out=; url=
 while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift;; --) url="$2"; break;; esac; shift; done
 echo "$url" >> '{log}'
 echo "$out" >> '{log}.out'
 id="${{url##*=}}"
-EXT=m4a; SRC=
+EXT=m4a; SRC=; INFO=
 {hook}
 echo "  42.0% $id"
 file=$(printf '%s' "$out" | sed "s/%(ext)s/$EXT/; s/%%/%/g")
 [ -e "$file" ] && exit 0
 if [ -n "$SRC" ]; then cp "$SRC" "$file"; else printf 'audio' > "$file"; fi
+case " $allargs " in *" --write-info-json "*) if [ -n "$INFO" ]; then printf '%s' "$INFO" > "$(dirname "$file")/$(basename "$file" ".$EXT").info.json"; fi;; esac
 "#,
         probe = probe_json.display(),
         log = log.display(),
@@ -1297,6 +1300,62 @@ async fn a_real_opus_takes_its_cover_inside_as_it_is() {
     assert!(notes(&events).is_empty(), "{events:?}");
     assert_eq!(files_in(&s.resolved.dir), ["Me at the zoo.opus"]);
     assert_eq!(front_cover(&s.resolved.dir.join("Me at the zoo.opus")), Some((lofty::file::FileType::Opus, jpeg)));
+}
+
+#[test]
+fn tags_are_only_what_the_site_gives() {
+    use super::tags_from_info;
+    let children = serde_json::json!({
+        "title": "  La sorcière Grabouilla  ",
+        "uploader": "Petpuppet ",
+        "description": "Paroles",
+        "webpage_url": "https://www.youtube.com/watch?v=ByHqCGlI26E",
+    });
+    let t = tags_from_info(&children);
+    assert_eq!(t.title.as_deref(), Some("La sorcière Grabouilla"));
+    assert_eq!(t.artist.as_deref(), Some("Petpuppet"), "the channel is the author of a children's video");
+    assert_eq!((t.album, t.track), (None, None), "no album or track invented");
+    assert_eq!(t.url.as_deref(), Some("https://www.youtube.com/watch?v=ByHqCGlI26E"));
+    // The music channels say more, and their own artist wins over the channel.
+    let music = serde_json::json!({
+        "title": "Da Coconut Nut",
+        "artist": "The San Miguel Master Chorale, Ryan Cayabyab",
+        "uploader": "The San Miguel Master Chorale - Topic",
+        "album": "Da Coconut Nut",
+        "track_number": 3,
+    });
+    let m = tags_from_info(&music);
+    assert_eq!(m.artist.as_deref(), Some("The San Miguel Master Chorale, Ryan Cayabyab"));
+    assert_eq!(m.album.as_deref(), Some("Da Coconut Nut"));
+    assert_eq!(m.track, Some(3));
+    assert_eq!(tags_from_info(&serde_json::json!({"title": "   "})), super::Tags::default(), "blank is nothing");
+}
+
+#[tokio::test]
+async fn a_real_m4a_is_tagged_from_the_sites_info_and_the_json_is_removed() {
+    use lofty::tag::ItemKey;
+    let Some(ffmpeg) = real_ffmpeg() else {
+        eprintln!("ffmpeg missing: skipping test");
+        return;
+    };
+    let src = tempfile::tempdir().unwrap();
+    let m4a = src.path().join("tone.m4a");
+    tone(&ffmpeg, &m4a, "aac", "ipod");
+    let info = r#"{"title":"La sorcière Grabouilla","uploader":"Petpuppet ","description":"Paroles","webpage_url":"https://www.youtube.com/watch?v=ByHqCGlI26E"}"#;
+    let hook = format!("EXT=m4a; SRC='{}'; INFO='{info}'", m4a.display());
+    let s = setup(&fixture_path("video.json"), &hook, None);
+    let (end, events) = run_choosing(&s, &zoo(), &choosing(Format::Original, CoverMode::Embedded), &Cancel::new()).await;
+    assert_eq!(end, PresetEnd::Finished);
+    assert!(notes(&events).is_empty(), "{events:?}");
+    let track = s.resolved.dir.join("Me at the zoo.m4a");
+    assert_eq!(files_in(&s.resolved.dir), ["Me at the zoo.m4a"], "the info.json is removed");
+    let file = lofty::read_from_path(&track).unwrap();
+    let tag = lofty::file::TaggedFileExt::primary_tag(&file).expect("a tag was written");
+    assert_eq!(tag.get_string(ItemKey::TrackTitle), Some("La sorcière Grabouilla"));
+    assert_eq!(tag.get_string(ItemKey::TrackArtist), Some("Petpuppet"));
+    assert_eq!(tag.get_string(ItemKey::Description), Some("Paroles"));
+    assert_eq!(tag.get_string(ItemKey::PodcastUrl), Some("https://www.youtube.com/watch?v=ByHqCGlI26E"));
+    assert_eq!(tag.get_string(ItemKey::AlbumTitle), None, "no album invented");
 }
 
 #[test]

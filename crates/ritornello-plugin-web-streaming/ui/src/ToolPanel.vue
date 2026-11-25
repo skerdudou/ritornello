@@ -5,7 +5,7 @@ import {
 } from './data'
 
 defineProps<{ t: T; tool: ToolStatus; frozen: boolean; lastFailure: PlaybackFailure | null }>()
-defineEmits<{ update: [force: boolean]; channel: [nightly: boolean] }>()
+defineEmits<{ update: [force: boolean]; channel: [nightly: boolean]; clearFailure: [] }>()
 </script>
 
 <template>
@@ -72,17 +72,27 @@ defineEmits<{ update: [force: boolean]; channel: [nightly: boolean] }>()
     </p>
     <!-- mpv resolves a playback through the wrapper, out of the plugin's
          sight: this is the only place its failure is told at length. -->
-    <div v-if="lastFailure" data-last-failure>
-      <p>
-        {{ t('last_failure', {
-          when: whenText(lastFailure.time),
-          host: lastFailure.host,
-          cause: playFailureText(t, lastFailure.code),
-        }) }}
-      </p>
-      <p v-if="lastFailure.detail" class="break-words text-xs text-muted-foreground" data-last-failure-detail>
-        {{ t('last_failure_said', { detail: lastFailure.detail }) }}
-      </p>
+    <!-- "Clear" forgets it once read: the record stays otherwise until the
+         next failure replaces it, long after it stopped mattering. -->
+    <div v-if="lastFailure" data-last-failure class="flex items-start gap-3">
+      <div class="min-w-0 flex-1 space-y-1">
+        <p>
+          {{ t('last_failure', {
+            when: whenText(lastFailure.time),
+            host: lastFailure.host,
+            cause: playFailureText(t, lastFailure.code),
+          }) }}
+        </p>
+        <p v-if="lastFailure.detail" class="break-words text-xs text-muted-foreground" data-last-failure-detail>
+          {{ t('last_failure_said', { detail: lastFailure.detail }) }}
+        </p>
+      </div>
+      <Button
+        variant="outline" size="sm" class="shrink-0" data-clear-failure
+        :disabled="frozen" @click="$emit('clearFailure')"
+      >
+        {{ t('btn_clear_failure') }}
+      </Button>
     </div>
   </div>
 </template>

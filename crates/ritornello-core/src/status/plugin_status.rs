@@ -353,6 +353,63 @@ impl PluginStatus {
         }
     }
 
+    /// Lines of a switched-off plugin, from the manifest block its binary
+    /// carries (`update::embedded`): one per kind the block names, each with
+    /// the block's version and repository — what the page shows on the row,
+    /// since a switched-off plugin never announces. Nothing more is taken from
+    /// it: still no admin page, still `disabled`.
+    ///
+    /// A kind the core does not know (a word from a newer SDK) is dropped
+    /// rather than shown raw; with no kind left, or no block at all (a binary
+    /// built before the block, or none on disk), the single `unknown` line of
+    /// [`PluginStatus::disabled`].
+    pub fn disabled_from_block(name: &str, block: Option<&ritornello_plugin_sdk::embedded::Embedded>) -> Vec<Self> {
+        let Some(block) = block else { return vec![Self::disabled(name)] };
+        let known = |k: &&String| matches!(k.as_str(), "source" | "display" | "input" | "metadata");
+        let kinds: Vec<&String> = block.kinds.iter().filter(known).collect();
+        let line = |kind: &str| Self {
+            kind: kind.to_string(),
+            version: Some(block.version.clone()),
+            repository: block.repository.clone(),
+            ..Self::disabled(name)
+        };
+        if kinds.is_empty() {
+            vec![line("unknown")]
+        } else {
+            kinds.into_iter().map(|k| line(k)).collect()
+        }
+    }
+
+    /// Lines of a plugin switched off from the page, from the lines it had
+    /// until then: the kinds, version and repository its last announcement
+    /// gave are still true of the binary on disk, so the row keeps them
+    /// rather than falling back to "unknown" until the next restart reads
+    /// the block. No file is read here: this runs while an HTTP request
+    /// waits. A plugin that had announced nothing gets the plain line.
+    pub fn disabled_after(name: &str, previous: &[PluginStatus]) -> Vec<Self> {
+        let mine: Vec<&PluginStatus> = previous.iter().filter(|l| l.name == name).collect();
+        let version = mine.iter().find_map(|l| l.version.clone());
+        let repository = mine.iter().find_map(|l| l.repository.clone());
+        let mut kinds: Vec<&str> = Vec::new();
+        for l in &mine {
+            if l.kind != "unknown" && !kinds.contains(&l.kind.as_str()) {
+                kinds.push(&l.kind);
+            }
+        }
+        if kinds.is_empty() {
+            kinds.push("unknown");
+        }
+        kinds
+            .into_iter()
+            .map(|kind| Self {
+                kind: kind.to_string(),
+                version: version.clone(),
+                repository: repository.clone(),
+                ..Self::disabled(name)
+            })
+            .collect()
+    }
+
     /// Line of a plugin refused by `compat::judge`.
     ///
     /// Neither kind nor admin page: nothing of it was wired. It is not
@@ -2039,6 +2096,68 @@ mod tests {
         assert!(!l.stalled, "it is not silent, it does not exist");
         assert!(!l.admin, "no admin page to reach");
         assert_eq!(l.kind, "unknown");
+    }
+
+    fn block(kinds: &[&str]) -> ritornello_plugin_sdk::embedded::Embedded {
+        ritornello_plugin_sdk::embedded::Embedded {
+            version: "0.3.1".into(),
+            repository: Some("https://github.com/skerdudou/ritornello".into()),
+            kinds: kinds.iter().map(|k| k.to_string()).collect(),
+        }
+    }
+
+    /// The defect reported in use: the CD plugin switched off showed neither
+    /// its kind nor its version, though its binary carries both.
+    #[test]
+    fn a_switched_off_plugin_takes_its_kind_and_version_from_its_block() {
+        let lines = PluginStatus::disabled_from_block("cd", Some(&block(&["source"])));
+        assert_eq!(lines.len(), 1);
+        let l = &lines[0];
+        assert_eq!(l.kind, "source");
+        assert_eq!(l.version.as_deref(), Some("0.3.1"));
+        assert_eq!(l.repository.as_deref(), Some("https://github.com/skerdudou/ritornello"));
+        assert!(l.disabled && !l.connected && !l.admin, "still switched off, still no admin page");
+        // One line per kind, as an announced plugin has.
+        let two = PluginStatus::disabled_from_block("mpd", Some(&block(&["display", "input"])));
+        assert_eq!(two.iter().map(|l| l.kind.as_str()).collect::<Vec<_>>(), ["display", "input"]);
+        assert!(two.iter().all(|l| l.version.as_deref() == Some("0.3.1")));
+    }
+
+    #[test]
+    fn a_block_without_a_known_kind_still_gives_the_version() {
+        // Built before the block carried kinds, or a word this core does not know.
+        for kinds in [&[][..], &["teleport"][..]] {
+            let lines = PluginStatus::disabled_from_block("cd", Some(&block(kinds)));
+            assert_eq!(lines.len(), 1);
+            assert_eq!(lines[0].kind, "unknown");
+            assert_eq!(lines[0].version.as_deref(), Some("0.3.1"));
+        }
+        // No block at all: the plain line.
+        let none = PluginStatus::disabled_from_block("cd", None);
+        assert_eq!(none.len(), 1);
+        assert_eq!((none[0].kind.as_str(), none[0].version.as_deref()), ("unknown", None));
+    }
+
+    #[test]
+    fn switching_off_keeps_what_the_last_announcement_said() {
+        let mut display = PluginStatus::kind("mpd", "display", true, true);
+        display.version = Some("0.3.2".into());
+        display.repository = Some("https://github.com/skerdudou/ritornello".into());
+        let mut input = PluginStatus::kind("mpd", "input", true, true);
+        input.version = Some("0.3.2".into());
+        let other = PluginStatus::kind("radio", "source", true, false);
+        let lines = PluginStatus::disabled_after("mpd", &[display, other, input]);
+        assert_eq!(lines.iter().map(|l| l.kind.as_str()).collect::<Vec<_>>(), ["display", "input"]);
+        for l in &lines {
+            assert!(l.disabled && !l.connected && !l.admin, "{l:?}");
+            assert_eq!(l.version.as_deref(), Some("0.3.2"));
+            assert_eq!(l.repository.as_deref(), Some("https://github.com/skerdudou/ritornello"));
+        }
+        // A plugin that never announced: the plain line.
+        let stalled = PluginStatus::unknown_kind("cd", true);
+        let plain = PluginStatus::disabled_after("cd", &[stalled]);
+        assert_eq!(plain.len(), 1);
+        assert_eq!((plain[0].kind.as_str(), plain[0].version.as_deref()), ("unknown", None));
     }
 
     #[test]

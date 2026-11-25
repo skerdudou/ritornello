@@ -267,6 +267,11 @@ async function updateTool(force: boolean): Promise<void> {
   message.value = err ?? ''
 }
 
+async function clearFailure(): Promise<void> {
+  const err = await send({ op: 'clear_failure' })
+  message.value = err ?? ''
+}
+
 async function setChannel(nightly: boolean): Promise<void> {
   const err = await send({ op: 'set_channel', channel: nightly ? 'nightly' : 'stable' })
   message.value = err ?? ''
@@ -344,6 +349,7 @@ async function recheck(): Promise<void> {
             :last-failure="data.last_failure ?? null"
             @update="updateTool"
             @channel="setChannel"
+            @clear-failure="clearFailure"
           />
           <CapabilitiesPanel :t="t" :caps="data.capabilities" :frozen="loadFailed" @recheck="recheck" />
         </CardContent>

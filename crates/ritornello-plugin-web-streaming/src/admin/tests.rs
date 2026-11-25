@@ -1161,6 +1161,19 @@ async fn the_last_failed_playback_is_served_to_the_page() {
     assert_eq!(quickly("get_data", w.admin.get_data()).await["last_failure"], record);
 }
 
+/// The page's "Clear" on the last failure: gone from the next read, and a
+/// second press (nothing left to clear) is not an error.
+#[tokio::test]
+async fn the_last_failed_playback_can_be_cleared_from_the_page() {
+    let mut w = world("exit 1").await;
+    let record = json!({"time": 1730000000.5, "host": "www.youtube.com", "code": "no_formats", "detail": ""});
+    std::fs::write(w.data.join(ritornello_plugin_web_streaming::playfail::FILE), record.to_string()).unwrap();
+    assert_eq!(quickly("get_data", w.admin.get_data()).await["last_failure"], record);
+    quickly("clear_failure", w.op(json!({ "op": "clear_failure" }))).await.unwrap();
+    assert_eq!(quickly("get_data", w.admin.get_data()).await["last_failure"], Value::Null);
+    quickly("clear_failure", w.op(json!({ "op": "clear_failure" }))).await.unwrap();
+}
+
 // ---- a download and a table that moves ---------------------------------------
 
 #[tokio::test]

@@ -1425,7 +1425,8 @@ async fn hot_unplug<P: player::Player>(
     // away that there is nothing at this address.
     admin::forget_page(&children.admin_backends, &children.admin_assets, &children.registry, name).await;
     let mut statuses = children.status_state.write().await;
-    status::replace_plugin_lines(&mut statuses, name, vec![PluginStatus::disabled(name)], false);
+    let lines = PluginStatus::disabled_after(name, &statuses.plugins);
+    status::replace_plugin_lines(&mut statuses, name, lines, false);
     statuses.active_source = core.active_source().to_string();
     true
 }
@@ -1886,7 +1887,7 @@ async fn main() -> Result<()> {
     let (enrich_tx, mut enrich_rx) = mpsc::channel::<(String, Enrichment)>(32);
     let (audio_tx, mut audio_rx) = mpsc::channel::<Option<String>>(4);
     let (eq_tx, mut eq_rx) = mpsc::channel::<equalizer::EqualizerSettings>(4);
-    let (lock_sound_preview_tx, mut lock_sound_rx) = mpsc::channel::<lock_sound::LockSound>(1);
+    let (lock_sound_preview_tx, mut lock_sound_rx) = mpsc::channel::<(lock_sound::LockSound, lock_sound::LockVolume)>(1);
     let (update_sources_tx, mut update_sources_rx) = mpsc::channel::<Vec<String>>(4);
     let (pack_preferences_tx, mut pack_preferences_rx) = mpsc::channel::<Vec<state::PackPreference>>(4);
     let (locale_tx, mut locale_rx) = mpsc::channel::<String>(4);
@@ -2005,7 +2006,15 @@ async fn main() -> Result<()> {
             // Off: nothing is launched, but the line stays — without it, the
             // page would no longer show it and it would be unrecoverable.
             tracing::info!("plugin {} is disabled, not launching it", p.name);
-            plugin_statuses.push(PluginStatus::disabled(&p.name));
+            // Its kind and version, read from the block its binary carries:
+            // a switched-off plugin never announces them. Bounded like every
+            // read of that block, and only at start: nothing waits on it.
+            let block = crate::update::embedded::read_block_within(
+                std::path::PathBuf::from(&p.exec),
+                crate::update::embedded::READ_DEADLINE,
+            )
+            .await;
+            plugin_statuses.extend(PluginStatus::disabled_from_block(&p.name, block.as_ref()));
             continue;
         }
         let prefix = sockets_dir.join(&p.name);
@@ -2931,7 +2940,7 @@ async fn main() -> Result<()> {
                     tracing::warn!("audio output change: {e}");
                 }
             }
-            Some(sound) = lock_sound_rx.recv() => core.preview_lock_sound(sound).await,
+            Some((sound, volume)) = lock_sound_rx.recv() => core.preview_lock_sound(sound, volume).await,
             Some(settings) = eq_rx.recv() => {
                 if let Err(e) = core.set_equalizer(settings).await {
                     tracing::warn!("equalizer change: {e}");
@@ -3513,6 +3522,9 @@ mod toggle_tests {
 
     #[async_trait::async_trait]
     impl crate::player::Player for MutePlayer {
+        fn chime_dir(&self) -> &std::path::Path {
+            std::path::Path::new("/nonexistent/lock-sounds")
+        }
         async fn play(&self, _uri: &str) -> Result<()> {
             Ok(())
         }
@@ -3567,7 +3579,7 @@ mod toggle_tests {
         async fn chime_route(&self, _chime: std::time::Duration) -> Result<crate::player::ChimeRoute> {
             Ok(crate::player::ChimeRoute::Silent)
         }
-        async fn play_aside(&self, _uri: &str) -> Result<()> {
+        async fn play_aside(&self, _uri: &str, _af: Option<&str>) -> Result<()> {
             Ok(())
         }
         async fn sound_while_paused(&self, _chain: &str, _resume_at: Option<f64>) -> Result<()> {
