@@ -16,9 +16,13 @@
 //!
 //! Payload rules: every non-empty line contains `=`; `version` is required
 //! exactly once (1 to 64 bytes of `[0-9A-Za-z.+-]`); `repository` is optional,
-//! at most once (1 to 400 bytes, no control character); any other key is
-//! ignored, so a later field is a compatible addition. Bytes after the
-//! payload (the encoder pads with zeros) are ignored.
+//! at most once (1 to 400 bytes, no control character); `kinds` is optional,
+//! at most once (1 to 64 bytes: comma-separated non-empty items of `[a-z_]`,
+//! the kinds the plugin's `Cargo.toml` declares, so a switched-off plugin's
+//! row can name its kind); any other key is ignored, so a later field is a
+//! compatible addition — `kinds` was one, and a core that predates it reads
+//! such a block as before. Bytes after the payload (the encoder pads with
+//! zeros) are ignored.
 //!
 //! A file with zero or two markers is "unknown", never "the first one wins",
 //! so a plugin binary must carry the magic exactly once — in its block — and
@@ -59,12 +63,17 @@ pub const BLOCK_LEN: usize = MAGIC_LEN + 3 + PAYLOAD_MAX;
 
 const VERSION_MAX: usize = 64;
 const REPOSITORY_MAX: usize = 400;
+const KINDS_MAX: usize = 64;
 
 /// What a block says about the plugin that carries it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Embedded {
     pub version: String,
     pub repository: Option<String>,
+    /// The kinds the plugin's `Cargo.toml` declares, in its order. Empty for
+    /// a block without them: a binary built before the field, or a plugin
+    /// that declares none.
+    pub kinds: Vec<String>,
 }
 
 /// The magic, unmasked at run time.
@@ -98,9 +107,104 @@ const fn put(out: &mut [u8; BLOCK_LEN], at: &mut usize, bytes: &[u8]) {
     }
 }
 
+const fn kind_byte_ok(b: u8) -> bool {
+    b.is_ascii_lowercase() || b == b'_'
+}
+
+/// The kinds a plugin's `Cargo.toml` declares, as the block carries them:
+/// the `kinds = [...]` line of its `[package.metadata.ritornello]` table
+/// (the declaration `plugin_catalogue_declaration.rs` in the core already
+/// holds against the announcement), written `source` or `display,input`.
+///
+/// Read at const-evaluation time from the text `declare_runtime!` includes,
+/// so it is a hand-rolled scan rather than a TOML parser. It understands the
+/// one shape every plugin of this repository writes — the table header on a
+/// line of its own, then `kinds = ["a", "b"]` on one line — and answers an
+/// empty slice for anything else (no table, no `kinds`, a list spread over
+/// several lines, a byte that is not `[a-z_]`, a quote, a comma or a blank):
+/// the block then carries no `kinds`, and the core shows the switched-off
+/// plugin's kind as unknown, exactly as before. Never a compile error: a
+/// third-party plugin is not required to declare its kinds.
+pub const fn manifest_kinds(cargo_toml: &str) -> &[u8] {
+    const TABLE: &[u8] = b"[package.metadata.ritornello]";
+    let t = cargo_toml.as_bytes();
+    let mut in_table = false;
+    let mut line_start = 0;
+    while line_start < t.len() {
+        let mut line_end = line_start;
+        while line_end < t.len() && t[line_end] != b'\n' {
+            line_end += 1;
+        }
+        // The line, without its leading blanks and its trailing `\r`/blanks.
+        let mut a = line_start;
+        while a < line_end && (t[a] == b' ' || t[a] == b'\t') {
+            a += 1;
+        }
+        let mut b = line_end;
+        while b > a && (t[b - 1] == b'\r' || t[b - 1] == b' ' || t[b - 1] == b'\t') {
+            b -= 1;
+        }
+        if a < b && t[a] == b'[' {
+            in_table = starts_with(t, a, b, TABLE) && b - a == TABLE.len();
+        } else if in_table && starts_with(t, a, b, b"kinds") {
+            let mut i = a + 5;
+            while i < b && (t[i] == b' ' || t[i] == b'\t') {
+                i += 1;
+            }
+            if i >= b || t[i] != b'=' {
+                // `kindsfoo = …`: another key.
+                line_start = line_end + 1;
+                continue;
+            }
+            i += 1;
+            while i < b && (t[i] == b' ' || t[i] == b'\t') {
+                i += 1;
+            }
+            if i >= b || t[i] != b'[' || t[b - 1] != b']' {
+                return &[];
+            }
+            let (_, rest) = t.split_at(i + 1);
+            let (inner, _) = rest.split_at(b - 1 - (i + 1));
+            let mut j = 0;
+            while j < inner.len() {
+                let c = inner[j];
+                if !(kind_byte_ok(c) || c == b'"' || c == b',' || c == b' ' || c == b'\t') {
+                    return &[];
+                }
+                j += 1;
+            }
+            return inner;
+        }
+        line_start = line_end + 1;
+    }
+    &[]
+}
+
+const fn starts_with(t: &[u8], a: usize, b: usize, prefix: &[u8]) -> bool {
+    if b - a < prefix.len() {
+        return false;
+    }
+    let mut k = 0;
+    while k < prefix.len() {
+        if t[a + k] != prefix[k] {
+            return false;
+        }
+        k += 1;
+    }
+    true
+}
+
 /// Builds a block. Usable in a `static` initializer; panics (a compile-time
 /// error there) on exactly what [`decode_payload`] refuses.
 pub const fn encode(version: &str, repository: Option<&str>) -> [u8; BLOCK_LEN] {
+    encode_with_kinds(version, repository, &[])
+}
+
+/// [`encode`], plus the plugin's kinds as [`manifest_kinds`] found them (an
+/// empty slice: no `kinds` line). Quotes and blanks are dropped, so
+/// `"display", "input"` is written `kinds=display,input`; empty items are
+/// dropped too.
+pub const fn encode_with_kinds(version: &str, repository: Option<&str>, kinds: &[u8]) -> [u8; BLOCK_LEN] {
     let v = version.as_bytes();
     assert!(!v.is_empty(), "CARGO_PKG_VERSION is empty");
     assert!(
@@ -153,6 +257,40 @@ pub const fn encode(version: &str, repository: Option<&str>) -> [u8; BLOCK_LEN] 
         put(&mut out, &mut at, repo.as_bytes());
         put(&mut out, &mut at, b"\n");
     }
+    // `kinds=a,b`: the items of the list, quotes and blanks dropped, empty
+    // items skipped. Written only when at least one item is there.
+    let line_at = at;
+    put(&mut out, &mut at, b"kinds=");
+    let value_at = at;
+    let mut item_open = false;
+    let mut k = 0;
+    while k < kinds.len() {
+        let c = kinds[k];
+        if kind_byte_ok(c) {
+            if !item_open && at > value_at {
+                out[at] = b',';
+                at += 1;
+            }
+            item_open = true;
+            out[at] = c;
+            at += 1;
+        } else if c == b',' {
+            item_open = false;
+        } else {
+            assert!(c == b'"' || c == b' ' || c == b'\t', "a kind has a character outside [a-z_]");
+        }
+        k += 1;
+    }
+    if at == value_at {
+        // No item: the line is taken back, the bytes stay zero.
+        while at > line_at {
+            at -= 1;
+            out[at] = 0;
+        }
+    } else {
+        assert!(at - value_at <= KINDS_MAX, "kinds longer than 64 bytes");
+        put(&mut out, &mut at, b"\n");
+    }
     let len = at - start;
     assert!(len <= PAYLOAD_MAX, "payload longer than 512 bytes");
     out[len_at] = (len & 0xff) as u8;
@@ -165,6 +303,7 @@ pub fn decode_payload(payload: &[u8]) -> Option<Embedded> {
     let text = std::str::from_utf8(payload).ok()?;
     let mut version: Option<&str> = None;
     let mut repository: Option<&str> = None;
+    let mut kinds: Option<&str> = None;
     let mut lines: Vec<&str> = text.split('\n').collect();
     if lines.last() == Some(&"") {
         lines.pop();
@@ -195,12 +334,23 @@ pub fn decode_payload(payload: &[u8]) -> Option<Embedded> {
                 }
                 repository = Some(value);
             }
+            "kinds" => {
+                if kinds.is_some()
+                    || value.is_empty()
+                    || value.len() > KINDS_MAX
+                    || value.split(',').any(|k| k.is_empty() || !k.bytes().all(kind_byte_ok))
+                {
+                    return None;
+                }
+                kinds = Some(value);
+            }
             _ => {}
         }
     }
     Some(Embedded {
         version: version?.to_string(),
         repository: repository.map(str::to_string),
+        kinds: kinds.map(|k| k.split(',').map(str::to_string).collect()).unwrap_or_default(),
     })
 }
 
@@ -301,13 +451,15 @@ mod tests {
             Some(Embedded {
                 version: "9.9.9".into(),
                 repository: Some("https://github.com/someone/their-plugin".into()),
+                kinds: vec![],
             })
         );
         assert_eq!(
             decode(&encode("1.0.0", None)),
             Some(Embedded {
                 version: "1.0.0".into(),
-                repository: None
+                repository: None,
+                kinds: vec![]
             })
         );
     }
@@ -437,7 +589,8 @@ mod tests {
             decode_payload(b"version=1.0.0\nfuture=whatever\n"),
             Some(Embedded {
                 version: "1.0.0".into(),
-                repository: None
+                repository: None,
+                kinds: vec![]
             }),
             "unknown key ignored"
         );
@@ -448,6 +601,86 @@ mod tests {
         );
         let long = format!("version={}\n", "1".repeat(65));
         assert_eq!(decode_payload(long.as_bytes()), None, "version too long");
+        let kinds = |p: &[u8]| decode_payload(p).map(|e| e.kinds);
+        assert_eq!(kinds(b"version=1.0.0\nkinds=source\n"), Some(vec!["source".to_string()]));
+        assert_eq!(
+            kinds(b"version=1.0.0\nkinds=display,input\n"),
+            Some(vec!["display".to_string(), "input".to_string()])
+        );
+        assert_eq!(kinds(b"version=1.0.0\nkinds=\n"), None, "empty kinds");
+        assert_eq!(kinds(b"version=1.0.0\nkinds=source,\n"), None, "empty item");
+        assert_eq!(kinds(b"version=1.0.0\nkinds=Source\n"), None, "outside [a-z_]");
+        assert_eq!(kinds(b"version=1.0.0\nkinds=a\nkinds=b\n"), None, "kinds twice");
+        let long = format!("version=1.0.0\nkinds={}\n", "a".repeat(65));
+        assert_eq!(kinds(long.as_bytes()), None, "kinds too long");
+    }
+
+    /// The `[package.metadata.ritornello]` table of the CD plugin, as its
+    /// `Cargo.toml` writes it, among the tables around it.
+    const CD_MANIFEST: &str = "[package]\nname = \"ritornello-plugin-cd\"\n\n\
+        [dependencies]\nkinds = [\"not\", \"this\"]\n\n\
+        [package.metadata.ritornello]\nkinds = [\"source\"]\ndescription = \"Plays audio CDs.\"\n\
+        admin = true\n\n[[bin]]\nname = \"ritornello-plugin-cd\"\n";
+
+    #[test]
+    fn the_kinds_are_read_from_the_metadata_table_only() {
+        assert_eq!(manifest_kinds(CD_MANIFEST), b"\"source\"");
+        assert_eq!(manifest_kinds(&CD_MANIFEST.replace('\n', "\r\n")), b"\"source\"", "CRLF");
+        let two = "[package.metadata.ritornello]\nkinds = [\"display\", \"input\"]\n";
+        assert_eq!(manifest_kinds(two), b"\"display\", \"input\"");
+        // A `kinds` outside the table, a table without one, none at all.
+        assert_eq!(manifest_kinds("[dependencies]\nkinds = [\"source\"]\n"), b"");
+        assert_eq!(manifest_kinds("[package.metadata.ritornello]\ndescription = \"x\"\n"), b"");
+        assert_eq!(manifest_kinds(""), b"");
+        // A longer header is another table.
+        assert_eq!(manifest_kinds("[package.metadata.ritornello.extra]\nkinds = [\"source\"]\n"), b"");
+        // A shape the scan does not understand is no kinds, never an error.
+        assert_eq!(manifest_kinds("[package.metadata.ritornello]\nkinds = [\n  \"source\",\n]\n"), b"");
+        assert_eq!(manifest_kinds("[package.metadata.ritornello]\nkinds = [\"Source\"]\n"), b"");
+        assert_eq!(manifest_kinds("[package.metadata.ritornello]\nkindsx = [\"source\"]\n"), b"");
+    }
+
+    #[test]
+    fn a_block_with_kinds_gives_them_back() {
+        let block = encode_with_kinds("1.0.0", None, manifest_kinds(CD_MANIFEST));
+        assert_eq!(decode(&block).unwrap().kinds, vec!["source".to_string()]);
+        let block = encode_with_kinds("1.0.0", Some("https://example.org/x"), b"\"display\", \"input\"");
+        let e = decode(&block).unwrap();
+        assert_eq!(e.kinds, vec!["display".to_string(), "input".to_string()]);
+        assert_eq!(e.repository.as_deref(), Some("https://example.org/x"));
+        // No kinds: no line at all, byte for byte the block `encode` makes.
+        assert_eq!(encode_with_kinds("1.0.0", None, b""), encode("1.0.0", None));
+        assert_eq!(encode_with_kinds("1.0.0", None, b"\"\""), encode("1.0.0", None));
+    }
+
+    /// What `declare_runtime!` embeds in each plugin of this workspace: the
+    /// kinds its own `Cargo.toml` declares, read the way the macro reads them.
+    /// Every shipped plugin declares at least one, so a scan that silently
+    /// found none would leave every switched-off row without its kind.
+    #[test]
+    fn every_plugin_of_the_workspace_embeds_its_declared_kinds() {
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&crates).unwrap() {
+            let dir = entry.unwrap().path();
+            let name = dir.file_name().unwrap().to_string_lossy().to_string();
+            if !name.starts_with("ritornello-plugin-") || name == "ritornello-plugin-sdk" {
+                continue;
+            }
+            let text = std::fs::read_to_string(dir.join("Cargo.toml")).unwrap();
+            let declared: toml::Value = toml::from_str(&text).unwrap();
+            let want: Vec<String> = declared["package"]["metadata"]["ritornello"]["kinds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|k| k.as_str().unwrap().to_string())
+                .collect();
+            assert!(!want.is_empty(), "{name} declares no kind");
+            let block = encode_with_kinds("1.0.0", None, manifest_kinds(&text));
+            assert_eq!(decode(&block).unwrap().kinds, want, "{name}");
+            seen += 1;
+        }
+        assert!(seen >= 12, "only {seen} plugins found under {}", crates.display());
     }
 
     #[test]

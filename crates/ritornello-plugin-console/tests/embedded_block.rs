@@ -13,6 +13,10 @@ fn the_built_binary_carries_its_own_version_and_repository() {
         Some(Embedded {
             version: env!("CARGO_PKG_VERSION").into(),
             repository: option_env!("CARGO_PKG_REPOSITORY").map(Into::into),
+            // From this crate's `[package.metadata.ritornello] kinds`, read
+            // at compile time by `declare_runtime!`: what a switched-off
+            // console's row shows as its kind.
+            kinds: vec!["display".to_string()],
         })
     );
 }
