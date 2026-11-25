@@ -45,16 +45,22 @@ pub enum LockSound {
 
 /// The loudness of the chime (`Settings::lock_sound_volume`): one of four
 /// steps, persisted as its number, 1 to 4. Level 2 is the reference: the
-/// files as rendered, peak 0.35, with no gain step at all.
+/// files as rendered, peak 0.525, with no gain step at all.
 ///
 /// The gains are applied by mpv's `volume` filter on the chime branch, not by
 /// re-encoding the files. Headroom: the chime is summed with the music by
 /// `amix normalize=0`, so the sum clips where the music's level plus the
-/// chime's peak at that instant exceeds 1.0. Peaks on the file: level 1 is
-/// 0.175 (-6 dB), level 3 0.4375 (+1.9 dB), level 4 0.525 (+3.5 dB). Level 4
-/// leaves music below about -6.5 dBFS unclipped at the chime's attack; the
-/// chime then decays within a fraction of a second. Going past 1.5 would
-/// clip music that is already near full scale on every lock.
+/// chime's peak at that instant exceeds 1.0. The motifs' own peaks are above
+/// the envelope's [`PEAK`] where notes overlap — up to 0.81 (B lock, a bell
+/// whose notes ring into each other) at level 2 — so the loud steps are
+/// bounded by the chime itself: level 4 (×1.2, +1.6 dB) keeps every motif
+/// under full scale on its own
+/// (`the_loudest_level_never_clips_a_motif_on_its_own`), where the ×1.5 it
+/// had at the previous [`PEAK`] would now clip; level 3 is ×1.1 (+0.8 dB),
+/// level 1 ×0.5 (-6 dB). Louder than level 4 is not possible without a
+/// limiter on the chime. The owner chose loudness over the music's headroom:
+/// the previous levels (an envelope peak of 0.35 at level 2) were too quiet
+/// next to the music at every step, and level 2 now sounds as level 4 did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(try_from = "u8", into = "u8")]
 pub enum LockVolume {
@@ -72,8 +78,8 @@ impl LockVolume {
         match self {
             LockVolume::One => Some("0.5"),
             LockVolume::Two => None,
-            LockVolume::Three => Some("1.25"),
-            LockVolume::Four => Some("1.5"),
+            LockVolume::Three => Some("1.1"),
+            LockVolume::Four => Some("1.2"),
         }
     }
 }
@@ -144,12 +150,17 @@ impl Timbre {
 
 /// The envelope's peak. The web reference uses 0.22, which the owner found
 /// too quiet next to the music (the mix adds the chime to the stream without
-/// attenuating it). 0.35 is about +4 dB. Headroom: the mix is float until
+/// attenuating it). 0.35 (about +4 dB) was found still too quiet at every
+/// level, and the owner asked for the loudest level to become the default:
+/// 0.525 is 0.35 × 1.5, so level 2 now sounds as level 4 did, and every
+/// level moved by the same +3.5 dB. Headroom: the mix is float until
 /// mpv's output conversion, so the sum only clips where a loud master peaks
 /// at the same instant as the chime's attack, and the chime decays from
-/// there; the tests keep the peak within 0.18..=0.5.
+/// there; the tests keep the peak within 0.4..=0.75 (notes overlap, so a
+/// motif peaks above [`PEAK`]: C unlock reaches 0.69), and every motif at
+/// the loudest level under full scale on its own.
 #[cfg(test)]
-const PEAK: f64 = 0.35;
+const PEAK: f64 = 0.525;
 
 /// The attack of every note, in seconds: from 0.0001 to [`PEAK`].
 #[cfg(test)]
@@ -494,7 +505,7 @@ mod tests {
             reference,
             "@chime:lavfi=[anull[m];amovie=filename='/run/ritornello/lock-sounds/a-lock.wav':loop=1,aresample=48000[c];[m][c]amix=inputs=2:duration=first:dropout_transition=0:normalize=0]"
         );
-        for (level, gain) in [(LockVolume::One, "0.5"), (LockVolume::Three, "1.25"), (LockVolume::Four, "1.5")] {
+        for (level, gain) in [(LockVolume::One, "0.5"), (LockVolume::Three, "1.1"), (LockVolume::Four, "1.2")] {
             let stepped = at(level);
             assert_eq!(
                 stepped,
@@ -510,7 +521,7 @@ mod tests {
     fn the_step_is_on_the_chime_over_silence_as_well() {
         let s = mix_filter_over_silence(files(), LockSound::B, Motif::Preview, 44100, 1, LockVolume::Four).unwrap();
         assert!(s.starts_with("@chime:lavfi=[volume=volume=0[m];"), "{s}");
-        assert!(s.contains("aresample=44100,pan=1c|c0=c0,volume=1.5[c]"), "{s}");
+        assert!(s.contains("aresample=44100,pan=1c|c0=c0,volume=1.2[c]"), "{s}");
     }
 
     /// The idle load carries the same gain as a file-local `af`, and nothing
@@ -519,8 +530,8 @@ mod tests {
     fn the_idle_load_carries_the_step_only_off_the_reference() {
         assert_eq!(idle_af(LockVolume::Two), None);
         assert_eq!(idle_af(LockVolume::One).as_deref(), Some("volume=0.5"));
-        assert_eq!(idle_af(LockVolume::Three).as_deref(), Some("volume=1.25"));
-        assert_eq!(idle_af(LockVolume::Four).as_deref(), Some("volume=1.5"));
+        assert_eq!(idle_af(LockVolume::Three).as_deref(), Some("volume=1.1"));
+        assert_eq!(idle_af(LockVolume::Four).as_deref(), Some("volume=1.2"));
     }
 
     /// The persisted number is 1 to 4, and nothing else is a level.
@@ -913,6 +924,21 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 15);
     }
 
+    /// Every motif of every sound, at the loudest level's gain, stays under
+    /// full scale on its own: a chime that clipped before any music is added
+    /// would crackle on every lock. Level 4 was ×1.5 before the envelope's
+    /// peak went from 0.35 to 0.525; kept at ×1.5, C unlock would reach 1.04.
+    #[test]
+    fn the_loudest_level_never_clips_a_motif_on_its_own() {
+        let gain: f64 = LockVolume::Four.gain().unwrap().parse().unwrap();
+        for sound in ALL {
+            for motif in MOTIFS {
+                let peak = samples(sound, motif).iter().fold(0f64, |p, s| p.max(s.abs()));
+                assert!(peak * gain < 1.0, "{sound:?} {motif:?}: {peak} × {gain} clips");
+            }
+        }
+    }
+
     /// The renderer's own guards: the peak, a click at the first sample, the
     /// silent tail, and each note at its onset audible above the others.
     #[test]
@@ -921,7 +947,7 @@ mod tests {
             let x: Vec<f32> = samples(sound, motif).iter().map(|&v| v as f32).collect();
             let label = format!("{sound:?} {motif:?}");
             let peak = x.iter().fold(0f32, |p, s| p.max(s.abs()));
-            assert!((0.18..=0.5).contains(&peak), "{label}: peak {peak}");
+            assert!((0.4..=0.75).contains(&peak), "{label}: peak {peak}");
             assert!(x[0].abs() < 0.001, "{label}: the first sample is {} (a click)", x[0]);
             let tail = &x[x.len() - 480..];
             assert!(tail.iter().all(|s| s.abs() < 0.001), "{label}: the last 10 ms are not silent");
