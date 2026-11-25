@@ -311,6 +311,17 @@ fn position_jump(before: Option<u32>, after: Option<u32>) -> bool {
 /// The deduplication is not cosmetic: an MPD command list may contain two
 /// `pause`, and incrementing the counter twice for a single pass under the
 /// lock would publish two changes where there is only one.
+/// The tags `currentsong` publishes about a track, and nothing else: a
+/// cover or lyrics arriving changes `Track` without changing what a client
+/// reads in `currentsong`, so it must not count as the entry changing.
+fn same_tags(a: &ritornello_proto::Track, b: &ritornello_proto::Track) -> bool {
+    a.title == b.title
+        && a.artist == b.artist
+        && a.album == b.album
+        && a.year == b.year
+        && a.duration_s == b.duration_s
+}
+
 fn mark(moved: &mut Vec<Subsystem>, subsystem: Subsystem) {
     if !moved.contains(&subsystem) {
         moved.push(subsystem);
@@ -432,6 +443,23 @@ impl SharedState {
                 || state.track != before.track
             {
                 mark(&mut moved, Subsystem::Player);
+            }
+            if state.preset.is_some()
+                && state.source == before.source
+                && state.preset == before.preset
+                && !same_tags(&state.track, &before.track)
+            {
+                // **The tags of the entry playing changed under it** — a
+                // radio's next song, an album a lookup found afterwards. MPD
+                // itself treats that as a queue change (`playlist::
+                // TagModified` modifies the current entry, which moves the
+                // `playlist` version and wakes `playlist`), and clients rely
+                // on it: M.A.L.P. re-reads `currentsong` only when `song`,
+                // `playlist` or the playback state changes. Without this, on
+                // the radio, where the preset — hence `song` — never moves,
+                // it kept showing the first song's title for good, and never
+                // asked for another cover.
+                mark(&mut moved, Subsystem::Playlist);
             }
 
             // The frame overwrites the optimism, including when it contradicts
@@ -1133,6 +1161,60 @@ mod tests {
         e.apply_state(frame).await;
 
         assert_ne!(before[Subsystem::Player as usize], e.versions().await[Subsystem::Player as usize]);
+    }
+
+    /// A station playing a song: the frame a radio sends all day long.
+    fn station_playing(title: &str) -> PlayerState {
+        let mut frame = PlayerState {
+            source: "radio".into(),
+            playback: Playback::Playing,
+            preset: Some(3),
+            preset_count: Some(51),
+            ..Default::default()
+        };
+        frame.track.title = Some(title.into());
+        frame.track.artist = Some("Miles Davis".into());
+        frame
+    }
+
+    #[tokio::test]
+    async fn the_next_song_on_the_same_station_moves_the_playlist_version() {
+        // M.A.L.P. re-reads `currentsong` only when `song`, `playlist` or
+        // the playback state changes (`MPDStateMonitoringHandler`). On a
+        // station none of them moved from one song to the next, so it kept
+        // the first title — and never asked for the next cover. MPD moves
+        // `playlist` there (`playlist::TagModified`).
+        let e = SharedState::default();
+        e.apply_state(station_playing("So What")).await;
+        let before = e.versions().await;
+        let queue_version = e.read().await.queue_version;
+
+        let mut next = station_playing("Blue in Green");
+        next.track.album = Some("Kind of Blue".into());
+        e.apply_state(next).await;
+
+        let after = e.versions().await;
+        assert_ne!(before[Subsystem::Playlist as usize], after[Subsystem::Playlist as usize]);
+        assert!(e.read().await.queue_version > queue_version, "status must publish a new playlist version");
+        assert_ne!(before[Subsystem::Player as usize], after[Subsystem::Player as usize], "and player still moves");
+    }
+
+    #[tokio::test]
+    async fn a_cover_announced_for_the_same_song_does_not_move_the_playlist() {
+        // `currentsong` does not change when the image arrives: a new
+        // `playlist` version there would make every client re-read the
+        // queue for nothing, once more per track.
+        let e = SharedState::default();
+        e.apply_state(station_playing("So What")).await;
+        let before = e.versions().await;
+        let queue_version = e.read().await.queue_version;
+
+        let mut with_cover = station_playing("So What");
+        with_cover.track.cover_href = Some("/api/cover/1a2b3c".into());
+        e.apply_state(with_cover).await;
+
+        assert_eq!(before[Subsystem::Playlist as usize], e.versions().await[Subsystem::Playlist as usize]);
+        assert_eq!(queue_version, e.read().await.queue_version);
     }
 
     #[tokio::test]

@@ -130,6 +130,8 @@ enum Op {
     SetChannel { channel: Channel },
     /// Looks at the machine again (python3, JavaScript runtime).
     Reprobe,
+    /// Forgets the last playback failure the page shows.
+    ClearFailure,
 }
 
 /// What the spawned tasks leave for `get_data`. Plain `std` locks, never held
@@ -515,6 +517,17 @@ impl AdminPlugin for WebStreamingAdmin {
             Op::ClearJobs => {
                 self.jobs.clear_finished();
                 Ok(())
+            }
+            Op::ClearFailure => {
+                // One small file of the plugin's own data directory, under the
+                // same deadline `get_data` reads it with: never a stalled page.
+                let data = self.data.clone();
+                let removal = tokio::task::spawn_blocking(move || PlaybackFailure::clear(&data));
+                match tokio::time::timeout(FAILURE_READ_DEADLINE, removal).await {
+                    Ok(Ok(Ok(()))) => Ok(()),
+                    Ok(Ok(Err(e))) => Err(keyed_with("clear_failure_failed", "detail", e.to_string())),
+                    _ => Err(keyed_with("clear_failure_failed", "detail", "timed out".to_string())),
+                }
             }
             Op::UpdateTool { force } => {
                 self.tool.request_update(force);

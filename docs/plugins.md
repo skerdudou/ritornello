@@ -530,11 +530,14 @@ corrected release.
 ### The manifest block in your binary
 
 A switched-off plugin is never run, so it cannot announce itself. To know its
-version and origin without executing it, the core reads a small block of data
-embedded in its binary, as bytes.
+version, origin and kinds without executing it, the core reads a small block of
+data embedded in its binary, as bytes.
 
 **Built with the SDK, there is nothing to do:** `declare_runtime!()` embeds the
-block from your crate's `version` and `repository`.
+block from your crate's `version` and `repository`, and from the `kinds = [...]`
+line of its `[package.metadata.ritornello]` table when it has one, written on a
+single line (`kinds = ["source"]`). Without that line, the switched-off row
+shows its kind as unknown; nothing else changes.
 
 **Not built with the SDK**, embed the block yourself. At any offset in the
 file:
@@ -550,8 +553,10 @@ The payload must be valid UTF-8 and every non-empty line must contain `=`. The
 key `version` is required, exactly once, non-empty, at most 64 bytes, with
 characters in `[0-9A-Za-z.+-]`. The key `repository` is optional, at most once,
 non-empty, at most 400 bytes, with no byte below `0x20` nor `0x7f`; give a full
-URL. Any other key is ignored. Anything else makes the block unreadable. Bytes
-after the payload are ignored.
+URL. The key `kinds` is optional, at most once, at most 64 bytes:
+comma-separated non-empty items in `[a-z_]` (`source`, or `display,input`); a
+kind the core does not know is not shown. Any other key is ignored. Anything
+else makes the block unreadable. Bytes after the payload are ignored.
 
 - **Embed it exactly once.** Two blocks in one binary are read as unknown,
   never "the first one wins". The magic counts wherever it appears: if your

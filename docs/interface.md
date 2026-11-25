@@ -1138,8 +1138,8 @@ note, so the page comes back reading "Never checked" until the next check
 unattended device that is the next night; **Check** answers at once at any
 time).
 
-**A switched-off plugin's row shows the version and origin read from its
-binary, without running it.** The core reads a small block of data embedded in
+**A switched-off plugin's row shows the version, origin and kind read from
+its binary, without running it.** The core reads a small block of data embedded in
 the file, as bytes (see [The manifest block in your
 binary](plugins.md#the-manifest-block-in-your-binary)). A binary built before
 that block existed shows `?` until it has been installed once by hand; a third

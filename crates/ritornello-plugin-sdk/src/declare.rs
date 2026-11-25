@@ -12,6 +12,14 @@
 /// A macro rather than two more parameters, and that is the point: the next
 /// derived field costs nothing at ten call sites.
 ///
+/// The block also carries the kinds the plugin's `Cargo.toml` declares in its
+/// `[package.metadata.ritornello]` table (`include_str!` of the calling
+/// crate's own manifest, read at compile time by
+/// [`crate::embedded::manifest_kinds`]), so a switched-off plugin's row can
+/// name its kind. Not derived from the registered halves, which exist only
+/// at run time; the core's `plugin_catalogue_declaration` guard is what holds
+/// that declaration to the announcement.
+///
 /// The two values are also embedded in the binary as a manifest block (see
 /// [`crate::embedded`]), which is what lets the core read a switched-off
 /// plugin's version without running it. The runtime is built *from* that
@@ -31,9 +39,13 @@ macro_rules! declare_runtime {
     () => {{
         #[used]
         static RITORNELLO_PLUGIN_BLOCK: [u8; $crate::embedded::BLOCK_LEN] =
-            $crate::embedded::encode(
+            $crate::embedded::encode_with_kinds(
                 env!("CARGO_PKG_VERSION"),
                 option_env!("CARGO_PKG_REPOSITORY"),
+                $crate::embedded::manifest_kinds(include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/Cargo.toml"
+                ))),
             );
         $crate::runtime::Runtime::from_args(&RITORNELLO_PLUGIN_BLOCK)
     }};

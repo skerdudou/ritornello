@@ -1425,7 +1425,8 @@ async fn hot_unplug<P: player::Player>(
     // away that there is nothing at this address.
     admin::forget_page(&children.admin_backends, &children.admin_assets, &children.registry, name).await;
     let mut statuses = children.status_state.write().await;
-    status::replace_plugin_lines(&mut statuses, name, vec![PluginStatus::disabled(name)], false);
+    let lines = PluginStatus::disabled_after(name, &statuses.plugins);
+    status::replace_plugin_lines(&mut statuses, name, lines, false);
     statuses.active_source = core.active_source().to_string();
     true
 }
@@ -2005,7 +2006,15 @@ async fn main() -> Result<()> {
             // Off: nothing is launched, but the line stays — without it, the
             // page would no longer show it and it would be unrecoverable.
             tracing::info!("plugin {} is disabled, not launching it", p.name);
-            plugin_statuses.push(PluginStatus::disabled(&p.name));
+            // Its kind and version, read from the block its binary carries:
+            // a switched-off plugin never announces them. Bounded like every
+            // read of that block, and only at start: nothing waits on it.
+            let block = crate::update::embedded::read_block_within(
+                std::path::PathBuf::from(&p.exec),
+                crate::update::embedded::READ_DEADLINE,
+            )
+            .await;
+            plugin_statuses.extend(PluginStatus::disabled_from_block(&p.name, block.as_ref()));
             continue;
         }
         let prefix = sockets_dir.join(&p.name);

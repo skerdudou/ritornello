@@ -1088,6 +1088,17 @@ describe('WebStreamingAdmin', () => {
     expect(w.find('[data-last-failure-detail]').text()).toContain('yt-dlp said: ERROR: local network refused: 10.0.0.1')
   })
 
+  it('clears the last playback failure on request', async () => {
+    const { w, s } = await mountAdmin({
+      last_failure: { time: 1_730_000_000, host: 'www.youtube.com', code: 'no_formats', detail: '' },
+    })
+    const button = w.get('[data-clear-failure]')
+    expect(button.text()).toBe(CATALOG.btn_clear_failure)
+    await button.trigger('click')
+    await flushPromises()
+    expect(s.putsOf('clear_failure')).toEqual([{ op: 'clear_failure' }])
+  })
+
   it('says when a check found nothing new, and not while one runs or after a failure', async () => {
     const time = 1_730_000_000
     const checked = await mountAdmin({ tool: { ...state().tool, last_check: time } })

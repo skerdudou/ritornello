@@ -95,6 +95,7 @@ mod tests {
             Some(Embedded {
                 version: "0.2.0".into(),
                 repository: Some(REPO.into()),
+                kinds: vec![],
             })
         );
     }

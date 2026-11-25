@@ -366,11 +366,13 @@ function confirmDelete() {
            the 240 px floor; ≈ 26 px in the ≈ 260 px a 360 px screen leaves),
            each slider narrowed to a 24 px wide hit area so neighbouring
            thumbs never overlap. From `sm:` up, the fixed 44 px columns of the
-           desktop layout. `overflow-x-auto` is only the fallback under the
+           desktop layout, packed side by side from the left rather than
+           spread across a wide card (they read as one control, not ten).
+           `overflow-x-auto` is only the fallback under the
            240 px floor (viewports narrower than ≈ 320 px): the bands then
            scroll inside the card, never the page. -->
       <div data-eq-bands class="overflow-x-auto">
-        <div data-eq-band-row class="grid min-w-60 grid-cols-10 sm:flex sm:min-w-max sm:justify-between sm:gap-1">
+        <div data-eq-band-row class="grid min-w-60 grid-cols-10 sm:flex sm:min-w-max sm:justify-start sm:gap-1">
           <div
             v-for="(hz, i) in bandsHz" :key="hz"
             data-eq-band
