@@ -1237,7 +1237,17 @@ serde = \"1\" # path=x
         );
         let job = code(ci_job("publish-installer"));
         assert!(job.contains("startsWith(github.ref, 'refs/tags/installer-v')"));
-        assert!(job.contains("needs: installer"), "the installer is published without its legs");
+        assert!(
+            job.contains("needs: [installer, installer-macos]"),
+            "the installer is published without its legs, the macOS ones included"
+        );
+        // The macOS legs run on few events, but always on an installer tag:
+        // skipped there, they would skip `publish-installer` with them, and
+        // the release would silently not happen.
+        assert!(
+            code(ci_job("installer-macos")).contains("startsWith(github.ref, 'refs/tags/installer-v')"),
+            "the macOS legs do not run on an installer tag"
+        );
         assert!(
             job.contains("release-tags.sh check-installer-tag"),
             "the tag is not checked against the installer's own number"
