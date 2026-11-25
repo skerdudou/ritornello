@@ -300,10 +300,13 @@ request — the last three jobs below only on a tag:
   x86_64 and aarch64, Windows): clippy, the tests of `ritornello-install`
   alone, a release build, and its archive uploaded as an artifact.
   `installer-macos` runs the same steps for macOS Apple Silicon and macOS
-  Intel (built only), but **only on an `installer-vX.Y.Z` tag and on a
-  finished product tag `vX.Y.Z`**: the macOS runners were too often missing
-  for it to gate every pull request, so a change that breaks the macOS build
-  between two stable releases is first seen on the next stable tag.
+  Intel (built only), but **only on an `installer-vX.Y.Z` tag and when
+  `crates/ritornello-install/` itself changed** (`installer-macos-gate`,
+  deciding with `scripts/installer-macos-needed.sh`): the application never
+  runs on macOS, and the macOS runners were too often missing for it to gate
+  every pull request. A macOS breakage coming from elsewhere (a dependency,
+  a workspace crate or file the installer uses) is therefore first seen, and
+  fixed at once, the next time the installer's crate changes or is tagged.
   `installer-ok` ("Installer (all targets)") is the single check that stands
   for all of them (the macOS job may be skipped, not fail), meant to be
   required by branch protection. `aws-lc-sys` (rustls's crypto provider)

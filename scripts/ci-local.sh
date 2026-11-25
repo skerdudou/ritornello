@@ -31,6 +31,7 @@ if [ "$stage" = all ] || [ "$stage" = rust ]; then
   cargo clippy --workspace --all-targets -- -D warnings
   cargo test --workspace
   ./scripts/release-notes-guard.sh --self-test
+  bash ./scripts/installer-macos-needed.sh --self-test
 fi
 
 if [ "$stage" = all ] || [ "$stage" = installer ]; then

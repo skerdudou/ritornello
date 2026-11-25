@@ -7,8 +7,8 @@ name: CI
 #
 # One exception, scoped to one crate: the `installer` job builds and tests
 # `ritornello-install` alone on Linux and Windows (and `installer-macos` on
-# macOS, on stable and installer tags only), because that program runs on a
-# person's workstation, not on the device. The workspace as a whole stays
+# macOS, only when the installer's crate changed or is tagged), because that
+# program runs on a person's workstation, not on the device. The workspace as a whole stays
 # Linux-only.
 #
 # Two kinds of tag publish something. `vX.Y.Z` is the product's release (the
@@ -208,6 +208,8 @@ jobs:
         # The guard itself only runs at release time; this is what proves,
         # on every push, that each path it watches still makes it refuse.
         run: ./scripts/release-notes-guard.sh --self-test
+      - name: When the macOS installer legs run, on its own cases
+        run: bash ./scripts/installer-macos-needed.sh --self-test
 
   e2e:
     name: End-to-end journeys (Playwright)
@@ -383,19 +385,38 @@ jobs:
           if-no-files-found: error
           path: out
 
+  installer-macos-gate:
+    name: macOS installer needed?
+    # Whether `installer-macos` runs: on an installer tag, and on a pull
+    # request or a push that changed `crates/ritornello-install/`; never for
+    # the application, which does not run on macOS. The rule and its reasons
+    # are in the script, whose `--self-test` (in the `rust` job) proves each
+    # branch of it.
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The base of the diff must be present.
+          fetch-depth: 0
+      - id: decide
+        env:
+          REF: ${{ github.ref }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: bash ./scripts/installer-macos-needed.sh >> "$GITHUB_OUTPUT"
+
   installer-macos:
     name: Installer (${{ matrix.target }})
-    # The macOS legs of `installer`, run only where a macOS installer is
-    # shipped or about to be: on an installer tag, whose `publish-installer`
-    # attaches these archives, and on a finished product tag (`vX.Y.Z`, no
-    # suffix), the check before a stable release. Never on a pull request, a
-    # push to `main` or a prerelease tag: the macOS runners too often were not
-    # there at all (cancelled after 15 minutes with not one step run), and
-    # each time a pull request, Dependabot's included, stayed blocked on a
-    # leg that had tested nothing. Between two stable releases, a change that
-    # breaks the macOS build is therefore first seen on the next stable tag;
-    # the Linux and Windows legs still run on every event.
-    if: ${{ startsWith(github.ref, 'refs/tags/installer-v') || (startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')) }}
+    # The macOS legs of `installer`, run only when `installer-macos-gate` says
+    # so: the macOS runners too often were not there at all (cancelled after
+    # 15 minutes with not one step run), and each time a pull request about
+    # the application, Dependabot's included, stayed blocked on a leg that
+    # tested nothing. A macOS breakage coming from elsewhere (a dependency,
+    # a workspace crate the installer uses) is found, and fixed at once, the
+    # next time the installer's own crate changes or it is tagged.
+    needs: installer-macos-gate
+    if: ${{ needs.installer-macos-gate.outputs.run == 'true' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -424,21 +445,24 @@ jobs:
     #
     # `always()` so that a failed or cancelled leg makes THIS job fail rather
     # than be skipped: a skipped required check counts as passing. The macOS
-    # job alone may be `skipped`, which is its `if:` saying "not this event";
-    # where it runs, it must succeed like the others.
+    # job alone may be `skipped`, which is its gate saying "not this event";
+    # the gate itself must succeed (a failed gate also skips the macOS job),
+    # and where the macOS job runs it must succeed like the others.
     if: always()
-    needs: [installer, installer-macos]
+    needs: [installer, installer-macos-gate, installer-macos]
     runs-on: ubuntu-latest
     steps:
       - name: Every installer leg passed
         env:
           RESULT: ${{ needs.installer.result }}
+          GATE: ${{ needs.installer-macos-gate.result }}
           MACOS: ${{ needs.installer-macos.result }}
         # A block scalar: on a plain `run:` line, the `: ` inside the message
         # is read by YAML as a new key, and the whole workflow fails to load
         # (measured on this very job's first push).
         run: |
           test "$RESULT" = success || { echo "installer legs: $RESULT" >&2; exit 1; }
+          test "$GATE" = success || { echo "macOS gate: $GATE" >&2; exit 1; }
           case "$MACOS" in
             success|skipped) ;;
             *) echo "installer macOS legs: $MACOS" >&2; exit 1 ;;
