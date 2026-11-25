@@ -297,10 +297,15 @@ request — the last three jobs below only on a tag:
   journeys really play), Playwright on chromium; the report is uploaded on
   failure;
 - `installer` — on every event, once per workstation system (Linux musl
-  x86_64 and aarch64, Windows, macOS Apple Silicon, and macOS Intel built
-  only): clippy, the tests of `ritornello-install` alone, a release build,
-  and its archive uploaded as an artifact; `installer-ok` ("Installer (all
-  targets)") is the single check that stands for the five, meant to be
+  x86_64 and aarch64, Windows): clippy, the tests of `ritornello-install`
+  alone, a release build, and its archive uploaded as an artifact.
+  `installer-macos` runs the same steps for macOS Apple Silicon and macOS
+  Intel (built only), but **only on an `installer-vX.Y.Z` tag and on a
+  finished product tag `vX.Y.Z`**: the macOS runners were too often missing
+  for it to gate every pull request, so a change that breaks the macOS build
+  between two stable releases is first seen on the next stable tag.
+  `installer-ok` ("Installer (all targets)") is the single check that stands
+  for all of them (the macOS job may be skipped, not fail), meant to be
   required by branch protection. `aws-lc-sys` (rustls's crypto provider)
   compiles C there, with `musl-gcc` on the Linux legs. On x86_64 Windows it
   also needs assembly, and building there (the runner, or natively on a
