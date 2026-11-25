@@ -445,8 +445,15 @@ describe('drag', () => {
     await nextTick()
     // Three panels: a previous page (empty on the first), this one, the next.
     expect(w.findAll('[data-preset-panel]')).toHaveLength(3)
-    expect(w.get('[data-preset-track]').attributes('style')).toContain('width: 300%')
+    // The pages are as far apart as the grid's two columns (gap-2 = 0.5rem),
+    // the middle one in view.
+    const track = w.get('[data-preset-track]').attributes('style')
+    expect(track).toContain('gap: 0.5rem')
+    expect(track).toContain('translateX(calc(-100% - 0.5rem')
     expect(w.findAll('[data-preset-button]')).toHaveLength(20)
+    // Every panel packs its rows at the top: the last page, three tiles here,
+    // must not spread them over the height of the full page beside it.
+    for (const panel of w.findAll('[data-preset-panel]')) expect(panel.classes()).toContain('content-start')
   })
 
   it('a move under the swipe ratio does not start a drag', async () => {
@@ -468,7 +475,7 @@ describe('drag', () => {
     await nextTick()
     // Still on page 1 while the track settles onto the next one.
     expect(w.get('[data-preset-window]').text()).toBe('1–10 of 23')
-    expect(w.get('[data-preset-track]').attributes('style')).toContain('width: 300%')
+    expect(w.get('[data-preset-track]').attributes('style')).toContain('translateX(calc(-200% - 2 * 0.5rem')
     await settle()
     expect(w.get('[data-preset-window]').text()).toBe('11–20 of 23')
     expect(w.findAll('[data-preset-panel]')).toHaveLength(1)

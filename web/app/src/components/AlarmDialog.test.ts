@@ -204,4 +204,13 @@ describe('AlarmDialog', () => {
     await flushPromises()
     expect(el('[data-alarm-day="saturday"]')!.getAttribute('aria-pressed')).toBe('false')
   })
+
+  it('moves the volume by 5 %, and shows a volume saved off-step on the nearest step', async () => {
+    const w = mountDialog(existing({ volume: 37 }))
+    await flushPromises()
+    expect(w.findComponent(Slider).props('step')).toBe(5)
+    expect(el('[data-alarm-volume-value]')!.textContent).toBe('35')
+    await click('[data-alarm-save]')
+    expect(saved(w)[0]!.volume).toBe(35)
+  })
 })

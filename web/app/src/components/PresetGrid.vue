@@ -154,14 +154,19 @@ const settling = ref<Settle | null>(null)
 let settleTimer: ReturnType<typeof setTimeout> | undefined
 onBeforeUnmount(() => clearTimeout(settleTimer))
 
-// Three pages wide while dragging, the current page in the middle: -33.3333%
-// of that track is one page, so the middle page sits in view and a neighbour
-// is revealed on either side.
+// While dragging, the track lays the three pages side by side, the current one
+// in the middle, PAGE_GAP apart — the gap between the grid's two columns, so
+// the seam between two pages reads like the one between two columns. Each
+// panel is as wide as the frame, and so is the track itself: a translateX of
+// -100% is exactly one page, and the gaps are added on top.
+const PAGE_GAP = '0.5rem'
 const trackStyle = computed(() => {
   if (dragOffset.value === null) return undefined
-  const base = settling.value === 'next' ? '-66.6667%' : settling.value === 'previous' ? '0%' : '-33.3333%'
+  const base = settling.value === 'next' ? `-200% - 2 * ${PAGE_GAP}`
+    : settling.value === 'previous' ? '0%'
+    : `-100% - ${PAGE_GAP}`
   const px = settling.value === null ? dragOffset.value : 0
-  return { width: '300%', transform: `translateX(calc(${base} + ${px}px))` }
+  return { gap: PAGE_GAP, transform: `translateX(calc(${base} + ${px}px))` }
 })
 const panels = computed(() => {
   if (listMode.value) return [allPresets.value]
@@ -289,13 +294,17 @@ const dimmed = computed(() => unavailable('Select', props.state))
            name, and the same grid on the phone and in the half-width of the PC.
            List: one column in a scrolling frame, every preset. -->
       <!-- The frame is the scroller in list mode, and the window on the pages
-           in pages mode. The list's scrollbar is inset from the card's right
-           edge (`mr-2`), so it does not sit flush against it. -->
+           in pages mode. In the list the frame reaches into the card's right
+           padding (`-mr-4`) and pads its content back (`pr-4`): the tiles keep
+           their width and the scrollbar sits clear of them, in the margin.
+           In pages mode the panels of a drag are packed at the top
+           (`content-start`): a short last page keeps its rows together rather
+           than spreading them over the height of a full neighbour. -->
       <div
         ref="listFrame"
         :data-preset-list="listMode ? '' : undefined"
         :class="listMode
-          ? 'relative mr-2 max-h-[min(60vh,32rem)] overflow-y-auto p-1'
+          ? 'relative -mr-4 max-h-[min(60vh,32rem)] overflow-y-auto p-1 pr-4'
           : 'overflow-hidden'"
       >
         <div
@@ -307,7 +316,7 @@ const dimmed = computed(() => unavailable('Select', props.state))
             v-for="(group, i) in panels"
             :key="i"
             :data-preset-panel="listMode ? undefined : i"
-            :class="listMode ? 'grid grid-cols-1 gap-2' : ['grid shrink-0 grid-cols-2 gap-2', dragOffset === null ? 'w-full' : 'w-1/3']"
+            :class="listMode ? 'grid grid-cols-1 gap-2' : 'grid w-full shrink-0 grid-cols-2 content-start gap-2'"
           >
             <Button
               v-for="n in group"
