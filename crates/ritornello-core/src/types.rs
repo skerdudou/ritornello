@@ -26,7 +26,19 @@ pub enum Event {
     /// `lyrics` are the words embedded in those same tags (see
     /// `mpv::file_lyrics`). Emitted when either half is present; `track`
     /// may then be `None` for a file whose only tag is its lyrics.
-    FileTags { track: Option<Box<ritornello_proto::Track>>, lyrics: Option<ritornello_proto::Lyrics> },
+    ///
+    /// `path` is mpv's `path` when the tags were reported: which file they
+    /// describe. mpv reports property changes apart from its `start-file`
+    /// events, so the tags of the file it just left can reach the core
+    /// after the next file started — measured on the device: "next" then
+    /// "previous" on a share too slow to read, and the previous track was
+    /// described with the next one's tags. `None` when mpv has reported no
+    /// path yet (and in tests that do not care).
+    FileTags {
+        track: Option<Box<ritornello_proto::Track>>,
+        lyrics: Option<ritornello_proto::Lyrics>,
+        path: Option<String>,
+    },
     /// mpv's `file-loaded` IPC event: documented (read from mpv's own
     /// manual, not measured against a real running mpv — no session
     /// available to confirm it) as sent "after a file has been loaded and

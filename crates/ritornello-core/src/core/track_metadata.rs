@@ -263,8 +263,8 @@ impl<P: Player> Core<P> {
         let Some(file) = read.file else {
             self.media_read_failed = true;
             tracing::info!("declared file: {} unread, mpv's own tags describe it", read.path);
-            if let Some((track, lyrics)) = self.held_file_tags.take() {
-                self.handle_file_tags(track, lyrics);
+            if let Some((from, track, lyrics)) = self.held_file_tags.take() {
+                self.handle_file_tags_from(from, track, lyrics);
             }
             return;
         };
@@ -504,17 +504,36 @@ impl<P: Player> Core<P> {
     /// follow (`media_read_failed`). What has no declared file — an Ogg
     /// stream's Vorbis comments, a Source that predates source 1.4 — keeps
     /// this layer as it always was.
-    pub(super) fn handle_file_tags(
+    ///
+    /// `from` is the file the tags came from (`Event::FileTags::path`).
+    /// **Tags of another file never describe a declared one.** While a file
+    /// is declared, mpv's tags are held whatever file they came from — the
+    /// next file's may arrive before the Source declares it — and judged
+    /// when used: after a failed read they describe the track only if they
+    /// came from its declared file, and so for the tags that follow. An
+    /// unknown origin (`None`) is taken as before. Measured on the device:
+    /// "next" then "previous" on a share too slow to answer, the previous
+    /// track declared at once while mpv was still opening the next one,
+    /// whose tags then arrived, were held, and described the wrong track
+    /// once the declared read failed.
+    pub(super) fn handle_file_tags_from(
         &mut self,
+        from: Option<String>,
         track: Option<ritornello_proto::Track>,
         lyrics: Option<ritornello_proto::Lyrics>,
     ) {
         if self.standby || !self.playback {
             return;
         }
-        if self.media_path.is_some() && !self.media_read_failed {
-            self.held_file_tags = Some((track, lyrics));
-            return;
+        if let Some(declared) = self.media_path.as_deref() {
+            if !self.media_read_failed {
+                self.held_file_tags = Some((from, track, lyrics));
+                return;
+            }
+            if let Some(other) = from.as_deref().filter(|p| *p != declared) {
+                tracing::info!("mpv's tags of {other} not shown: {declared} is the file playing");
+                return;
+            }
         }
         let title_before = self.title_before_frame();
         // Both applied before either is judged: a `||` would skip the lyrics
@@ -1981,7 +2000,7 @@ mod tests {
             origin: Some(crate::metadata::ORIGIN_TAGS.into()),
             ..Default::default()
         };
-        core.handle_event(Event::FileTags { track: Some(Box::new(mpv_b)), lyrics: None }).await;
+        core.handle_event(Event::FileTags { track: Some(Box::new(mpv_b)), lyrics: None, path: None }).await;
         assert_eq!(
             core.player_state().track.cover_href.as_deref(),
             Some(&format!("/api/cover/{key_a}")[..]),
@@ -2021,7 +2040,7 @@ mod tests {
             origin: Some(crate::metadata::ORIGIN_TAGS.into()),
             ..Default::default()
         };
-        core.handle_event(Event::FileTags { track: Some(Box::new(mpv_b)), lyrics: None }).await;
+        core.handle_event(Event::FileTags { track: Some(Box::new(mpv_b)), lyrics: None, path: None }).await;
         let read = next_read(&mut rx).await.expect("B's read");
         core.file_read_arrived(read).await;
 
@@ -2066,6 +2085,14 @@ mod tests {
 
     /// A read built by hand: what `file_read_arrived` judges is the identity
     /// and the path, and these tests need no ffmpeg to prove it.
+    impl<P: crate::player::Player> Core<P> {
+        /// Tags of an unknown origin, as the tests that do not care about it
+        /// send them: taken as they always were.
+        fn handle_file_tags(&mut self, track: Option<ritornello_proto::Track>, lyrics: Option<ritornello_proto::Lyrics>) {
+            self.handle_file_tags_from(None, track, lyrics);
+        }
+    }
+
     fn read_of(identity: serde_json::Value, path: &str, title: &str) -> FileRead {
         FileRead {
             identity,
@@ -2141,6 +2168,55 @@ mod tests {
         // The ones that follow pass too.
         core.handle_file_tags(Some(song("Corrected by mpv")), None);
         assert_eq!(core.player_state().track.title.as_deref(), Some("Corrected by mpv"));
+    }
+
+    /// **The defect measured on the device** (2026-11-23, a share too slow to
+    /// answer): "next" then "previous". The Source declared the previous
+    /// track at once; mpv, still opening the next file, reported that file's
+    /// tags after. They were held under the declared file, and when its read
+    /// failed they described it — the screen named an ONEUS song over a
+    /// children's song. Tags of another file are not the declared file's;
+    /// its own, arriving next, are.
+    ///
+    /// **[MUTATION]** the origin no longer compared when the held tags are
+    /// replayed (`file_read_arrived` passing `None`) → the first assertion
+    /// fires; the comparison removed from `handle_file_tags_from` after a
+    /// failed read → the second fires.
+    #[tokio::test]
+    async fn tags_mpv_reported_for_another_file_never_describe_the_declared_one() {
+        let (mut core, _state_rx, mut rx, tmp) = test_core_with_file_read();
+        let declared = tmp.path().join("grabouilla.m4a").to_string_lossy().into_owned();
+        let other = tmp.path().join("same-scent.mp3").to_string_lossy().into_owned();
+        let song = |title: &str| Some(Box::new(ritornello_proto::Track { title: Some(title.into()), ..Default::default() }));
+        core.playback = true;
+        core.handle_source_update("radio", plays_file(serde_json::json!({"path": declared}), &declared));
+        core.handle_event(Event::FileTags { track: song("Same Scent"), lyrics: None, path: Some(other.clone()) }).await;
+        let read = next_read(&mut rx).await.expect("the declared file's read");
+        assert!(read.file.is_none(), "the share did not answer");
+        core.file_read_arrived(read).await;
+        assert_eq!(core.player_state().track.title, None, "the other file's held tags described the declared one");
+        // After the failure, late tags of the other file are refused too…
+        core.handle_event(Event::FileTags { track: song("Same Scent"), lyrics: None, path: Some(other) }).await;
+        assert_eq!(core.player_state().track.title, None, "the other file's late tags described the declared one");
+        // …and the declared file's own, from mpv, describe it.
+        core.handle_event(Event::FileTags { track: song("Grabouilla"), lyrics: None, path: Some(declared) }).await;
+        assert_eq!(core.player_state().track.title.as_deref(), Some("Grabouilla"));
+    }
+
+    /// The race the held tags exist for still holds with their origin known:
+    /// mpv reports the declared file's tags while its read is in flight, the
+    /// read fails, and they describe it.
+    #[tokio::test]
+    async fn tags_held_from_the_declared_file_still_describe_it_after_a_failed_read() {
+        let (mut core, _state_rx, mut rx, tmp) = test_core_with_file_read();
+        let declared = tmp.path().join("gone.mp3").to_string_lossy().into_owned();
+        core.playback = true;
+        core.handle_source_update("radio", plays_file(serde_json::json!({"path": declared}), &declared));
+        let track = Some(Box::new(ritornello_proto::Track { title: Some("Its own".into()), ..Default::default() }));
+        core.handle_event(Event::FileTags { track, lyrics: None, path: Some(declared) }).await;
+        let read = next_read(&mut rx).await.expect("the declared file's read");
+        core.file_read_arrived(read).await;
+        assert_eq!(core.player_state().track.title.as_deref(), Some("Its own"));
     }
 
     /// mpv's held tags describe the file it holds: once it starts loading

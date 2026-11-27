@@ -835,7 +835,7 @@ mod tests {
     /// The radio announcing its titles through its tags (an Ogg stream).
     fn tags_titled(title: &str, album: &str) -> Event {
         let track = ritornello_proto::Track { title: Some(title.into()), album: Some(album.into()), ..Default::default() };
-        Event::FileTags { track: Some(Box::new(track)), lyrics: None }
+        Event::FileTags { track: Some(Box::new(track)), lyrics: None, path: None }
     }
 
     #[tokio::test(start_paused = true)]

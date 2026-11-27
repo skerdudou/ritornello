@@ -536,12 +536,45 @@ describe('PlayerCard', () => {
     await w.get('[data-cover-enlarge]').trigger('click')
     const img = document.body.querySelector('[data-cover-enlarged] img')
     expect(img).not.toBeNull()
+    // The full size fails: the thumbnail is tried, still waiting…
     img!.dispatchEvent(new Event('error'))
+    await nextTick()
+    expect(document.body.querySelector('[data-cover-enlarged-loading]')).not.toBeNull()
+    // …and the thumbnail fails too: the wait ends.
+    document.body.querySelector('[data-cover-enlarged] img')!.dispatchEvent(new Event('error'))
     await nextTick()
     expect(document.body.querySelector('[data-cover-enlarged-loading]')).toBeNull()
     // The overlay itself stays: the reader asked for it, and the alternative
     // text of a broken image is more honest than a veil that never lifts.
     expect(document.body.querySelector('[data-cover-enlarged]')).not.toBeNull()
+    w.unmount()
+  })
+
+  it('shows the thumbnail enlarged when the full size cannot be served, and tries the full size again on the next open', async () => {
+    // Measured on the device: the share went down under a playing file, the
+    // full size answered 404 ("illisible") while the square still showed the
+    // thumbnail. The enlarged view falls back to that thumbnail.
+    const w = mount(PlayerCard, {
+      props: { state: full({ title: 'So What', cover_href: '/api/cover/1a2b' }), seekStep: 10 },
+      attachTo: document.body,
+    })
+    const enlargedImg = () => document.body.querySelector<HTMLImageElement>('[data-cover-enlarged] img')!
+    await w.get('[data-cover-enlarge]').trigger('click')
+    expect(enlargedImg().getAttribute('src')).toBe('/api/cover/1a2b')
+    enlargedImg().dispatchEvent(new Event('error'))
+    await nextTick()
+    expect(enlargedImg().getAttribute('src')).toBe(w.get('[data-cover-image] img').attributes('src'))
+    expect(enlargedImg().getAttribute('src')).toContain('size=thumbnail')
+    expect(enlargedImg().hasAttribute('data-cover-enlarged-fallback')).toBe(true)
+    enlargedImg().dispatchEvent(new Event('load'))
+    await nextTick()
+    expect(document.body.querySelector('[data-cover-enlarged-loading]')).toBeNull()
+
+    // Closed and opened again: the share may be back, the full size is asked first.
+    document.body.querySelector<HTMLElement>('[data-cover-close]')!.click()
+    await nextTick()
+    await w.get('[data-cover-enlarge]').trigger('click')
+    expect(enlargedImg().getAttribute('src')).toBe('/api/cover/1a2b')
     w.unmount()
   })
 
