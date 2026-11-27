@@ -170,6 +170,27 @@ const enlarged = ref(false)
  */
 const enlargedLoading = ref(false)
 /**
+ * The full size failed: the enlarged view shows the thumbnail instead.
+ *
+ * Measured on the device: the share went down under a playing file (mpv
+ * plays it from its buffer), the core answered the full size `404`, and the
+ * enlarged view showed nothing while the square still showed the picture
+ * from the thumbnail it already held. The thumbnail is smaller, but it is
+ * the same picture and it is there — better than an empty veil. Tried once:
+ * if the thumbnail fails too, the veil just stops waiting.
+ */
+const enlargedFallback = ref(false)
+const enlargedSrc = computed(() =>
+  enlargedFallback.value ? (thumbnailHref.value ?? '') : (props.state?.cover_href ?? ''),
+)
+function onEnlargedError() {
+  if (!enlargedFallback.value && thumbnailHref.value) {
+    enlargedFallback.value = true
+    return
+  }
+  enlargedLoading.value = false
+}
+/**
  * Opens the full-screen view and arms the loading indicator.
  *
  * Set unconditionally on every open, not only the first one: the full size
@@ -180,6 +201,8 @@ function openEnlarged() {
   zoom.reset()
   enlarged.value = true
   enlargedLoading.value = true
+  // Each opening tries the full size again: the share may be back.
+  enlargedFallback.value = false
 }
 /** The overlay (the zoom's viewport) and the enlarged `<img>` in it. */
 const overlayEl = ref<HTMLElement | null>(null)
@@ -542,14 +565,15 @@ const emit = defineEmits<{ seek: [seconds: number] }>()
              the image must follow them, not lag. -->
         <img
           ref="enlargedImg"
-          :src="state?.cover_href ?? ''"
+          :src="enlargedSrc"
           :alt="t('cover_alt')"
           draggable="false"
           class="max-h-full max-w-full select-none rounded-lg object-contain shadow-2xl"
           :class="zoom.gesturing.value ? '' : 'transition-transform duration-150'"
           :style="{ transform: zoom.transform.value }"
+          :data-cover-enlarged-fallback="enlargedFallback ? '' : undefined"
           @load="enlargedLoading = false; zoom.reclamp()"
-          @error="enlargedLoading = false"
+          @error="onEnlargedError"
         />
         <!-- The full size is now fetched on demand (Task 8): it can take a
              moment, and a plain dark veil with nothing in it reads as a bug.

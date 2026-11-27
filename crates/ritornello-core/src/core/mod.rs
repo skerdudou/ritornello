@@ -481,7 +481,13 @@ pub struct Core<P: Player> {
     /// very race the declared read closes — and forgotten when mpv starts
     /// loading another file (`Event::FileStarting`), so they only ever
     /// describe the file mpv holds.
-    held_file_tags: Option<(Option<ritornello_proto::Track>, Option<ritornello_proto::Lyrics>)>,
+    ///
+    /// **With the file they came from** (mpv's `path`, `None` when unknown):
+    /// the reverse race exists too. Declared at once on "previous", the
+    /// track was described with the tags mpv reported next, late, for the
+    /// file it was still opening on a slow share — measured on the device.
+    /// They describe the track only when they came from its declared file.
+    held_file_tags: Option<(Option<String>, Option<ritornello_proto::Track>, Option<ritornello_proto::Lyrics>)>,
     /// Circuit breaker that bounds the `lofty` call, strictly blocking and
     /// potentially on a network share: see `health.rs` and the comment on
     /// `spawn_file_read`.

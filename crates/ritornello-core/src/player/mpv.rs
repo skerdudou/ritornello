@@ -230,6 +230,18 @@ impl MpvIpc {
                         _ => None,
                         }
                     };
+                    // The file the tags describe: mpv's `path` as last
+                    // reported, observed **before** `metadata` (see
+                    // `OBSERVED`) so that a batch carrying both has already
+                    // moved it to the file the tags belong to.
+                    let ev = match ev {
+                        Some(Event::FileTags { track, lyrics, .. }) => Some(Event::FileTags {
+                            track,
+                            lyrics,
+                            path: (!path.is_empty()).then(|| path.clone()),
+                        }),
+                        other => other,
+                    };
                     if let Some(ev) = ev {
                         // `mpsc` with no loss: a full channel means
                         // backpressure on this pump (the socket's readback
@@ -745,7 +757,7 @@ pub fn file_lyrics(data: &Value) -> Option<Lyrics> {
 pub fn file_tags_event(data: &Value) -> Option<Event> {
     let track = file_tags(data).map(Box::new);
     let lyrics = file_lyrics(data);
-    (track.is_some() || lyrics.is_some()).then_some(Event::FileTags { track, lyrics })
+    (track.is_some() || lyrics.is_some()).then_some(Event::FileTags { track, lyrics, path: None })
 }
 
 /// What the core reads, itself, from a local file a Source declared
@@ -1179,14 +1191,21 @@ pub const YTDL_NOWHERE: &str = "/bin/false";
 /// stream stalled. mpv's `path` no longer tells the core which local file to
 /// describe — the Source declares it with the identity
 /// (`SourceMessage::media_path`), and the core never interprets the opaque
-/// identity to derive one.
+/// identity to derive one. It does say **which file a set of tags came
+/// from** (`Event::FileTags::path`), so that tags reported late for the file
+/// mpv left are not taken for those of the file declared now.
+///
+/// **`path` comes before `metadata`**: mpv reports the changes of one update
+/// in the order the properties were observed, so a batch carrying both moves
+/// the pump's `path` before the tags arrive, and they are labelled with
+/// their own file (`a_new_file_s_tags_are_labelled_with_that_file`).
 const OBSERVED: [&str; 7] = [
+    "path",
     "media-title",
     "metadata",
     "idle-active",
     "playlist-pos",
     "chapter",
-    "path",
     "paused-for-cache",
 ];
 
@@ -1766,6 +1785,58 @@ pub(crate) mod tests {
         assert_eq!(rx.recv().await.unwrap(), Event::TrackChanged(3));
     }
 
+    /// Tags are labelled with the file mpv reported last. The sequence is
+    /// the one mpv 0.37 sent for a "next" in a two-file m3u, `path` observed
+    /// before `metadata` (measured in WSL, 2026-11-27): `start-file`, the new
+    /// `path` and `metadata` cleared in one batch, `file-loaded`, then the
+    /// new file's tags.
+    ///
+    /// **[MUTATION]** `metadata` observed before `path` → the order test
+    /// below fires; the label not set in the pump → this one does.
+    #[tokio::test]
+    async fn a_new_file_s_tags_are_labelled_with_that_file() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let (tx, mut rx) = mpsc::channel(32);
+        let _ipc = MpvIpc::from_stream(client, tx);
+        let (_r, mut w) = server.into_split();
+        for line in [
+            r#"{"event":"start-file"}"#,
+            r#"{"event":"property-change","name":"path","data":"/music/a.m4a"}"#,
+            r#"{"event":"file-loaded"}"#,
+            r#"{"event":"property-change","name":"metadata","data":{"title":"FIRST"}}"#,
+            r#"{"event":"end-file"}"#,
+            r#"{"event":"start-file"}"#,
+            r#"{"event":"property-change","name":"path","data":"/music/b.m4a"}"#,
+            r#"{"event":"property-change","name":"metadata"}"#,
+            r#"{"event":"file-loaded"}"#,
+            r#"{"event":"property-change","name":"metadata","data":{"title":"SECOND"}}"#,
+        ] {
+            w.write_all(format!("{line}\n").as_bytes()).await.unwrap();
+        }
+        let mut labelled = Vec::new();
+        while labelled.len() < 2 {
+            let ev = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await.unwrap().unwrap();
+            if let Event::FileTags { track, path, .. } = ev {
+                labelled.push((track.and_then(|t| t.title), path));
+            }
+        }
+        assert_eq!(
+            labelled,
+            [
+                (Some("FIRST".to_string()), Some("/music/a.m4a".to_string())),
+                (Some("SECOND".to_string()), Some("/music/b.m4a".to_string())),
+            ]
+        );
+    }
+
+    /// mpv reports one update's changes in observation order: `path` first
+    /// moves the label before a batch's `metadata` (see `OBSERVED`).
+    #[test]
+    fn path_is_observed_before_metadata() {
+        let at = |name: &str| OBSERVED.iter().position(|p| *p == name).unwrap();
+        assert!(at("path") < at("metadata"));
+    }
+
     #[tokio::test]
     async fn the_first_observed_idle_is_not_a_stop() {
         // mpv is launched as an idle daemon, and `observe_property`
@@ -1975,16 +2046,16 @@ pub(crate) mod tests {
     fn file_tags_are_emitted_for_text_or_lyrics_alone() {
         let lrc = "[00:01.00]Hi";
         let both = file_tags_event(&serde_json::json!({"title":"T","LYRICS":lrc})).expect("emitted");
-        let Event::FileTags { track, lyrics } = both else { panic!("{both:?}") };
+        let Event::FileTags { track, lyrics, .. } = both else { panic!("{both:?}") };
         assert_eq!(track.and_then(|t| t.title).as_deref(), Some("T"));
         assert!(lyrics.is_some());
         // A file whose only tag is its words still reaches the core.
         let alone = file_tags_event(&serde_json::json!({"LYRICS":lrc})).expect("emitted");
-        assert!(matches!(alone, Event::FileTags { track: None, lyrics: Some(_) }), "{alone:?}");
+        assert!(matches!(alone, Event::FileTags { track: None, lyrics: Some(_), .. }), "{alone:?}");
         // Text without lyrics: emitted with `None`, which clears the words a
         // previous song of the same stream carried.
         let text = file_tags_event(&serde_json::json!({"title":"T2"})).expect("emitted");
-        assert!(matches!(text, Event::FileTags { track: Some(_), lyrics: None }), "{text:?}");
+        assert!(matches!(text, Event::FileTags { track: Some(_), lyrics: None, .. }), "{text:?}");
         assert_eq!(file_tags_event(&serde_json::json!({"encoder":"Lavf"})), None);
     }
 

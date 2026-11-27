@@ -77,7 +77,7 @@ impl<P: Player> Core<P> {
             Event::IcyTitle(title) => self.handle_icy_title(title),
             // Same status as ICY with respect to `retry_count`: metadata does
             // not prove that playback is alive.
-            Event::FileTags { track, lyrics } => self.handle_file_tags(track.map(|t| *t), lyrics),
+            Event::FileTags { track, lyrics, path } => self.handle_file_tags_from(path, track.map(|t| *t), lyrics),
             // The player changed track on its own: end of a disc track, no
             // key pressed. The core knows it (mpv tells it) but cannot fix
             // the identity — it is opaque to it. So it tells the Source,
